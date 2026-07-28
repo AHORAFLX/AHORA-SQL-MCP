@@ -1,0 +1,10 @@
+# Este repositorio maneja credenciales de base de datos y se despliega en todos los
+# puestos del equipo. Todo cambio requiere revision.
+#
+# TODO: sustituir por el equipo real de GitHub antes del primer push.
+* @AHORAFLX/sc0-infra
+
+# La capa de politica de acceso: quien decide lectura frente a escritura.
+# Cambios aqui afectan a la garantia de que produccion no se escribe.
+/bin/ @AHORAFLX/sc0-infra
+/src/db/safety.js @AHORAFLX/sc0-infra
