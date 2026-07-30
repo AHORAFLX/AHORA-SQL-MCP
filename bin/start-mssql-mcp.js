@@ -46,6 +46,7 @@
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
+const { withDiscoveredPort } = require("./discover-instance");
 
 const USAGE =
   "Uso — elige UNA fuente de conexion:\n" +
@@ -778,6 +779,7 @@ function main() {
 
   const env = cleanEnv(source.kind === "env");
   const resolved = [];
+  const discoveries = [];
   let credentialsInArgv = false;
 
   try {
@@ -829,12 +831,19 @@ function main() {
           );
         }
         const prefix = multi ? `MSSQL_${alias.toUpperCase()}_` : "MSSQL_";
-        const parts =
+        const rawParts =
           source.kind === "credentialsFile"
             ? entry.parts
             : source.kind === "flags"
               ? partsFromFlags(args)
               : parseAdoConnectionString(connString);
+
+        // Si la cadena nombra una instancia local y no trae puerto, se averigua el
+        // puerto real preguntando al sistema. Se hace en cada arranque y no se
+        // escribe en ningun sitio, asi que aguanta los puertos dinamicos y no exige
+        // ni SQL Browser ni permisos de administrador en la maquina del companero.
+        const { parts, discovered } = withDiscoveredPort(rawParts, parseDataSource);
+        if (discovered) discoveries.push({ label, ...discovered });
         // En modo simple la clave es `maindb`, asi que `--port maindb:1433` tambien
         // funciona para una sola conexion.
         const info = applyConnection(
@@ -892,10 +901,17 @@ function main() {
   for (const dir of resolvedSqlDirs) {
     console.error(`             ${dir} (--allow-sql-dir)`);
   }
+  for (const d of discoveries) {
+    console.error(
+      `  [${d.label}] instancia ${d.instanceName} resuelta sola: ${d.host},${d.port}` +
+        (d.onlyLoopback ? "  (solo escucha en loopback)" : "")
+    );
+  }
   if (resolved.some((r) => r.viaInstance)) {
     console.error(
-      "  Resolucion por instancia nombrada: requiere el servicio SQL Browser activo.\n" +
-        "  Si esta parado, indica el puerto con --port."
+      "  Resolucion por instancia nombrada: requiere el servicio SQL Browser activo,\n" +
+        "  o el protocolo TCP/IP habilitado en esa instancia. Si falla, indica el\n" +
+        "  puerto con --port <alias>:<puerto>."
     );
   }
   if (credentialsInArgv) {

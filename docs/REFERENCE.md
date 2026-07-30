@@ -66,6 +66,29 @@ in a subdirectory — so `installer/permissions.js` resolves the repo root rathe
 nobody reads. This is the same file and format Claude Code itself writes when you answer "don't ask
 again", so the merge is additive and idempotent.
 
+### Local named-instance discovery
+
+tedious speaks TCP only, so reaching a named instance needs its port. Both classic answers require
+admin rights on every machine — start the SQL Browser service, or pin a static port in Configuration
+Manager — which does not scale to installing the MCP on many machines one by one.
+
+So `bin/discover-instance.js` asks the OS instead, which needs no privileges: it finds the instance's
+service process and reads the ports it is actually listening on. Three properties make this hold up:
+
+- It runs **at every launch** and is never written into the config, so a **dynamic** port that changes
+  on restart is fine.
+- If the instance listens **only on loopback**, it connects via `127.0.0.1` / `[::1]` instead of the
+  machine name. This is the case a plain `--port` cannot fix: the port is right but nothing is
+  listening on the machine's IPv4 address.
+- A **static port** in the registry wins, since an administrator set it deliberately.
+
+It only applies when the host is this machine (`localhost`, `.`, `(local)`, a loopback address, or the
+machine's own name) and the connection string names an instance with no port. Remote hosts still need
+the SQL Browser or an explicit port. An instance with TCP/IP disabled yields nothing to discover.
+
+`installer/probe.js` runs the same discovery before connecting, so what the installer validates is
+what the server will actually do at runtime.
+
 ### Production guardrail
 
 `--production` marks the connection and is **incompatible with `--allow-writes`**: passing both aborts
@@ -341,7 +364,8 @@ This puts credentials in a file that tends to get committed. Prefer the wrapper.
 
 ```
 bin/
-└── start-mssql-mcp.js    # AHORA policy layer: config file -> env, read/write mode
+├── start-mssql-mcp.js    # AHORA policy layer: config file -> env, read/write mode
+└── discover-instance.js  # local named-instance port discovery, re-run every launch
 installer/
 ├── setup.js              # guided installer (MCP config only): terminal wizard + entry point
 ├── gui.js                # same logic behind a local self-contained HTML form

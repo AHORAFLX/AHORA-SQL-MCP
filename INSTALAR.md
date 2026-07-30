@@ -27,7 +27,7 @@ El paso 1 (skills) se hace con un comando y no tiene más. El paso 2 (el MCP) es
 enjundia, y hay un instalador que lo hace por ti. Ábrelo **desde la carpeta de tu proyecto**:
 
 ```bash
-npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.6.0 ahora-setup
+npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.7.0 ahora-setup
 ```
 
 Se abre un formulario en el navegador: detecta tu `Web.config` o `appsettings.json`, **se conecta de
@@ -98,7 +98,7 @@ Lo único que tienes que cambiar es la ruta del fichero de configuración.
     "mssql": {
       "command": "npx",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.6.0", "start-mssql-mcp",
+        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.7.0", "start-mssql-mcp",
         "--config-file", "C:/ruta/al/proyecto/Web.config",
         "--connection-name", "ConfConnectionString:config",
         "--connection-name", "DataConnectionString:data"
@@ -118,7 +118,7 @@ Igual, pero apuntando a la carpeta que contiene el `appsettings.json` (normalmen
     "mssql": {
       "command": "npx",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.6.0", "start-mssql-mcp",
+        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.7.0", "start-mssql-mcp",
         "--config-file", "C:/ruta/al/proyecto/Backend/conf",
         "--connection-name", "ConfConnectionString:config",
         "--connection-name", "DataConnectionString:data"
@@ -146,7 +146,7 @@ Los datos van en `env`, nunca en los argumentos: `.mcp.json` se commitea.
     "mssql": {
       "command": "npx",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.6.0", "start-mssql-mcp",
+        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.7.0", "start-mssql-mcp",
         "--from-env"
       ],
       "env": {
@@ -208,7 +208,8 @@ Los datos van en `env`, nunca en los argumentos: `.mcp.json` se commitea.
 | `Permission denied ... Blocked by classifier` al usar una herramienta | Es la capa de permisos de Claude Code en modo auto, no el MCP. El instalador puede añadir las reglas; o añádelas a mano en `permissions.allow` de `.claude/settings.local.json`: `mcp__mssql__list_*`, `mcp__mssql__describe_*`, `mcp__mssql__execute_read_query` |
 | `No se encontro la cadena de conexion`, con el nombre correcto | .NET Core: la cadena está vacía en `appsettings.json` y tu entorno no es `Development`. Añade `"--environment", "<nombre>"`. El error te dice en qué ficheros ha buscado |
 | El error lista nombres de conexión distintos a los que pusiste | Los nombres varían entre proyectos. Usa los que te lista |
-| Timeout al conectar, con instancia nombrada | Dos causas posibles: el servicio **SQL Browser parado**, o el protocolo **TCP/IP desactivado** en esa instancia. **Que SSMS conecte no lo descarta**: en local SSMS usa memoria compartida y este driver es solo TCP. Revisa las dos en SQL Server Configuration Manager; con puerto estático, `"--port", "<puerto>"` y ya |
+| Timeout al conectar, con instancia nombrada **local** | El wrapper intenta averiguar el puerto solo. Si aun así falla, esa instancia no tiene **TCP/IP a la escucha**: habilítalo en SQL Server Configuration Manager (Protocolos de `<INSTANCIA>` → TCP/IP) y reinicia el servicio. **Que SSMS conecte no lo descarta**: en local SSMS usa memoria compartida y este driver es solo TCP |
+| Timeout con instancia nombrada **remota** | Ahí no se puede preguntar al sistema: hace falta el servicio **SQL Browser** arrancado en ese servidor, o pasar el puerto con `"--port", "<alias>:<puerto>"` |
 | `Integrated Security=True` | No está soportado: la cadena necesita usuario y contraseña |
 
 Para cualquier otra cosa, pide al agente que use la skill **`setup-mcp-sql`**: te hace las preguntas

@@ -39,7 +39,7 @@ const PARTS = {
 
 test("probeConnection: conexion buena devuelve la BD real y la version", async () => {
   const mssql = fakeMssql({ db: "JAPOFISH" });
-  const r = await probeConnection(PARTS, { mssql });
+  const r = await probeConnection(PARTS, { mssql, discover: () => null });
   assert.equal(r.ok, true);
   assert.equal(r.target, "PC_158\\SQL2022");
   assert.equal(r.database, "JAPOFISH", "la BD sale de DB_NAME(), no de lo que se pidio");
@@ -48,7 +48,10 @@ test("probeConnection: conexion buena devuelve la BD real y la version", async (
 });
 
 test("probeConnection: un fallo de conexion es un resultado, no una excepcion", async () => {
-  const r = await probeConnection(PARTS, { mssql: fakeMssql({ failOn: "connect" }) });
+  const r = await probeConnection(PARTS, {
+    mssql: fakeMssql({ failOn: "connect" }),
+    discover: () => null,
+  });
   assert.equal(r.ok, false);
   assert.match(r.error, /Failed to connect/);
   assert.match(r.error, /ESOCKET/);
@@ -56,7 +59,7 @@ test("probeConnection: un fallo de conexion es un resultado, no una excepcion", 
 
 test("probeConnection: cierra el pool aunque falle la consulta", async () => {
   const mssql = fakeMssql({ failOn: "query" });
-  const r = await probeConnection(PARTS, { mssql });
+  const r = await probeConnection(PARTS, { mssql, discover: () => null });
   assert.equal(r.ok, false);
   assert.match(r.error, /Login failed/);
   assert.ok(mssql.events.some((e) => e[0] === "close"));
@@ -72,7 +75,7 @@ test("probeConnection: la contrasena nunca aparece en el error", async () => {
       this.close = async () => {};
     },
   };
-  const r = await probeConnection(PARTS, { mssql });
+  const r = await probeConnection(PARTS, { mssql, discover: () => null });
   assert.equal(r.ok, false);
   assert.ok(!r.error.includes("secreta"), `la contrasena se ha filtrado: ${r.error}`);
   assert.match(r.error, /\*\*\*/);
@@ -80,7 +83,7 @@ test("probeConnection: la contrasena nunca aparece en el error", async () => {
 
 test("probeConnection: unos datos incompletos fallan sin intentar conectar", async () => {
   const mssql = fakeMssql();
-  const r = await probeConnection({ datasource: "PC", initialcatalog: "BD" }, { mssql });
+  const r = await probeConnection({ datasource: "PC", initialcatalog: "BD" }, { mssql, discover: () => null });
   assert.equal(r.ok, false);
   assert.match(r.error, /usuario y contrasena/i);
   assert.ok(!mssql.events.some((e) => e[0] === "connect"), "no debe llegar a conectar");
@@ -88,7 +91,7 @@ test("probeConnection: unos datos incompletos fallan sin intentar conectar", asy
 
 test("probeConnection aplica un timeout acotado, para no colgar una formacion", async () => {
   const mssql = fakeMssql();
-  await probeConnection(PARTS, { mssql, timeoutMs: 1234 });
+  await probeConnection(PARTS, { mssql, timeoutMs: 1234, discover: () => null });
   const [, config] = mssql.events.find((e) => e[0] === "new");
   assert.equal(config.connectionTimeout, 1234);
   assert.equal(config.requestTimeout, 1234);
@@ -108,7 +111,7 @@ test("un timeout contra instancia nombrada sugiere el SQL Browser", async () => 
       this.close = async () => {};
     },
   };
-  const r = await probeConnection(PARTS, { mssql });
+  const r = await probeConnection(PARTS, { mssql, discover: () => null });
   assert.equal(r.ok, false);
   assert.match(r.hint, /SQL Browser/);
   assert.match(r.hint, /--port/);
@@ -125,7 +128,7 @@ test("no se sugiere el SQL Browser cuando no hay instancia nombrada", async () =
   };
   const r = await probeConnection(
     { datasource: "10.0.0.9,1433", initialcatalog: "BD", userid: "sa", password: "x" },
-    { mssql }
+    { mssql, discover: () => null }
   );
   assert.equal(r.ok, false);
   assert.equal(r.hint, undefined, "un host con puerto no tiene nada que ver con SQL Browser");
@@ -140,7 +143,7 @@ test("no se sugiere el SQL Browser si el fallo no es un timeout", async () => {
       this.close = async () => {};
     },
   };
-  const r = await probeConnection(PARTS, { mssql });
+  const r = await probeConnection(PARTS, { mssql, discover: () => null });
   assert.equal(r.hint, undefined, "unas credenciales malas no las arregla SQL Browser");
 });
 

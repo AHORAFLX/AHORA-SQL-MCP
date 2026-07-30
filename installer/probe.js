@@ -12,7 +12,8 @@
  */
 const sqlLib = require("mssql");
 
-const { applyConnection } = require("../bin/start-mssql-mcp");
+const { applyConnection, parseDataSource } = require("../bin/start-mssql-mcp");
+const { withDiscoveredPort } = require("../bin/discover-instance");
 const { loadConfigsFromEnv } = require("../src/config");
 
 const DEFAULT_TIMEOUT_MS = 8000;
@@ -59,7 +60,15 @@ function hintFor({ viaInstance, error }) {
  * adelante (la BD puede estar apagada o hacer falta VPN, y aun asi los datos ser
  * correctos).
  */
-async function probeConnection(parts, { timeoutMs = DEFAULT_TIMEOUT_MS, mssql = sqlLib } = {}) {
+async function probeConnection(rawParts, { timeoutMs = DEFAULT_TIMEOUT_MS, mssql = sqlLib, discover } = {}) {
+  // Se aplica el mismo descubrimiento de instancia local que hara el wrapper al
+  // arrancar: si aqui se probara la conexion por nombre y alli por puerto, la
+  // validacion no diria nada sobre lo que va a pasar de verdad.
+  const { parts, discovered } = withDiscoveredPort(
+    rawParts,
+    parseDataSource,
+    discover ? { discover } : {}
+  );
   const secret = parts.password || parts.pwd;
   let target = "";
   let database = "";
@@ -89,6 +98,7 @@ async function probeConnection(parts, { timeoutMs = DEFAULT_TIMEOUT_MS, mssql = 
       target,
       database: row.db || database,
       version: String(row.version || "").split("\n")[0].trim(),
+      ...(discovered ? { discovered } : {}),
     };
   } catch (err) {
     const error = sanitizeError(err, secret);

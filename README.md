@@ -10,7 +10,7 @@ columnas, vistas y procedimientos **antes** de generar T-SQL, en lugar de supone
 > ti, validando la conexión antes:
 >
 > ```bash
-> npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.6.0 ahora-setup
+> npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.7.0 ahora-setup
 > ```
 
 > **Este repositorio no se instala a mano.** Usa la skill `setup-mcp-sql` del repositorio de
@@ -28,7 +28,7 @@ configuración en proyectos de AHORA.
 Requiere Node 18 o superior.
 
 ```bash
-git clone --branch v1.6.0 --depth 1 https://github.com/AHORAFLX/AHORA-SQL-MCP.git
+git clone --branch v1.7.0 --depth 1 https://github.com/AHORAFLX/AHORA-SQL-MCP.git
 cd AHORA-SQL-MCP
 npm ci
 ```
@@ -195,9 +195,33 @@ tratarlos como TCP acaba en un tiempo de espera que no explica nada.
 
 Si detecta una instancia nombrada y no hay puerto, la pasa como `instanceName`.
 
-**Pero resolver una instancia por nombre exige que el servicio SQL Browser esté arrancado**, que
-es quien traduce el nombre de instancia a su puerto. Suele estar parado. Si lo está, la conexión
-agota el tiempo de espera y el wrapper te lo avisa al arrancar.
+**Si la instancia es de esta misma máquina, el wrapper averigua el puerto él solo.** Le pregunta al
+sistema en qué puerto escucha esa instancia —localiza el proceso del servicio y mira sus puertos a la
+escucha— y conecta por ahí. No necesita permisos de administrador, ni el servicio SQL Browser, ni que
+nadie fije un puerto.
+
+Tres detalles que hacen que esto aguante en cualquier máquina:
+
+- **Se resuelve en cada arranque del MCP**, y no se escribe en la configuración. Por eso funciona
+  aunque el puerto sea **dinámico** y cambie en cada reinicio.
+- Si la instancia **solo escucha en la loopback**, conecta por `127.0.0.1` o `[::1]` en lugar de por
+  el nombre del equipo. Es un caso real, y es el que hace fracasar un `--port` a secas: el puerto es
+  correcto pero en la IPv4 del equipo no escucha nadie.
+- Si hay un **puerto estático** fijado en el registro, gana ese: es el que un administrador ha puesto
+  a propósito.
+
+El banner lo dice cuando ocurre:
+
+```
+[data] instancia SQL2022 resuelta sola: ::1,59212  (solo escucha en loopback)
+```
+
+Queda sin resolver solo si esa instancia **no tiene TCP/IP a la escucha en absoluto** (protocolo
+desactivado), porque entonces no hay ningún puerto que descubrir.
+
+**Para un servidor remoto** no se puede preguntar al sistema, así que ahí resolver una instancia por
+nombre sí **exige que el servicio SQL Browser esté arrancado**. Si está parado, la conexión agota el
+tiempo de espera y el wrapper te lo avisa al arrancar.
 
 **Y hay una segunda causa del mismo síntoma: el protocolo TCP/IP desactivado en esa instancia.**
 En máquinas de desarrollo con varias instancias es habitual que solo una tenga TCP habilitado.
