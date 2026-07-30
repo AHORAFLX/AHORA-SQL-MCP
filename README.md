@@ -38,6 +38,11 @@ expongan como `mcp__mssql__*`, y las skills de SC0 dependen de esos nombres. Ren
 produce ningún error: simplemente las skills dejan de encontrar la base de datos y vuelven a
 generar SQL sin verificar, que es el peor modo de fallo posible.
 
+Hay que elegir **una** fuente de conexión de las cuatro: `--config-file` (Web.config de
+Framework o `appsettings.json` de Core), `--connection-string`, los datos sueltos
+(`--server/--database/--user/--password`) o `--from-env`. Mezclarlas es un error de arranque, no
+hay precedencia que adivinar.
+
 ### Una sola base de datos (solo lectura)
 
 ```json
@@ -77,11 +82,88 @@ herramientas aceptan un parámetro `dbKey` para elegir (`config` o `data`).
 }
 ```
 
+Con una sola conexión la clave es siempre `maindb`, aunque pases alias; el wrapper lo avisa al
+arrancar en vez de ignorarlo en silencio.
+
+### Flexygo migrado a .NET Core: `appsettings.json`
+
+Mismo `--connection-name`, solo cambia el `--config-file`. Puedes apuntar al fichero o
+directamente a la carpeta que lo contiene (normalmente `conf`):
+
+```json
+"args": [
+  "<RUTA>/AHORA-SQL-MCP/bin/start-mssql-mcp.js",
+  "--config-file", "<RUTA_PROYECTO>/Backend/conf",
+  "--connection-name", "ConfConnectionString:config",
+  "--connection-name", "DataConnectionString:data"
+]
+```
+
+**Lo que hay que saber de Core:** en `appsettings.json` las cadenas suelen estar declaradas pero
+**vacías**, y las reales viven en `appsettings.Development.json`. El wrapper aplica la misma
+superposición que ASP.NET Core — `appsettings.<entorno>.json` gana sobre `appsettings.json` — y
+trata una cadena vacía como ausente, así que sigue buscando. El entorno sale de `--environment`,
+o de `ASPNETCORE_ENVIRONMENT`, o es `Development`. Si tu entorno se llama de otra forma:
+
+```json
+"--environment", "Local"
+```
+
+El banner de arranque dice de qué fichero salió cada cadena, y si no encuentra el nombre te lista
+los que sí existen.
+
+### Sin fichero de configuración
+
+Para apuntar a una base de datos suelta, sin Web.config ni appsettings. Tres formas:
+
+```json
+"--connection-string", "Data Source=PC_158\\SQL2022;Initial Catalog=MiBD;User ID=sa;Password=x"
+```
+
+```json
+"--server", "PC_158\\SQL2022", "--database", "MiBD", "--user", "sa", "--password", "x"
+```
+
+Las dos dejan la contraseña en el `.mcp.json` y en el listado de procesos, y el wrapper lo avisa
+al arrancar. Si eso importa — y en un `.mcp.json` que se commitea importa — la tercera forma la
+saca de ahí:
+
+```json
+{
+  "mcpServers": {
+    "mssql": {
+      "command": "node",
+      "args": ["<RUTA>/AHORA-SQL-MCP/bin/start-mssql-mcp.js", "--from-env"],
+      "env": {
+        "MSSQL_SERVER": "PC_158\\SQL2022",
+        "MSSQL_DATABASE": "MiBD",
+        "MSSQL_USER": "sa",
+        "MSSQL_PASSWORD": "x"
+      }
+    }
+  }
+}
+```
+
+`--from-env` es la única excepción al saneado del entorno: deja pasar las `MSSQL_*` de conexión
+porque son justo lo que el cliente aporta. Las dos variables de política —
+`MSSQL_ENABLE_WRITES` y `MSSQL_SQL_DIRS` — se sobrescriben igualmente, así que ni con
+`--from-env` puede el entorno habilitar escrituras. Para multi-BD, usa las
+`MSSQL_<ALIAS>_DATABASE` de siempre.
+
+Con varias `--connection-string` cada una necesita su `--alias` en el mismo orden:
+
+```json
+"--connection-string", "<cadena conf>", "--alias", "config",
+"--connection-string", "<cadena datos>", "--alias", "data"
+```
+
 ### Instancias nombradas (SQL Server local)
 
 El wrapper interpreta el `Data Source` de la cadena de conexión en todos sus formatos:
-`10.0.0.9`, `PC_158\PC_158`, `PC_158,1433`, `(local)`, `.` y el prefijo `tcp:`. Si detecta una
-instancia nombrada, la pasa como `instanceName` y no hace falta configurar nada más.
+`10.0.0.9`, `PC_158\PC_158`, `PC_158,1433`, `PC_158\SQL2022,1433`, `192.168.9.26,1433\AHORA_R`,
+`(local)`, `.` y el prefijo `tcp:`. Si detecta una instancia nombrada, la pasa como `instanceName`
+y no hace falta configurar nada más.
 
 **Pero resolver una instancia por nombre exige que el servicio SQL Browser esté arrancado**, que
 es quien traduce el nombre de instancia a su puerto. Suele estar parado. Si lo está, la conexión

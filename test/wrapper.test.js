@@ -1,13 +1,43 @@
 const test = require("node:test");
 const assert = require("node:assert");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 const {
   parseArgs,
   parseAdoConnectionString,
+  normalizeAdoKey,
   parseDataSource,
   cleanEnv,
   applyConnection,
+  partsFromFlags,
+  readConnString,
+  listConnectionNames,
+  readWebConfigConnections,
+  appSettingsChain,
+  resolveConfigFile,
+  resolveEnvironment,
+  resolveSources,
+  describeEnvConnections,
 } = require("../bin/start-mssql-mcp");
+
+function tempDir(prefix) {
+  return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+}
+
+/** Args por defecto, para poder probar resolveSources con un solo campo puesto. */
+function args(overrides = {}) {
+  return {
+    connections: [],
+    connectionStrings: [],
+    aliases: [],
+    allowWrites: false,
+    fromEnv: false,
+    sqlDirs: [],
+    ...overrides,
+  };
+}
 
 test("parseDataSource: host suelto", () => {
   assert.deepStrictEqual(parseDataSource("10.0.0.9"), {
@@ -29,6 +59,22 @@ test("parseDataSource: host con puerto", () => {
   assert.deepStrictEqual(parseDataSource("PC_158,1433"), {
     host: "PC_158",
     instanceName: undefined,
+    port: "1433",
+  });
+});
+
+test("parseDataSource: HOST,PUERTO\\INSTANCIA (forma real de un Web.config de produccion)", () => {
+  assert.deepStrictEqual(parseDataSource("192.168.9.26,1433\\AHORA_R"), {
+    host: "192.168.9.26",
+    instanceName: "AHORA_R",
+    port: "1433",
+  });
+});
+
+test("parseDataSource: HOST\\INSTANCIA,PUERTO", () => {
+  assert.deepStrictEqual(parseDataSource("PC_158\\SQL2022,1433"), {
+    host: "PC_158",
+    instanceName: "SQL2022",
     port: "1433",
   });
 });
@@ -91,7 +137,47 @@ test("applyConnection: rechaza cadenas sin usuario y contrasena", () => {
 test("parseAdoConnectionString: acepta contrasenas con caracteres especiales", () => {
   const parts = parseAdoConnectionString("Data Source=x;Password=-a123456;User ID=sa");
   assert.strictEqual(parts.password, "-a123456");
-  assert.strictEqual(parts["user id"], "sa");
+  assert.strictEqual(parts.userid, "sa");
+});
+
+test("normalizeAdoKey: las claves con y sin espacios son la misma", () => {
+  assert.strictEqual(normalizeAdoKey("Trust Server Certificate"), "trustservercertificate");
+  assert.strictEqual(normalizeAdoKey("TrustServerCertificate"), "trustservercertificate");
+  assert.strictEqual(normalizeAdoKey("Initial Catalog"), "initialcatalog");
+});
+
+test("applyConnection: reconoce 'Trust Server Certificate' con espacios (forma de Core)", () => {
+  const env = {};
+  const parts = parseAdoConnectionString(
+    "Data Source=PC;Initial Catalog=BD;User ID=sa;Password=x;Encrypt=False;Trust Server Certificate=False"
+  );
+  applyConnection(env, "MSSQL_", parts, "test");
+  assert.strictEqual(env.MSSQL_TRUST_SERVER_CERTIFICATE, "false");
+  assert.strictEqual(env.MSSQL_ENCRYPT, "false");
+});
+
+test("applyConnection: sigue reconociendo la forma sin espacios (Framework)", () => {
+  const env = {};
+  const parts = parseAdoConnectionString(
+    "Data Source=PC;Initial Catalog=BD;Persist Security Info=True;User ID=sa;Password=x;TrustServerCertificate=True"
+  );
+  applyConnection(env, "MSSQL_", parts, "test");
+  assert.strictEqual(env.MSSQL_TRUST_SERVER_CERTIFICATE, "true");
+});
+
+test("partsFromFlags produce las claves que applyConnection espera", () => {
+  const env = {};
+  const parts = partsFromFlags({
+    server: "PC_158\\PC_158",
+    database: "BD",
+    user: "sa",
+    password: "x",
+  });
+  const info = applyConnection(env, "MSSQL_", parts, "flags");
+  assert.strictEqual(env.MSSQL_SERVER, "PC_158");
+  assert.strictEqual(env.MSSQL_INSTANCE_NAME, "PC_158");
+  assert.strictEqual(env.MSSQL_DATABASE, "BD");
+  assert.strictEqual(info.viaInstance, true);
 });
 
 test("parseArgs: recoge conexiones repetidas, puerto y allow-writes", () => {
@@ -135,4 +221,352 @@ test("cleanEnv elimina un MSSQL_SQL_DIRS heredado", () => {
   } finally {
     delete process.env.MSSQL_SQL_DIRS;
   }
+});
+
+test("parseArgs: recoge las fuentes nuevas y el entorno", () => {
+  const a = parseArgs([
+    "--connection-string", "Data Source=A;Initial Catalog=1",
+    "--alias", "config",
+    "--connection-string", "Data Source=B;Initial Catalog=2",
+    "--alias", "data",
+    "--environment", "Staging",
+    "--from-env",
+    "--server", "PC",
+    "--database", "BD",
+    "--user", "sa",
+    "--password", "x",
+    "--encrypt", "false",
+    "--trust-server-certificate", "true",
+  ]);
+  assert.deepStrictEqual(a.connectionStrings, [
+    "Data Source=A;Initial Catalog=1",
+    "Data Source=B;Initial Catalog=2",
+  ]);
+  assert.deepStrictEqual(a.aliases, ["config", "data"]);
+  assert.strictEqual(a.environment, "Staging");
+  assert.strictEqual(a.fromEnv, true);
+  assert.strictEqual(a.server, "PC");
+  assert.strictEqual(a.encrypt, "false");
+  assert.strictEqual(a.trustServerCertificate, "true");
+});
+
+// ── appsettings.json (.NET Core) ──
+
+test("resolveEnvironment: --environment, luego ASPNETCORE_ENVIRONMENT, luego Development", () => {
+  assert.strictEqual(resolveEnvironment("Staging", {}), "Staging");
+  assert.strictEqual(
+    resolveEnvironment(undefined, { ASPNETCORE_ENVIRONMENT: "Production" }),
+    "Production"
+  );
+  assert.strictEqual(resolveEnvironment(undefined, {}), "Development");
+});
+
+/** El caso real de Flexygo Core: declarada y vacia en base, rellena en Development. */
+function coreProject() {
+  const dir = tempDir("wrapper-core-");
+  fs.writeFileSync(
+    path.join(dir, "appsettings.json"),
+    JSON.stringify({
+      ConnectionStrings: { ConfConnectionString: "", DataConnectionString: "" },
+    }),
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(dir, "appsettings.Development.json"),
+    JSON.stringify({
+      ConnectionStrings: {
+        ConfConnectionString:
+          "Data Source=PC\\PC;Initial Catalog=Conf;User ID=sa;Password=x;Trust Server Certificate=True",
+        DataConnectionString:
+          "Data Source=PC\\PC;Initial Catalog=Datos;User ID=sa;Password=x;Trust Server Certificate=True",
+      },
+    }),
+    "utf8"
+  );
+  return dir;
+}
+
+test("readConnString: una cadena vacia en appsettings.json no cuenta, gana appsettings.Development.json", () => {
+  const dir = coreProject();
+  const r = readConnString(path.join(dir, "appsettings.json"), "DataConnectionString");
+  assert.match(r.value, /Initial Catalog=Datos/);
+  assert.strictEqual(path.basename(r.source), "appsettings.Development.json");
+});
+
+test("readConnString: apuntar directamente al fichero de entorno tambien funciona", () => {
+  const dir = coreProject();
+  const r = readConnString(
+    path.join(dir, "appsettings.Development.json"),
+    "ConfConnectionString"
+  );
+  assert.match(r.value, /Initial Catalog=Conf/);
+});
+
+test("readConnString: el nombre de la conexion es insensible a mayusculas", () => {
+  const dir = coreProject();
+  const r = readConnString(path.join(dir, "appsettings.json"), "dataconnectionstring");
+  assert.match(r.value, /Initial Catalog=Datos/);
+});
+
+test("readConnString: --environment elige otro fichero de entorno", () => {
+  const dir = coreProject();
+  fs.writeFileSync(
+    path.join(dir, "appsettings.Staging.json"),
+    JSON.stringify({
+      ConnectionStrings: {
+        DataConnectionString:
+          "Data Source=STG;Initial Catalog=Staging;User ID=sa;Password=x",
+      },
+    }),
+    "utf8"
+  );
+  const r = readConnString(path.join(dir, "appsettings.json"), "DataConnectionString", {
+    environment: "Staging",
+  });
+  assert.match(r.value, /Initial Catalog=Staging/);
+});
+
+test("readConnString: si solo hay cadena vacia, el error lo dice y sugiere el entorno", () => {
+  const dir = tempDir("wrapper-empty-");
+  fs.writeFileSync(
+    path.join(dir, "appsettings.json"),
+    JSON.stringify({ ConnectionStrings: { DataConnectionString: "" } }),
+    "utf8"
+  );
+  assert.throws(
+    () => readConnString(path.join(dir, "appsettings.json"), "DataConnectionString"),
+    (err) =>
+      /esta vacia/.test(err.message) &&
+      /appsettings\.Development\.json/.test(err.message)
+  );
+});
+
+test("readConnString: un nombre inexistente lista los disponibles", () => {
+  const dir = coreProject();
+  assert.throws(
+    () => readConnString(path.join(dir, "appsettings.json"), "NoExiste"),
+    /Disponibles: .*DataConnectionString/
+  );
+});
+
+test("readConnString: tolera BOM en el appsettings.json", () => {
+  const dir = tempDir("wrapper-bom-");
+  const body = JSON.stringify({
+    ConnectionStrings: {
+      DataConnectionString: "Data Source=PC;Initial Catalog=BD;User ID=sa;Password=x",
+    },
+  });
+  fs.writeFileSync(path.join(dir, "appsettings.json"), "\uFEFF" + body, "utf8");
+  const r = readConnString(path.join(dir, "appsettings.json"), "DataConnectionString");
+  assert.match(r.value, /Initial Catalog=BD/);
+});
+
+test("appSettingsChain: entorno primero, luego el fichero dado, luego su base", () => {
+  const dir = coreProject();
+  const chain = appSettingsChain(path.join(dir, "appsettings.json"), "Development");
+  assert.deepStrictEqual(
+    chain.map((p) => path.basename(p)),
+    ["appsettings.Development.json", "appsettings.json"]
+  );
+});
+
+test("resolveConfigFile: una carpeta resuelve a su appsettings.json", () => {
+  const dir = coreProject();
+  assert.strictEqual(resolveConfigFile(dir), path.join(dir, "appsettings.json"));
+});
+
+test("resolveConfigFile: una carpeta sin fichero de configuracion falla claro", () => {
+  const dir = tempDir("wrapper-vacio-");
+  assert.throws(() => resolveConfigFile(dir), /no contiene appsettings\.json ni Web\.config/);
+});
+
+test("listConnectionNames recorre toda la cadena de ficheros", () => {
+  const dir = coreProject();
+  const names = listConnectionNames(path.join(dir, "appsettings.json")).sort();
+  assert.deepStrictEqual(names, ["ConfConnectionString", "DataConnectionString"]);
+});
+
+// ── Web.config (.NET Framework) ──
+
+test("readWebConfigConnections: se acota a <connectionStrings> y no confunde otras secciones", () => {
+  const dir = tempDir("wrapper-fw-");
+  const file = path.join(dir, "Web.config");
+  fs.writeFileSync(
+    file,
+    `<?xml version="1.0"?>
+<configuration>
+  <connectionStrings>
+    <add name="DataConnectionString"
+         connectionString="Data Source=PC;Initial Catalog=BD;User ID=sa;Password=x&amp;y" />
+  </connectionStrings>
+  <system.data>
+    <DbProviderFactories>
+      <add name="DataConnectionString" invariant="trampa" />
+    </DbProviderFactories>
+  </system.data>
+</configuration>`,
+    "utf8"
+  );
+  const conns = readWebConfigConnections(file);
+  assert.deepStrictEqual(Object.keys(conns), ["DataConnectionString"]);
+  // Y las entidades XML se decodifican.
+  assert.match(conns.DataConnectionString, /Password=x&y/);
+});
+
+test("readWebConfigConnections: un <clear /> inicial no corta la seccion", () => {
+  // Forma real de los Web.config de Flexygo: <clear /> antes de las entradas, para
+  // descartar las cadenas heredadas de machine.config.
+  const dir = tempDir("wrapper-clear-");
+  const file = path.join(dir, "Web.config");
+  fs.writeFileSync(
+    file,
+    `<?xml version="1.0"?>
+<configuration>
+  <connectionStrings>
+    <clear />
+    <add name="ConfConnectionString"
+         connectionString="Data Source=PC;Initial Catalog=Conf;User ID=sa;Password=x" />
+    <add name="DataConnectionString"
+         connectionString="Data Source=PC;Initial Catalog=Datos;User ID=sa;Password=x" />
+  </connectionStrings>
+</configuration>`,
+    "utf8"
+  );
+  const conns = readWebConfigConnections(file);
+  assert.deepStrictEqual(Object.keys(conns), [
+    "ConfConnectionString",
+    "DataConnectionString",
+  ]);
+  assert.match(conns.DataConnectionString, /Initial Catalog=Datos/);
+});
+
+test("readWebConfigConnections: admite <add></add> no autocerrado", () => {
+  const dir = tempDir("wrapper-fw2-");
+  const file = path.join(dir, "Web.config");
+  fs.writeFileSync(
+    file,
+    `<configuration><connectionStrings>
+      <add name="X" connectionString="Data Source=PC;Initial Catalog=BD"></add>
+    </connectionStrings></configuration>`,
+    "utf8"
+  );
+  assert.match(readWebConfigConnections(file).X, /Initial Catalog=BD/);
+});
+
+test("readWebConfigConnections: sigue configSource a un fichero externo", () => {
+  const dir = tempDir("wrapper-fw3-");
+  fs.writeFileSync(
+    path.join(dir, "Web.config"),
+    `<configuration><connectionStrings configSource="connections.config" /></configuration>`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(dir, "connections.config"),
+    `<connectionStrings><add name="X" connectionString="Data Source=PC;Initial Catalog=Externa" /></connectionStrings>`,
+    "utf8"
+  );
+  const r = readConnString(path.join(dir, "Web.config"), "X");
+  assert.match(r.value, /Initial Catalog=Externa/);
+});
+
+test("readWebConfigConnections: un configSource inexistente falla nombrandolo", () => {
+  const dir = tempDir("wrapper-fw4-");
+  fs.writeFileSync(
+    path.join(dir, "Web.config"),
+    `<configuration><connectionStrings configSource="no-existe.config" /></configuration>`,
+    "utf8"
+  );
+  assert.throws(
+    () => readWebConfigConnections(path.join(dir, "Web.config")),
+    /no-existe\.config/
+  );
+});
+
+// ── Eleccion de fuente ──
+
+test("resolveSources: sin argumentos devuelve 'none'", () => {
+  assert.strictEqual(resolveSources(args()).kind, "none");
+});
+
+test("resolveSources: rechaza mezclar fuentes", () => {
+  assert.throws(
+    () =>
+      resolveSources(
+        args({ configFile: "W.config", connections: ["X"], fromEnv: true })
+      ),
+    /una sola fuente/
+  );
+});
+
+test("resolveSources: --config-file sin --connection-name lista los nombres disponibles", () => {
+  const dir = coreProject();
+  assert.throws(
+    () => resolveSources(args({ configFile: dir })),
+    (err) =>
+      /Falta --connection-name/.test(err.message) &&
+      /DataConnectionString/.test(err.message)
+  );
+});
+
+test("resolveSources: varias --connection-string exigen tantos --alias", () => {
+  assert.throws(
+    () => resolveSources(args({ connectionStrings: ["a", "b"], aliases: ["solo-uno"] })),
+    /hacen falta 2 --alias/
+  );
+  assert.strictEqual(
+    resolveSources(args({ connectionStrings: ["a", "b"], aliases: ["c", "d"] })).kind,
+    "connectionString"
+  );
+});
+
+test("resolveSources: una sola --connection-string no necesita alias", () => {
+  assert.strictEqual(
+    resolveSources(args({ connectionStrings: ["a"] })).kind,
+    "connectionString"
+  );
+});
+
+test("resolveSources: los datos sueltos deben estar completos", () => {
+  assert.throws(
+    () => resolveSources(args({ server: "PC", database: "BD" })),
+    /--user, --password/
+  );
+  assert.strictEqual(
+    resolveSources(args({ server: "PC", database: "BD", user: "sa", password: "x" }))
+      .kind,
+    "flags"
+  );
+});
+
+// ── --from-env ──
+
+test("cleanEnv(true) deja pasar las MSSQL_* de conexion pero nunca las de politica", () => {
+  const env = cleanEnv(true, {
+    PATH: "x",
+    MSSQL_SERVER: "PC",
+    MSSQL_DATABASE: "BD",
+    MSSQL_ENABLE_WRITES: "true",
+    MSSQL_SQL_DIRS: "C:\\trampa",
+  });
+  assert.strictEqual(env.MSSQL_SERVER, "PC");
+  assert.strictEqual(env.MSSQL_DATABASE, "BD");
+  assert.ok(!("MSSQL_ENABLE_WRITES" in env), "la politica no puede venir del entorno");
+  assert.ok(!("MSSQL_SQL_DIRS" in env), "la politica no puede venir del entorno");
+});
+
+test("describeEnvConnections: modo simple y modo multi", () => {
+  assert.deepStrictEqual(
+    describeEnvConnections({ MSSQL_SERVER: "PC", MSSQL_DATABASE: "BD" }),
+    [{ key: "maindb", target: "PC", database: "BD", viaInstance: false }]
+  );
+  const multi = describeEnvConnections({
+    MSSQL_SERVER: "PC",
+    MSSQL_CONFIG_DATABASE: "Conf",
+    MSSQL_DATA_DATABASE: "Datos",
+  });
+  assert.deepStrictEqual(multi.map((c) => c.key).sort(), ["config", "data"]);
+});
+
+test("describeEnvConnections: sin MSSQL_* de conexion falla explicando que poner", () => {
+  assert.throws(() => describeEnvConnections({ PATH: "x" }), /--from-env no ha encontrado/);
 });

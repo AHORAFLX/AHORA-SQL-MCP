@@ -15,6 +15,24 @@ Read-only by default. `MSSQL_ENABLE_WRITES=true` opts into `execute_write_query`
 > from the project's `Web.config` / `appsettings.json` and always exports `MSSQL_ENABLE_WRITES`
 > explicitly. This document describes the contract the wrapper produces.
 
+### Where the wrapper gets the connection from
+
+Exactly one source, chosen by flags — mixing them is a startup error, because there is no
+precedence order anyone could guess from reading a `.mcp.json`:
+
+| Source | Flags | Notes |
+| --- | --- | --- |
+| `Web.config` (.NET Framework) | `--config-file` + `--connection-name` | Section-scoped parsing of `<connectionStrings>`; follows `configSource` to an external file; `<clear/>`, `<remove/>` and non-self-closing `<add></add>` all handled. |
+| `appsettings.json` (.NET Core) | `--config-file` + `--connection-name` | ASP.NET Core overlay: `appsettings.<env>.json` wins over `appsettings.json`. **An empty string counts as absent**, which is exactly how Flexygo Core declares them. Env from `--environment`, else `ASPNETCORE_ENVIRONMENT`, else `Development`. Section and connection names are matched case-insensitively; a BOM is tolerated. `--config-file` also accepts the containing folder. |
+| Loose ADO string | `--connection-string` (repeatable, `--alias` each when >1) | No config file needed. Password ends up in argv. |
+| Loose values | `--server --database --user --password` (+ `--encrypt`, `--trust-server-certificate`) | Same caveat. |
+| Client environment | `--from-env` | Takes the inherited `MSSQL_*` connection variables instead of argv, so credentials live in the client's `env` block. The only exception to env sanitizing — and `MSSQL_ENABLE_WRITES` / `MSSQL_SQL_DIRS` are still overwritten, so the environment can never enable writes. |
+
+ADO keywords are normalized by lowercasing **and removing spaces**, so
+`Trust Server Certificate` (the form Core writes) and `TrustServerCertificate` (the form Framework
+writes) are the same key. Without that, the Core spelling was silently dropped and the setting
+never reached tedious.
+
 ## Configuration model
 
 Two modes; the server auto-detects from the environment:
@@ -330,6 +348,11 @@ src/
   user as the MCP client, which can already read those files.
 - **No `.env` loading** — configuration comes only from the environment the process is launched
   with, so a stray `.env` in the working directory cannot set `MSSQL_ENABLE_WRITES`.
+- **Env sanitizing, with one explicit exception** — the wrapper strips every inherited `MSSQL_*`
+  variable so a leftover from another tool cannot inject a connection or flip the single/multi-db
+  mode. `--from-env` opts into passing the connection variables through, but `MSSQL_ENABLE_WRITES`
+  and `MSSQL_SQL_DIRS` are overwritten unconditionally in both paths, so the environment can never
+  enable writes or authorize a folder.
 - **Parameterized introspection** — every `list_*`/`describe_*` SQL uses `@param` placeholders
   rather than string concatenation; table identifiers are restricted by Zod to
   `/^[a-zA-Z0-9_#$@]+(?:\.[a-zA-Z0-9_#$@]+)?$/` (bare `Users` or two-part `dbo.Users` — no spaces,
