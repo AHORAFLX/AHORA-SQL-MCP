@@ -10,7 +10,7 @@ columnas, vistas y procedimientos **antes** de generar T-SQL, en lugar de supone
 > ti, validando la conexión antes:
 >
 > ```bash
-> npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.5.0 ahora-setup
+> npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.6.0 ahora-setup
 > ```
 
 > **Este repositorio no se instala a mano.** Usa la skill `setup-mcp-sql` del repositorio de
@@ -28,7 +28,7 @@ configuración en proyectos de AHORA.
 Requiere Node 18 o superior.
 
 ```bash
-git clone --branch v1.5.0 --depth 1 https://github.com/AHORAFLX/AHORA-SQL-MCP.git
+git clone --branch v1.6.0 --depth 1 https://github.com/AHORAFLX/AHORA-SQL-MCP.git
 cd AHORA-SQL-MCP
 npm ci
 ```
@@ -215,6 +215,18 @@ La salida es indicar el puerto:
   "--port", "1433"
 ]
 ```
+
+**Si cada base de datos vive en una instancia distinta**, un único `--port` no sirve: usa la forma
+`alias:puerto`, que es repetible y se puede combinar con un valor general.
+
+```json
+"--connection-name", "ConfConnectionString:config",
+"--connection-name", "DataConnectionString:data",
+"--port", "config:1433",
+"--port", "data:1435"
+```
+
+Con una sola conexión el alias es `maindb`, así que `--port maindb:1433` también vale.
 
 `--port` y la instancia nombrada son **excluyentes** — tedious no admite las dos a la vez, así
 que al fijar puerto se descarta la instancia. Para saber en qué puerto escucha una instancia:

@@ -27,7 +27,7 @@ El paso 1 (skills) se hace con un comando y no tiene más. El paso 2 (el MCP) es
 enjundia, y hay un instalador que lo hace por ti. Ábrelo **desde la carpeta de tu proyecto**:
 
 ```bash
-npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.5.0 ahora-setup
+npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.6.0 ahora-setup
 ```
 
 Se abre un formulario en el navegador: detecta tu `Web.config` o `appsettings.json`, **se conecta de
@@ -98,7 +98,7 @@ Lo único que tienes que cambiar es la ruta del fichero de configuración.
     "mssql": {
       "command": "npx",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.5.0", "start-mssql-mcp",
+        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.6.0", "start-mssql-mcp",
         "--config-file", "C:/ruta/al/proyecto/Web.config",
         "--connection-name", "ConfConnectionString:config",
         "--connection-name", "DataConnectionString:data"
@@ -118,7 +118,7 @@ Igual, pero apuntando a la carpeta que contiene el `appsettings.json` (normalmen
     "mssql": {
       "command": "npx",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.5.0", "start-mssql-mcp",
+        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.6.0", "start-mssql-mcp",
         "--config-file", "C:/ruta/al/proyecto/Backend/conf",
         "--connection-name", "ConfConnectionString:config",
         "--connection-name", "DataConnectionString:data"
@@ -146,7 +146,7 @@ Los datos van en `env`, nunca en los argumentos: `.mcp.json` se commitea.
     "mssql": {
       "command": "npx",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.5.0", "start-mssql-mcp",
+        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.6.0", "start-mssql-mcp",
         "--from-env"
       ],
       "env": {

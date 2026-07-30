@@ -59,7 +59,9 @@ const USAGE =
   "Opcionales:\n" +
   "  --environment <nombre>        entorno de appsettings.<entorno>.json (def.: ASPNETCORE_ENVIRONMENT o Development)\n" +
   "  --alias <nombre>             alias para --connection-string, en el mismo orden\n" +
-  "  --port <puerto>              salida si SQL Browser esta parado\n" +
+  "  --port <puerto>              salida si SQL Browser esta parado; vale para todas\n" +
+  "  --port <alias>:<puerto>      repetible; puerto de UNA conexion, cuando cada BD\n" +
+  "                               esta en una instancia con su propio puerto\n" +
   "  --encrypt <true|false>       solo con la fuente (c)\n" +
   "  --trust-server-certificate <true|false>   solo con la fuente (c)\n" +
   "  --production                 marca la conexion como produccion; incompatible con --allow-writes\n" +
@@ -74,6 +76,7 @@ function parseArgs(argv) {
     allowWrites: false,
     fromEnv: false,
     production: false,
+    ports: [],
     sqlDirs: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -95,7 +98,13 @@ function parseArgs(argv) {
     else if (argv[i] === "--production") out.production = true;
     else if (argv[i] === "--allow-writes") out.allowWrites = true;
     else if (argv[i] === "--allow-sql-dir") out.sqlDirs.push(argv[++i]);
-    else if (argv[i] === "--port") out.port = argv[++i];
+    else if (argv[i] === "--port") {
+      const value = argv[++i];
+      out.ports.push(value);
+      // Se conserva `port` para la forma simple (un numero para todas), que es
+      // como se ha usado siempre.
+      if (/^\d+$/.test(String(value ?? "").trim())) out.port = String(value).trim();
+    }
     else {
       console.error(`Argumento no reconocido: ${argv[i]}`);
       process.exit(1);
@@ -476,6 +485,30 @@ function parseDataSource(raw) {
   return { host, instanceName, port, protocol };
 }
 
+/**
+ * Puerto a aplicar a una conexion concreta.
+ *
+ * `--port 1433` vale para todas. `--port <alias>:<puerto>` vale solo para esa, y es
+ * lo que hace falta cuando cada base de datos vive en una instancia distinta con su
+ * propio puerto — el caso tipico de un Flexygo en una maquina con varias instancias,
+ * donde un unico puerto para todas no sirve de nada.
+ */
+function portFor(ports, alias) {
+  let bare;
+  for (const raw of ports || []) {
+    const value = String(raw ?? "").trim();
+    const named = value.match(/^(.+?)\s*:\s*(\d+)$/);
+    if (named) {
+      if (alias && named[1].trim().toLowerCase() === String(alias).toLowerCase()) {
+        return named[2];
+      }
+      continue;
+    }
+    if (/^\d+$/.test(value)) bare = value;
+  }
+  return bare;
+}
+
 function applyConnection(env, prefix, parts, label, portOverride) {
   // Todos los alias que SqlClient acepta para el servidor.
   const dataSource =
@@ -802,7 +835,15 @@ function main() {
             : source.kind === "flags"
               ? partsFromFlags(args)
               : parseAdoConnectionString(connString);
-        const info = applyConnection(env, prefix, parts, label, args.port);
+        // En modo simple la clave es `maindb`, asi que `--port maindb:1433` tambien
+        // funciona para una sola conexion.
+        const info = applyConnection(
+          env,
+          prefix,
+          parts,
+          label,
+          portFor(args.ports, alias || "maindb")
+        );
         resolved.push({ key: multi ? alias.toLowerCase() : "maindb", ...info });
       });
     }
@@ -880,6 +921,7 @@ module.exports = {
   parseAdoConnectionString,
   normalizeAdoKey,
   parseDataSource,
+  portFor,
   cleanEnv,
   applyConnection,
   partsFromFlags,

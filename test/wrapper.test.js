@@ -9,6 +9,7 @@ const {
   parseAdoConnectionString,
   normalizeAdoKey,
   parseDataSource,
+  portFor,
   cleanEnv,
   applyConnection,
   partsFromFlags,
@@ -148,6 +149,55 @@ test("applyConnection: acepta los alias Address / Network Address", () => {
     assert.strictEqual(env.MSSQL_SERVER, "PC_158", `alias ${key}`);
     assert.strictEqual(env.MSSQL_PORT, "1433", `alias ${key}`);
   }
+});
+
+// ── --port por alias ──
+
+test("portFor: un numero suelto vale para todas las conexiones", () => {
+  assert.strictEqual(portFor(["1433"], "config"), "1433");
+  assert.strictEqual(portFor(["1433"], "data"), "1433");
+  assert.strictEqual(portFor(["1433"], "maindb"), "1433");
+});
+
+test("portFor: alias:puerto solo afecta a esa conexion", () => {
+  // El caso real: cada BD en una instancia distinta con su propio puerto, donde un
+  // unico --port para todas no sirve.
+  const ports = ["config:1433", "data:1435"];
+  assert.strictEqual(portFor(ports, "config"), "1433");
+  assert.strictEqual(portFor(ports, "data"), "1435");
+  assert.strictEqual(portFor(ports, "otra"), undefined, "sin regla, sin puerto");
+});
+
+test("portFor: el alias es insensible a mayusculas y tolera espacios", () => {
+  assert.strictEqual(portFor([" Config : 1433 "], "config"), "1433");
+  assert.strictEqual(portFor(["DATA:1435"], "data"), "1435");
+});
+
+test("portFor: se pueden combinar un puerto general y excepciones por alias", () => {
+  const ports = ["1433", "data:1435"];
+  assert.strictEqual(portFor(ports, "config"), "1433", "cae en el general");
+  assert.strictEqual(portFor(ports, "data"), "1435", "la excepcion gana");
+});
+
+test("portFor: sin --port no hay puerto y se usa la instancia nombrada", () => {
+  assert.strictEqual(portFor([], "config"), undefined);
+  assert.strictEqual(portFor(undefined, "config"), undefined);
+});
+
+test("parseArgs: --port acumula, y conserva el numero suelto en `port`", () => {
+  const a = parseArgs([
+    "--config-file", "W.config",
+    "--connection-name", "Conf:config",
+    "--connection-name", "Data:data",
+    "--port", "config:1433",
+    "--port", "data:1435",
+  ]);
+  assert.deepStrictEqual(a.ports, ["config:1433", "data:1435"]);
+  assert.strictEqual(a.port, undefined, "no hay numero suelto");
+
+  const b = parseArgs(["--config-file", "W.config", "--connection-name", "X", "--port", "1433"]);
+  assert.deepStrictEqual(b.ports, ["1433"]);
+  assert.strictEqual(b.port, "1433", "la forma simple sigue igual");
 });
 
 test("parseDataSource: prefijo de protocolo y alias locales", () => {
