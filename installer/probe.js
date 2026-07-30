@@ -28,18 +28,26 @@ function sanitizeError(err, secret) {
 /**
  * Pista para el fallo mas comun, que de otro modo es un callejon sin salida.
  *
- * Un ETIMEOUT contra una instancia nombrada casi siempre es el servicio SQL
- * Browser parado: es quien traduce el nombre de instancia a su puerto, por UDP
- * 1434. Sin esa pista, el mensaje del driver ("Failed to connect ... ETIMEOUT") no
- * apunta a nada y parece que no hay acceso, cuando el acceso esta perfectamente.
+ * Un ETIMEOUT contra una instancia nombrada tiene dos causas tipicas, y desde el
+ * cliente son indistinguibles: el servicio SQL Browser parado (es quien traduce el
+ * nombre de instancia a su puerto, por UDP 1434), o el protocolo TCP/IP desactivado
+ * en esa instancia.
+ *
+ * Lo importante: que SSMS conecte NO descarta ninguna de las dos. Para instancias
+ * locales SSMS usa memoria compartida, mientras que tedious es solo TCP. Sin esta
+ * aclaracion, el mensaje del driver parece decir que no hay acceso a la base de
+ * datos cuando el acceso esta perfectamente.
  */
 function hintFor({ viaInstance, error }) {
   if (!viaInstance) return null;
   if (!/ETIMEOUT|timeout/i.test(String(error))) return null;
   return (
-    "Es una instancia nombrada y ha dado tiempo de espera: lo habitual es que el " +
-    "servicio SQL Browser este parado (es quien traduce el nombre de instancia a " +
-    "su puerto). Arrancalo, o indica el puerto con --port."
+    "Instancia nombrada con tiempo de espera agotado. Dos causas posibles: el " +
+    "servicio SQL Browser parado, o el protocolo TCP/IP desactivado en esa " +
+    "instancia (comprueba las dos en SQL Server Configuration Manager). Que SSMS " +
+    "conecte no lo descarta: en local usa memoria compartida, y este driver es " +
+    "solo TCP. Con un puerto estatico puedes pasarlo con --port y no hace falta " +
+    "el SQL Browser."
   );
 }
 

@@ -119,10 +119,17 @@ function normalizeAdoKey(key) {
 function parseAdoConnectionString(connString) {
   const parts = {};
   for (const piece of String(connString).split(";")) {
-    if (!piece.trim()) continue;
-    const idx = piece.indexOf("=");
-    if (idx === -1) continue;
-    parts[normalizeAdoKey(piece.slice(0, idx))] = piece.slice(idx + 1).trim();
+    const trimmed = piece.trim();
+    if (!trimmed) continue;
+    const idx = trimmed.indexOf("=");
+    if (idx === -1) {
+      // Trozo sin '=': si es solo digitos, se toma como puerto. Cubre la forma
+      // `Data Source=PC\INSTANCIA;1435`, donde el ';' ya ha partido el par y el
+      // puerto se perdia en silencio.
+      if (/^\d+$/.test(trimmed) && !parts.port) parts.port = trimmed;
+      continue;
+    }
+    parts[normalizeAdoKey(trimmed.slice(0, idx))] = trimmed.slice(idx + 1).trim();
   }
   return parts;
 }
@@ -379,47 +386,104 @@ function cleanEnv(keepConnectionVars = false, source = process.env) {
 }
 
 /**
- * Descompone el "Data Source" de una cadena ADO.NET.
+ * Descompone el "Data Source" de una cadena ADO.NET, en cualquiera de sus formas.
  *
- * Formatos admitidos: HOST, HOST\INSTANCIA, HOST,PUERTO, HOST\INSTANCIA,PUERTO,
- * HOST,PUERTO\INSTANCIA, (local), . y el prefijo de protocolo tcp:. La instancia
- * nombrada es lo habitual en los SQL Server locales de desarrollo (por ejemplo
- * PC_158\PC_158).
+ * El objetivo es no perder NADA de lo que ponga el Web.config: si trae un puerto
+ * escrito de cualquier manera, se usa, y entonces no hace falta ni el servicio SQL
+ * Browser ni tocar nada. Lo que se admite:
+ *
+ *   HOST                        PC_158
+ *   HOST\INSTANCIA              PC_158\SQL2022
+ *   HOST,PUERTO                 PC_158,1433
+ *   HOST\INSTANCIA,PUERTO       PC_158\SQL2022,1435
+ *   HOST,PUERTO\INSTANCIA       192.168.9.26,1433\AHORA_R   (visto en produccion)
+ *   HOST;PUERTO                 PC_158;1435
+ *   HOST\INSTANCIA;PUERTO       PC_158\SQL2022;1435
+ *   HOST:PUERTO                 PC_158:1435
+ *   [IPv6]  y  [IPv6],PUERTO    [::1],1433
+ *   (local), (local)\INST, .    y .\INSTANCIA
+ *   prefijos de protocolo       tcp: np: lpc: admin:
+ *   valor entre comillas        "PC_158\SQL2022"
+ *
+ * Devuelve tambien `protocol`, porque np (canalizaciones nombradas) y lpc (memoria
+ * compartida) NO los soporta tedious: hay que decirlo en claro en lugar de tratarlos
+ * como TCP y dar un tiempo de espera que no explica nada. Es justo la trampa de
+ * creer que "si SSMS conecta, esto tambien": en local SSMS usa memoria compartida.
+ *
+ * Y `MSSQLSERVER` como nombre de instancia es la instancia POR DEFECTO, asi que se
+ * descarta: tratarla como nombrada obligaria al SQL Browser sin ninguna necesidad.
  */
 function parseDataSource(raw) {
-  let s = String(raw).trim().replace(/^(tcp|np|lpc):/i, "");
-  let port;
+  let s = String(raw ?? "").trim();
+
+  // Valor entre comillas: Data Source="PC_158\SQL2022"
+  if (/^".*"$/.test(s) || /^'.*'$/.test(s)) s = s.slice(1, -1).trim();
+
+  let protocol;
+  const proto = s.match(/^(tcp|np|lpc|admin)\s*:/i);
+  if (proto) {
+    protocol = proto[1].toLowerCase();
+    s = s.slice(proto[0].length).trim();
+  }
+
+  // Canalizacion nombrada explicita: \\HOST\pipe\MSSQL$INST\sql\query
+  if (s.startsWith("\\\\")) {
+    const pipe = s.slice(2).split("\\");
+    return { host: pipe[0] || "", instanceName: undefined, port: undefined, protocol: "np" };
+  }
+
+  // Host IPv6 entre corchetes, que lleva ':' dentro y no se puede tokenizar igual.
+  let bracketed;
+  const bracket = s.match(/^\[([^\]]*)\]\s*(.*)$/);
+  if (bracket) {
+    bracketed = bracket[1].trim();
+    s = bracket[2].trim().replace(/^[,;:]\s*/, "");
+  }
+
+  let host = bracketed || "";
   let instanceName;
+  let port;
 
-  const commaIdx = s.lastIndexOf(",");
-  if (commaIdx > -1) {
-    let portPart = s.slice(commaIdx + 1).trim();
-    // Forma poco ortodoxa pero real en los Web.config de produccion:
-    // HOST,PUERTO\INSTANCIA. Sin separarla, el puerto quedaba como "1433\INST" y
-    // solo colaba porque parseInt se detiene en la barra.
-    const slashInPort = portPart.indexOf("\\");
-    if (slashInPort > -1) {
-      instanceName = portPart.slice(slashInPort + 1).trim();
-      portPart = portPart.slice(0, slashInPort).trim();
+  // ',' ';' y ':' son separadores equivalentes aqui. Se recorren los trozos en vez
+  // de asumir un orden, porque el puerto aparece antes y despues de la instancia.
+  for (const token of s.split(/[,;:]/).map((t) => t.trim()).filter(Boolean)) {
+    if (/^\d+$/.test(token)) {
+      if (!port) port = token;
+      continue;
     }
-    port = portPart;
-    s = s.slice(0, commaIdx).trim();
+    if (token.includes("\\")) {
+      const [left, right] = token.split("\\");
+      const leftTrimmed = left.trim();
+      // En `HOST,PUERTO\INSTANCIA` el trozo de la izquierda es el PUERTO, no el
+      // host: sin esto el puerto se perdia y la conexion pasaba a depender del
+      // SQL Browser sin motivo.
+      if (/^\d+$/.test(leftTrimmed)) {
+        if (!port) port = leftTrimmed;
+      } else if (!host) {
+        host = leftTrimmed;
+      }
+      if (right && !instanceName) instanceName = right.trim();
+      continue;
+    }
+    if (!host) host = token;
+    else if (!instanceName) instanceName = token;
   }
 
-  const slashIdx = s.indexOf("\\");
-  if (slashIdx > -1) {
-    instanceName = s.slice(slashIdx + 1).trim();
-    s = s.slice(0, slashIdx).trim();
-  }
-
-  let host = s;
   if (host === "." || /^\(local\)$/i.test(host)) host = "localhost";
+  // La instancia por defecto no necesita resolucion por nombre.
+  if (instanceName && /^MSSQLSERVER$/i.test(instanceName)) instanceName = undefined;
 
-  return { host, instanceName, port };
+  return { host, instanceName, port, protocol };
 }
 
 function applyConnection(env, prefix, parts, label, portOverride) {
-  const dataSource = parts.datasource || parts.server || parts.addr || parts.address;
+  // Todos los alias que SqlClient acepta para el servidor.
+  const dataSource =
+    parts.datasource ||
+    parts.server ||
+    parts.addr ||
+    parts.address ||
+    parts.networkaddress;
   const database = parts.initialcatalog || parts.database;
   const user = parts.userid || parts.uid || parts.user;
   const password = parts.password || parts.pwd;
@@ -433,12 +497,28 @@ function applyConnection(env, prefix, parts, label, portOverride) {
     );
   }
 
-  const { host, instanceName, port } = parseDataSource(dataSource);
+  const { host, instanceName, port, protocol } = parseDataSource(dataSource);
 
-  // El puerto explicito gana siempre: es la salida cuando SQL Browser esta
-  // parado y la instancia nombrada no se puede resolver. tedious no admite
-  // puerto e instancia a la vez, asi que al fijar puerto se descarta la instancia.
-  const finalPort = portOverride || port;
+  if (!host) throw new Error(`[${label}] No se pudo interpretar el servidor '${dataSource}'.`);
+
+  // np = canalizaciones nombradas, lpc = memoria compartida. tedious solo habla
+  // TCP, asi que tratarlos como TCP produce un tiempo de espera que no explica
+  // nada. Es la misma trampa que "si SSMS conecta, esto tambien": en local SSMS
+  // usa memoria compartida.
+  if (protocol === "np" || protocol === "lpc") {
+    throw new Error(
+      `[${label}] El Data Source usa el protocolo '${protocol}' ` +
+        `(${protocol === "np" ? "canalizaciones nombradas" : "memoria compartida"}), ` +
+        `que este servidor no soporta porque su driver es solo TCP. ` +
+        `Usa 'tcp:HOST,PUERTO' o 'HOST\\INSTANCIA'.`
+    );
+  }
+
+  // Cualquier puerto escrito en la cadena vale, aunque venga en un `Port=` aparte
+  // o como un trozo suelto tras un ';'. Un puerto explicito evita depender del
+  // servicio SQL Browser; tedious no admite puerto e instancia a la vez, asi que al
+  // fijar puerto se descarta la instancia.
+  const finalPort = portOverride || port || parts.port;
   if (finalPort) {
     env[`${prefix}PORT`] = String(finalPort);
   } else if (instanceName) {

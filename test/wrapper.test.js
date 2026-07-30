@@ -40,44 +40,114 @@ function args(overrides = {}) {
   };
 }
 
-test("parseDataSource: host suelto", () => {
-  assert.deepStrictEqual(parseDataSource("10.0.0.9"), {
-    host: "10.0.0.9",
-    instanceName: undefined,
-    port: undefined,
+// ── parseDataSource: todas las formas en que se escribe un Data Source ──
+//
+// La tabla DS_CASES sustituye a los tests uno-a-uno que habia antes: cubre los
+// mismos casos y ademas el resto de formas, comprobando campo por campo en vez de
+// comparar el objeto entero (que se rompe al anadir un campo nuevo como `protocol`).
+
+const DS_CASES = [
+  // [entrada, host, instancia, puerto]
+  ["PC_158", "PC_158", undefined, undefined],
+  ["PC_158\\SQL2022", "PC_158", "SQL2022", undefined],
+  ["PC_158,1433", "PC_158", undefined, "1433"],
+  ["PC_158\\SQL2022,1435", "PC_158", "SQL2022", "1435"],
+  // Forma real de un Web.config de produccion: el puerto antes de la instancia.
+  ["192.168.9.26,1433\\AHORA_R", "192.168.9.26", "AHORA_R", "1433"],
+  // Punto y coma como separador: el ';' ya partio el par ADO, pero si el puerto
+  // viaja pegado al Data Source hay que recogerlo igual.
+  ["PC_158;1435", "PC_158", undefined, "1435"],
+  ["PC_158\\SQL2022;1435", "PC_158", "SQL2022", "1435"],
+  // Dos puntos, que es como se escribe en otros ecosistemas.
+  ["PC_158:1435", "PC_158", undefined, "1435"],
+  // Alias locales, con y sin instancia.
+  [".", "localhost", undefined, undefined],
+  [".\\SQL2022", "localhost", "SQL2022", undefined],
+  ["(local)", "localhost", undefined, undefined],
+  ["(LOCAL)\\SQL2022", "localhost", "SQL2022", undefined],
+  // Espacios y comillas alrededor del valor.
+  ["  PC_158 , 1433  ", "PC_158", undefined, "1433"],
+  ['"PC_158\\SQL2022"', "PC_158", "SQL2022", undefined],
+  ["'PC_158,1433'", "PC_158", undefined, "1433"],
+  // IPv6 entre corchetes: lleva ':' dentro y no se puede tokenizar igual.
+  ["[::1]", "::1", undefined, undefined],
+  ["[::1],1433", "::1", undefined, "1433"],
+];
+
+for (const [input, host, instanceName, port] of DS_CASES) {
+  test(`parseDataSource: ${JSON.stringify(input)}`, () => {
+    const r = parseDataSource(input);
+    assert.strictEqual(r.host, host, "host");
+    assert.strictEqual(r.instanceName, instanceName, "instancia");
+    assert.strictEqual(r.port, port, "puerto");
   });
+}
+
+test("parseDataSource: MSSQLSERVER es la instancia por defecto, no una nombrada", () => {
+  // Tratarla como nombrada obligaria al SQL Browser sin ninguna necesidad.
+  const r = parseDataSource("PC_158\\MSSQLSERVER");
+  assert.strictEqual(r.host, "PC_158");
+  assert.strictEqual(r.instanceName, undefined);
 });
 
-test("parseDataSource: instancia nombrada", () => {
-  assert.deepStrictEqual(parseDataSource("PC_158\\PC_158"), {
-    host: "PC_158",
-    instanceName: "PC_158",
-    port: undefined,
-  });
+test("parseDataSource: reconoce el protocolo para poder rechazarlo despues", () => {
+  assert.strictEqual(parseDataSource("tcp:PC_158,1433").protocol, "tcp");
+  assert.strictEqual(parseDataSource("np:PC_158").protocol, "np");
+  assert.strictEqual(parseDataSource("lpc:PC_158").protocol, "lpc");
+  assert.strictEqual(parseDataSource("PC_158").protocol, undefined);
 });
 
-test("parseDataSource: host con puerto", () => {
-  assert.deepStrictEqual(parseDataSource("PC_158,1433"), {
-    host: "PC_158",
-    instanceName: undefined,
-    port: "1433",
-  });
+test("parseDataSource: canalizacion nombrada explicita se marca como np", () => {
+  const r = parseDataSource("\\\\PC_158\\pipe\\MSSQL$SQL2022\\sql\\query");
+  assert.strictEqual(r.host, "PC_158");
+  assert.strictEqual(r.protocol, "np");
 });
 
-test("parseDataSource: HOST,PUERTO\\INSTANCIA (forma real de un Web.config de produccion)", () => {
-  assert.deepStrictEqual(parseDataSource("192.168.9.26,1433\\AHORA_R"), {
-    host: "192.168.9.26",
-    instanceName: "AHORA_R",
-    port: "1433",
-  });
+test("applyConnection: rechaza en claro los protocolos que el driver no habla", () => {
+  for (const proto of ["np", "lpc"]) {
+    const parts = parseAdoConnectionString(
+      `Data Source=${proto}:PC_158;Initial Catalog=BD;User ID=sa;Password=x`
+    );
+    assert.throws(
+      () => applyConnection({}, "MSSQL_", parts, "test"),
+      /solo TCP/,
+      `${proto} deberia rechazarse con un mensaje claro`
+    );
+  }
 });
 
-test("parseDataSource: HOST\\INSTANCIA,PUERTO", () => {
-  assert.deepStrictEqual(parseDataSource("PC_158\\SQL2022,1433"), {
-    host: "PC_158",
-    instanceName: "SQL2022",
-    port: "1433",
-  });
+test("applyConnection: usa el puerto de un `Port=` aparte", () => {
+  // Algunas herramientas lo escriben asi en vez de pegarlo al Data Source.
+  const env = {};
+  const parts = parseAdoConnectionString(
+    "Data Source=PC_158\\SQL2022;Port=1435;Initial Catalog=BD;User ID=sa;Password=x"
+  );
+  const info = applyConnection(env, "MSSQL_", parts, "test");
+  assert.strictEqual(env.MSSQL_PORT, "1435");
+  assert.ok(!("MSSQL_INSTANCE_NAME" in env), "con puerto se descarta la instancia");
+  assert.strictEqual(info.viaInstance, false, "y ya no depende del SQL Browser");
+});
+
+test("applyConnection: recoge un puerto suelto tras el punto y coma", () => {
+  // `Data Source=PC\INSTANCIA;1435` — el ';' parte el par y el 1435 queda solo.
+  const env = {};
+  const parts = parseAdoConnectionString(
+    "Data Source=PC_158\\SQL2022;1435;Initial Catalog=BD;User ID=sa;Password=x"
+  );
+  applyConnection(env, "MSSQL_", parts, "test");
+  assert.strictEqual(env.MSSQL_PORT, "1435");
+});
+
+test("applyConnection: acepta los alias Address / Network Address", () => {
+  for (const key of ["Address", "Addr", "Network Address"]) {
+    const env = {};
+    const parts = parseAdoConnectionString(
+      `${key}=PC_158,1433;Initial Catalog=BD;User ID=sa;Password=x`
+    );
+    applyConnection(env, "MSSQL_", parts, "test");
+    assert.strictEqual(env.MSSQL_SERVER, "PC_158", `alias ${key}`);
+    assert.strictEqual(env.MSSQL_PORT, "1433", `alias ${key}`);
+  }
 });
 
 test("parseDataSource: prefijo de protocolo y alias locales", () => {

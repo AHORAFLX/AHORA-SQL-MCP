@@ -10,7 +10,7 @@ columnas, vistas y procedimientos **antes** de generar T-SQL, en lugar de supone
 > ti, validando la conexión antes:
 >
 > ```bash
-> npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.4.0 ahora-setup
+> npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.5.0 ahora-setup
 > ```
 
 > **Este repositorio no se instala a mano.** Usa la skill `setup-mcp-sql` del repositorio de
@@ -28,7 +28,7 @@ configuración en proyectos de AHORA.
 Requiere Node 18 o superior.
 
 ```bash
-git clone --branch v1.4.0 --depth 1 https://github.com/AHORAFLX/AHORA-SQL-MCP.git
+git clone --branch v1.5.0 --depth 1 https://github.com/AHORAFLX/AHORA-SQL-MCP.git
 cd AHORA-SQL-MCP
 npm ci
 ```
@@ -168,14 +168,42 @@ Con varias `--connection-string` cada una necesita su `--alias` en el mismo orde
 
 ### Instancias nombradas (SQL Server local)
 
-El wrapper interpreta el `Data Source` de la cadena de conexión en todos sus formatos:
-`10.0.0.9`, `PC_158\PC_158`, `PC_158,1433`, `PC_158\SQL2022,1433`, `192.168.9.26,1433\AHORA_R`,
-`(local)`, `.` y el prefijo `tcp:`. Si detecta una instancia nombrada, la pasa como `instanceName`
-y no hace falta configurar nada más.
+El wrapper lee el `Data Source` **tal como esté escrito**, en cualquiera de sus formas, para no
+perder un puerto que el propio fichero ya trae:
+
+| Forma | Ejemplo |
+|---|---|
+| host | `10.0.0.9` |
+| host\instancia | `PC_158\SQL2022` |
+| host,puerto | `PC_158,1433` |
+| host\instancia,puerto | `PC_158\SQL2022,1435` |
+| host,puerto\instancia | `192.168.9.26,1433\AHORA_R` |
+| separador `;` o `:` | `PC_158;1435`, `PC_158:1435` |
+| IPv6 entre corchetes | `[::1],1433` |
+| alias locales | `.`, `.\SQL2022`, `(local)`, `(local)\SQL2022` |
+| comillas y espacios | `"PC_158\SQL2022"` |
+| prefijos de protocolo | `tcp:`, `np:`, `lpc:`, `admin:` |
+
+El puerto también se recoge si viene en su propia clave (`Port=1435`) o suelto tras un `;`. Y el
+servidor se acepta bajo cualquiera de sus alias: `Data Source`, `Server`, `Address`, `Addr`,
+`Network Address`.
+
+Dos normalizaciones que evitan depender del SQL Browser sin necesidad: `HOST\MSSQLSERVER` es la
+instancia **por defecto**, así que se descarta el nombre; y `np:` (canalizaciones nombradas) y
+`lpc:` (memoria compartida) **se rechazan con un mensaje claro**, porque tedious es solo TCP y
+tratarlos como TCP acaba en un tiempo de espera que no explica nada.
+
+Si detecta una instancia nombrada y no hay puerto, la pasa como `instanceName`.
 
 **Pero resolver una instancia por nombre exige que el servicio SQL Browser esté arrancado**, que
 es quien traduce el nombre de instancia a su puerto. Suele estar parado. Si lo está, la conexión
 agota el tiempo de espera y el wrapper te lo avisa al arrancar.
+
+**Y hay una segunda causa del mismo síntoma: el protocolo TCP/IP desactivado en esa instancia.**
+En máquinas de desarrollo con varias instancias es habitual que solo una tenga TCP habilitado.
+Cuidado con el diagnóstico: **que SSMS conecte no descarta ninguna de las dos.** Para instancias
+locales SSMS usa memoria compartida, mientras que tedious —el driver de este servidor— es solo TCP.
+Compruébalo en SQL Server Configuration Manager, en Protocolos de `<INSTANCIA>` → TCP/IP.
 
 La salida es indicar el puerto:
 
