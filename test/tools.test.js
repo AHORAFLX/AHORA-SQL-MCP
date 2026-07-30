@@ -21,13 +21,14 @@ test("registerAll registers every tool module exactly once", () => {
     },
   };
   tools.registerAll(fakeServer);
-  assert.equal(seen.length, 11);
+  assert.equal(seen.length, 12);
   const names = seen.map((s) => s.name).sort();
   assert.deepEqual(names, [
     "describe_database",
     "describe_procedure",
     "describe_table",
     "execute_read_query",
+    "execute_sql_file",
     "execute_write_query",
     "list_databases",
     "list_foreign_keys",
@@ -46,6 +47,37 @@ test("execute_write_query rejects before connecting when writes disabled", async
     await assert.rejects(
       () => handler({ query: "INSERT INTO x VALUES (1)" }, {}),
       /writes are disabled/i
+    );
+  } finally {
+    if (prev !== undefined) process.env.MSSQL_ENABLE_WRITES = prev;
+  }
+});
+
+test("execute_sql_file rejects before touching disk or DB when writes disabled", async () => {
+  const prev = process.env.MSSQL_ENABLE_WRITES;
+  delete process.env.MSSQL_ENABLE_WRITES;
+  try {
+    const { handler } = require("../src/tools/execute-sql-file");
+    // The path does not exist: the writes gate has to fire before any file access,
+    // so the error must be about writes and not about a missing file.
+    await assert.rejects(
+      () => handler({ path: "does-not-exist.sql", dryRun: false }, {}),
+      /needs writes enabled/i
+    );
+  } finally {
+    if (prev !== undefined) process.env.MSSQL_ENABLE_WRITES = prev;
+  }
+});
+
+test("execute_sql_file allows dryRun when writes are disabled", async () => {
+  const prev = process.env.MSSQL_ENABLE_WRITES;
+  delete process.env.MSSQL_ENABLE_WRITES;
+  try {
+    const { handler } = require("../src/tools/execute-sql-file");
+    // dryRun gets past the writes gate, so this fails on the path instead.
+    await assert.rejects(
+      () => handler({ path: "does-not-exist.sql", dryRun: true }, {}),
+      /not found/i
     );
   } finally {
     if (prev !== undefined) process.env.MSSQL_ENABLE_WRITES = prev;

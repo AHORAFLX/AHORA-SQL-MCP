@@ -8,7 +8,7 @@ columnas, vistas y procedimientos **antes** de generar T-SQL, en lugar de supone
 > **Este repositorio no se instala a mano.** Usa la skill `setup-mcp-sql` del repositorio de
 > skills: clona este repo, ejecuta `npm ci` y genera el `.mcp.json` del proyecto.
 
-La referencia técnica completa del servidor (catálogo de las 11 herramientas, resources, prompts,
+La referencia técnica completa del servidor (catálogo de las 12 herramientas, resources, prompts,
 variables de entorno, modelo de seguridad, test de integración) está en
 **[docs/REFERENCE.md](docs/REFERENCE.md)**. Este documento cubre la instalación y la
 configuración en proyectos de AHORA.
@@ -118,6 +118,35 @@ el log del MCP no ves ese bloque, no está arrancando el wrapper.
 El `.mcp.json` solo contiene rutas, nunca credenciales: por eso se puede commitear en el
 repositorio del proyecto. Las credenciales se leen del `Web.config` en tiempo de arranque.
 
+### Ejecutar ficheros `.sql`
+
+`execute_sql_file` recibe una **ruta** y ejecuta el script, el equivalente a `sqlcmd -i fichero.sql`.
+Es la vía para desplegar un stored procedure: no tiene el tope de 10.000 caracteres de
+`execute_write_query`, entiende los separadores `GO`, y evita que el modelo tenga que volver a
+teclear el T-SQL a mano.
+
+Por defecto solo puede leer ficheros **dentro de la carpeta del proyecto** — el directorio de
+trabajo del servidor MCP, que es la raíz del proyecto cuando lo arranca Claude Code desde el
+`.mcp.json`. Para un `.sql` que vive fuera, por ejemplo en el repositorio de skills, hay que
+autorizar la carpeta de forma explícita:
+
+```json
+"args": [
+  "<RUTA>/AHORA-SQL-MCP/bin/start-mssql-mcp.js",
+  "--config-file", "<RUTA_PROYECTO>/Web.config",
+  "--connection-name", "DataConnectionString",
+  "--allow-sql-dir", "C:/Codigo GIT/skills",
+  "--allow-writes"
+]
+```
+
+`--allow-sql-dir` es repetible. El wrapper imprime al arrancar la carpeta del proyecto y las
+carpetas extra, porque la raíz por defecto depende de dónde se arranque el servidor.
+
+Ejecutar de verdad exige `--allow-writes`. Sin ese flag el tool sigue disponible con
+`dryRun: true`, que lee el fichero, lo trocea por `GO` y devuelve los batches con su línea de
+inicio sin ejecutar nada — útil para revisar un script antes de lanzarlo.
+
 ---
 
 ## Decisiones de diseño
@@ -165,6 +194,21 @@ desarrollador configure bien su `.mcp.json`.
   lugar de los resources.
 - **`execute_read_query` devuelve 100 filas por defecto** (máximo 1000). Si una skill necesita
   más, tiene que paginar con `offset`.
+- **`execute_sql_file` ejecuta todo el script en una sola transacción.** No es solo por
+  atomicidad: un `Request` creado sobre el pool coge y suelta conexión en cada batch, así que sin
+  transacción los batches irían a conexiones distintas y se rompería la semántica de `GO` (el
+  `SET ANSI_NULLS ON` no aplicaría al `CREATE PROCEDURE` siguiente, y una `#tmp` del primer batch
+  no existiría en el segundo). Consecuencia: **las sentencias que no admiten transacción no son
+  soportadas** — `CREATE`/`ALTER DATABASE`, `BACKUP`, `CREATE FULLTEXT INDEX`.
+- **`execute_sql_file` rechaza un `USE` al principio de un batch.** Cambiaría la base de datos de
+  una conexión que después vuelve al pool y contaminaría llamadas posteriores. La base de datos se
+  elige con `dbKey`.
+- **Los `SET` del script sobreviven en la conexión.** Antes del commit se restauran los valores por
+  defecto de tedious (`ANSI_NULLS`, `QUOTED_IDENTIFIER` y compañía), pero es un repaso pragmático,
+  no un reset de conexión: un `SET` menos habitual puede quedar activo en esa conexión del pool.
+- **Los `.sql` deben llevar BOM si no son UTF-8.** SSMS guarda en UTF-16LE con BOM, que se detecta
+  y decodifica bien. Un UTF-16 **sin** BOM se rechaza con un error claro en lugar de mandar texto
+  con NUL al servidor. Tope de tamaño: 2 MB, y 500 batches por fichero.
 
 ---
 

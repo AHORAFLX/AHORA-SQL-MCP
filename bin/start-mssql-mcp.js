@@ -19,20 +19,25 @@
  * Escritura (solo local o pruebas):
  *   ... --allow-writes
  *
+ * Ficheros .sql fuera del proyecto (execute_sql_file):
+ *   ... --allow-sql-dir "C:\Codigo GIT\skills"
+ *
  * POLITICA: sin --allow-writes el servidor arranca en SOLO LECTURA. La variable
  * MSSQL_ENABLE_WRITES se exporta SIEMPRE de forma explicita (true o false), nunca
  * se deja sin definir, para que nada del entorno pueda activarla por accidente.
+ * Lo mismo con MSSQL_SQL_DIRS: se exporta siempre, aunque este vacia.
  */
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
 
 function parseArgs(argv) {
-  const out = { connections: [], allowWrites: false };
+  const out = { connections: [], allowWrites: false, sqlDirs: [] };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--config-file") out.configFile = argv[++i];
     else if (argv[i] === "--connection-name") out.connections.push(argv[++i]);
     else if (argv[i] === "--allow-writes") out.allowWrites = true;
+    else if (argv[i] === "--allow-sql-dir") out.sqlDirs.push(argv[++i]);
     else if (argv[i] === "--port") out.port = argv[++i];
     else {
       console.error(`Argumento no reconocido: ${argv[i]}`);
@@ -183,7 +188,9 @@ function applyConnection(env, prefix, parts, label, portOverride) {
 }
 
 function main() {
-  const { configFile, connections, allowWrites, port } = parseArgs(process.argv.slice(2));
+  const { configFile, connections, allowWrites, port, sqlDirs } = parseArgs(
+    process.argv.slice(2)
+  );
 
   if (!configFile || connections.length === 0) {
     console.error(
@@ -191,7 +198,8 @@ function main() {
         "  --config-file <ruta a Web.config o appsettings.json>\n" +
         "  --connection-name <NombreConexion[:alias]>   (repetible para multi-BD)\n" +
         "  --port <puerto>                              (opcional; salida si SQL Browser esta parado)\n" +
-        "  --allow-writes                               (opcional, solo local o pruebas)"
+        "  --allow-writes                               (opcional, solo local o pruebas)\n" +
+        "  --allow-sql-dir <carpeta>                    (opcional, repetible; carpetas extra para execute_sql_file)"
     );
     process.exit(1);
   }
@@ -226,11 +234,31 @@ function main() {
   // Explicito siempre, en los dos sentidos. Nunca sin definir.
   env.MSSQL_ENABLE_WRITES = allowWrites ? "true" : "false";
 
+  // Carpetas extra para execute_sql_file. La carpeta del proyecto (el cwd) va
+  // permitida siempre y la resuelve el servidor; aqui solo se anaden las extras.
+  // Se exporta siempre, aunque este vacia, por el mismo motivo que
+  // MSSQL_ENABLE_WRITES: que nada del entorno pueda autorizar carpetas.
+  const resolvedSqlDirs = [];
+  for (const dir of sqlDirs) {
+    if (!fs.existsSync(dir)) {
+      console.error(`No existe la carpeta indicada en --allow-sql-dir: ${dir}`);
+      process.exit(1);
+    }
+    resolvedSqlDirs.push(fs.realpathSync(dir));
+  }
+  env.MSSQL_SQL_DIRS = resolvedSqlDirs.join(path.delimiter);
+
   const mode = allowWrites ? "LECTURA-ESCRITURA" : "SOLO LECTURA";
   console.error("─".repeat(64));
   console.error(`AHORA-SQL-MCP — modo ${mode}`);
   for (const r of resolved) {
     console.error(`  [${r.key}] ${r.target} / ${r.database}`);
+  }
+  // La carpeta del proyecto depende de donde se arranque el servidor, asi que se
+  // imprime: es la unica forma de ver de un vistazo que raiz esta en vigor.
+  console.error(`  SQL desde: ${fs.realpathSync(process.cwd())} (carpeta del proyecto)`);
+  for (const dir of resolvedSqlDirs) {
+    console.error(`             ${dir} (--allow-sql-dir)`);
   }
   if (resolved.some((r) => r.viaInstance)) {
     console.error(

@@ -1,6 +1,7 @@
 const modules = [
   require("./execute-read-query"),
   require("./execute-write-query"),
+  require("./execute-sql-file"),
   require("./list-databases"),
   require("./describe-database"),
   require("./list-tables"),

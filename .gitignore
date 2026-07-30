@@ -140,3 +140,7 @@ dist
 
 # Local docs (plans, scratch notes)
 docs/
+
+# Scratch .sql files written by scripts/integration.js (removed on exit; this is
+# only a net for a crashed run)
+.integration-tmp/

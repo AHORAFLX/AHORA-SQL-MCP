@@ -5,10 +5,11 @@ architecture and security model. For installation and the `.mcp.json` used in AH
 see the [README](../README.md).
 
 A Node.js Model Context Protocol server for Microsoft SQL Server. Exposes a configured database
-(or set of databases) to an MCP client via 11 introspection and query tools, table resources and
+(or set of databases) to an MCP client via 12 introspection and query tools, table resources and
 guided prompts, over stdio.
 
-Read-only by default. `MSSQL_ENABLE_WRITES=true` opts into `execute_write_query`.
+Read-only by default. `MSSQL_ENABLE_WRITES=true` opts into `execute_write_query` and
+`execute_sql_file`.
 
 > In AHORA projects you never set these variables by hand: `bin/start-mssql-mcp.js` derives them
 > from the project's `Web.config` / `appsettings.json` and always exports `MSSQL_ENABLE_WRITES`
@@ -60,15 +61,28 @@ credentials fall back to the global `MSSQL_USER` / `MSSQL_PASSWORD` / `MSSQL_SER
 ### Write opt-in
 
 ```ini
-MSSQL_ENABLE_WRITES=true   # enables execute_write_query; defaults to false
+MSSQL_ENABLE_WRITES=true   # enables execute_write_query and execute_sql_file; defaults to false
 ```
 
-When disabled, `execute_write_query` returns an error before any connection attempt.
-`execute_read_query` always runs inside a transaction that is rolled back regardless of outcome,
-so accidental writes inside a "read" query are non-durable.
+When disabled, `execute_write_query` returns an error before any connection attempt, and
+`execute_sql_file` only accepts `dryRun:true`. `execute_read_query` always runs inside a
+transaction that is rolled back regardless of outcome, so accidental writes inside a "read" query
+are non-durable.
 
 For real safety, also give the configured DB user only the grants you intend it to have — least
 privilege is the source of truth, not the tool split.
+
+### SQL file access opt-in
+
+```ini
+MSSQL_SQL_DIRS=C:\Codigo GIT\skills;D:\scripts   # extra roots for execute_sql_file
+```
+
+`execute_sql_file` always accepts files under the **project folder** — the server's working
+directory, which is the project root when Claude Code launches it from `.mcp.json`. Nothing needs
+configuring for that case. `MSSQL_SQL_DIRS` (a `path.delimiter`-separated list, set by
+`--allow-sql-dir`) adds roots outside it. Every path is compared after `realpath`, so symlinks and
+`..` cannot walk out of an allowed root.
 
 ## Environment variables
 
@@ -96,9 +110,10 @@ launched with, and nothing else. See the [README](../README.md) for the reasonin
 
 ### Server behavior
 
-| Variable              | Required | Default | Effect                                                                                                                        |
-| --------------------- | -------- | ------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `MSSQL_ENABLE_WRITES` | no       | `false` | When `true`, `execute_write_query` is allowed to run. With it unset/false, the tool errors out before any connection attempt. |
+| Variable              | Required | Default | Effect                                                                                                                                            |
+| --------------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MSSQL_ENABLE_WRITES` | no       | `false` | When `true`, `execute_write_query` and `execute_sql_file` are allowed to run. With it unset/false, both error out before any connection attempt.   |
+| `MSSQL_SQL_DIRS`      | no       | -       | Extra roots `execute_sql_file` may read from, separated by `path.delimiter`. The project folder (the server's cwd) is always allowed on top of it. |
 
 ### Integration script (`scripts/integration.js`, never read by the server)
 
@@ -124,10 +139,42 @@ same payload as a typed object).
 
 ### Query tools
 
-| Tool                  | Annotations          | Notes                                                                                                                                           |
-| --------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `execute_read_query`  | readOnly, idempotent | Streamed, rollback-only. Server cancels after `offset + limit` rows. Inputs: `query`, optional `dbKey`, `limit` (≤1000, default 100), `offset`. |
-| `execute_write_query` | destructive          | Requires `MSSQL_ENABLE_WRITES=true`. Inputs: `query`, optional `dbKey`.                                                                         |
+| Tool                  | Annotations          | Notes                                                                                                                                                                          |
+| --------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `execute_read_query`  | readOnly, idempotent | Streamed, rollback-only. Server cancels after `offset + limit` rows. Inputs: `query`, optional `dbKey`, `limit` (≤1000, default 100), `offset`.                                |
+| `execute_write_query` | destructive          | Requires `MSSQL_ENABLE_WRITES=true`. Inputs: `query`, optional `dbKey`.                                                                                                        |
+| `execute_sql_file`    | destructive          | `sqlcmd -i` equivalent: splits a .sql file on `GO` and runs it. Requires `MSSQL_ENABLE_WRITES=true` unless `dryRun:true`. Inputs: `path`, optional `dbKey`, `dryRun`, `maxRowsPerBatch`. |
+
+#### `execute_sql_file`
+
+The way to deploy a script: no 10k character cap, `GO` separators handled, and the file is read
+from disk instead of being retyped into a tool argument.
+
+- **Path policy** — the file must sit under the project folder (the server's cwd) or under a root
+  in `MSSQL_SQL_DIRS`. Relative paths resolve against the project folder. Only `.sql`; max 2 MB and
+  500 batches.
+- **Encoding** — BOM-driven: UTF-8, UTF-8 BOM, UTF-16LE BOM (the SSMS default) and UTF-16BE BOM.
+  BOM-less UTF-16 is rejected rather than sent to the server as NUL-riddled text.
+- **Splitting** — `GO` is recognized only when it is the whole line (a trailing `--` comment and a
+  `GO n` repeat count are allowed). A `GO` inside a string literal, a bracketed identifier or a
+  line/block comment is not a separator.
+- **One transaction, one connection** — all batches run in a single `mssql.Transaction`. This is a
+  correctness requirement, not just atomicity: a `Request` built on the pool acquires and releases a
+  connection per `.batch()`, so batches would otherwise land on different connections and `GO`
+  semantics would break (`SET ANSI_NULLS ON` would not apply to the following `CREATE PROCEDURE`, a
+  `#temp` from batch 1 would be gone in batch 2). Consequence: statements that cannot run inside a
+  transaction (`CREATE`/`ALTER DATABASE`, `BACKUP`, `CREATE FULLTEXT INDEX`) are unsupported.
+- **Errors name a file line** — tedious reports `lineNumber` relative to the batch it sent; the tool
+  adds the batch's start line back, so the message points at `file:line`. The transaction is rolled
+  back, so a failed script applies nothing.
+- **`USE` is rejected** at the start of a batch: it would retarget a pooled connection and leak into
+  later calls. Use `dbKey`.
+- **Session options are scrubbed** before commit (`ANSI_NULLS`, `ANSI_PADDING`, `ANSI_WARNINGS`,
+  `ANSI_NULL_DFLT_ON`, `ARITHABORT`, `CONCAT_NULL_YIELDS_NULL`, `QUOTED_IDENTIFIER`,
+  `NUMERIC_ROUNDABORT`) because a script's `SET` survives on the pooled connection. It is a
+  pragmatic scrub of what scripts actually touch, not a real connection reset.
+- **`dryRun:true`** parses and reports the batches (`index`, `startLine`, `endLine`, `repeat`,
+  `preview`) without opening a pool. It is the only mode available on a read-only server.
 
 ### Catalog (paginated)
 
@@ -243,10 +290,14 @@ src/
 │   ├── pools.js          # per-dbKey ConnectionPool cache
 │   ├── safety.js         # runRead (rollback-only) + runWrite (gated)
 │   └── introspection.js  # parameterized INFORMATION_SCHEMA / sys.* queries
+├── sql/
+│   ├── batches.js        # BOM decoding + GO splitting (pure, no I/O)
+│   └── files.js          # allowed-roots policy for execute_sql_file
 └── tools/
     ├── index.js          # tool barrel
     ├── execute-read-query.js
     ├── execute-write-query.js
+    ├── execute-sql-file.js
     ├── list-databases.js
     ├── describe-database.js
     ├── list-tables.js
@@ -268,7 +319,15 @@ src/
   you need real isolation against intentional misuse.
 - **Write opt-in** — `execute_write_query` is gated by `MSSQL_ENABLE_WRITES=true`. When disabled it
   errors out _before_ a connection is acquired, so no resources are spent and no probing is
-  possible.
+  possible. `execute_sql_file` checks the same gate before it even opens the file, so on a read-only
+  server it cannot be used to probe the filesystem either.
+- **File access is scoped** — `execute_sql_file` is the only tool that touches the filesystem, and it
+  only reads `.sql` files under the project folder or under a root explicitly passed to
+  `--allow-sql-dir`. Containment is checked after `realpath` on both sides, with `path.relative`, so
+  a symlink, a `..` or a sibling sharing a prefix (`C:\proy` vs `C:\proyecto-ajeno`) cannot escape.
+  The roots are resolved once and memoized, so a later `process.chdir` cannot move the boundary.
+  Note this is a scoping guardrail, not a confidentiality boundary: the MCP server runs as the same
+  user as the MCP client, which can already read those files.
 - **No `.env` loading** — configuration comes only from the environment the process is launched
   with, so a stray `.env` in the working directory cannot set `MSSQL_ENABLE_WRITES`.
 - **Parameterized introspection** — every `list_*`/`describe_*` SQL uses `@param` placeholders
@@ -290,8 +349,11 @@ npm test
 
 Runs unit tests with the built-in `node --test` runner. No external DB needed — the suite covers
 config parsing, validation, identifier escaping, the rollback-only contract, pool caching/retry,
-parameterized SQL placeholders, tool registration metadata and the wrapper's connection-string
-parsing.
+parameterized SQL placeholders, tool registration metadata, the wrapper's connection-string
+parsing, BOM decoding and `GO` splitting, and the allowed-roots path policy.
+
+The symlink-escape test is skipped when the environment does not permit creating symlinks (on
+Windows that needs Developer Mode or elevation).
 
 For interactive end-to-end testing against a real database, use the MCP Inspector:
 
@@ -322,8 +384,14 @@ docker rm -f mcp-mssql-test
 ```
 
 The script creates `mcp_test_<timestamp>` inside the server, seeds it (Users, Orders with FK +
-index, a view, a stored procedure, 503 rows), runs ~20 tool-level assertions, and drops the
+index, a view, a stored procedure, 503 rows), runs ~30 tool-level assertions, and drops the
 database in a `finally` block — even on failure.
+
+The `execute_sql_file` assertions write scratch scripts to `.integration-tmp/` under the project
+folder (the only place the tool reads from by default) and delete the folder in a `finally`. They
+are what actually proves the claims a mocked test cannot: that `GO`-separated batches share one
+connection (a `#temp` table survives across batches), that a mid-script failure names the right
+file line, and that it rolls everything back.
 
 Override targets via `MSSQL_TEST_SERVER`, `MSSQL_TEST_PORT`, `MSSQL_TEST_USER` if you'd rather
 point it at an existing SQL Server, LocalDB, or Azure SQL.

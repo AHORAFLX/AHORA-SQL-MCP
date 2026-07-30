@@ -169,6 +169,7 @@ module.exports = {
   splitTableIdentifier,
   quoteTable,
   writesEnabled,
+  attachAbort,
   runRead,
   runWrite,
   streamRead,

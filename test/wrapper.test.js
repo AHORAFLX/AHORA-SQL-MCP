@@ -112,3 +112,27 @@ test("parseArgs: allowWrites es false por defecto", () => {
   const a = parseArgs(["--config-file", "W.config", "--connection-name", "Data"]);
   assert.strictEqual(a.allowWrites, false);
 });
+
+test("parseArgs: acumula varios --allow-sql-dir", () => {
+  const a = parseArgs([
+    "--config-file", "W.config",
+    "--connection-name", "Data",
+    "--allow-sql-dir", "C:\\Codigo GIT\\skills",
+    "--allow-sql-dir", "D:\\scripts",
+  ]);
+  assert.deepStrictEqual(a.sqlDirs, ["C:\\Codigo GIT\\skills", "D:\\scripts"]);
+});
+
+test("parseArgs: sqlDirs es una lista vacia por defecto", () => {
+  const a = parseArgs(["--config-file", "W.config", "--connection-name", "Data"]);
+  assert.deepStrictEqual(a.sqlDirs, []);
+});
+
+test("cleanEnv elimina un MSSQL_SQL_DIRS heredado", () => {
+  process.env.MSSQL_SQL_DIRS = "C:\\cualquier-cosa";
+  try {
+    assert.ok(!("MSSQL_SQL_DIRS" in cleanEnv()));
+  } finally {
+    delete process.env.MSSQL_SQL_DIRS;
+  }
+});

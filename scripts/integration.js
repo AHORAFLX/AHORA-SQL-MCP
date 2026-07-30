@@ -34,7 +34,11 @@
  *   - describe_table, describe_procedure, list_indexes, list_foreign_keys (with pagination)
  *   - execute_read_query: returns rows, streaming cutoff (truncated=true), rollback isolation
  *   - execute_write_query: rejected when writes off, persists when writes on
+ *   - execute_sql_file: dry run, GO splitting, cross-batch session state (the pinned-connection
+ *     claim), error-to-file-line mapping, all-or-nothing rollback, path and USE rejection
  */
+const fs = require("fs");
+const path = require("path");
 const sql = require("mssql");
 
 const SERVER = process.env.MSSQL_TEST_SERVER || "localhost";
@@ -385,7 +389,161 @@ async function runTests() {
     r.structuredContent.recordset[0].c === 3
   );
 
+  await runSqlFileTests(findTool);
+
   delete process.env.MSSQL_ENABLE_WRITES;
+}
+
+/**
+ * execute_sql_file, against a real server.
+ *
+ * The unit tests cover splitting and path policy without a database; what only a
+ * real server can prove is that all the batches land on ONE connection (so `GO`
+ * semantics hold) and that a mid-script failure leaves nothing behind.
+ *
+ * Scripts are written under the project folder because that is the only place the
+ * tool reads from by default - which is itself part of what this exercises.
+ */
+async function runSqlFileTests(findTool) {
+  const tool = findTool("execute_sql_file");
+  const dir = path.join(process.cwd(), ".integration-tmp");
+  fs.mkdirSync(dir, { recursive: true });
+  const rel = (name) => path.join(".integration-tmp", name);
+  const write = (name, lines) =>
+    fs.writeFileSync(path.join(dir, name), lines.join("\r\n"), "utf8");
+
+  try {
+    // Deploy script in SSMS shape: SET options in their own batches, then a proc.
+    write("deploy.sql", [
+      "SET ANSI_NULLS ON",
+      "GO",
+      "SET QUOTED_IDENTIFIER ON",
+      "GO",
+      "-- GO inside a comment must not split",
+      "CREATE PROCEDURE dbo.sp_IntegrationDeployed",
+      "AS",
+      "BEGIN",
+      "  SELECT 'GO' AS Marker",
+      "END",
+      "GO",
+    ]);
+
+    // Dry run must parse without executing.
+    process.env.MSSQL_ENABLE_WRITES = "false";
+    let r = await tool.handler({ path: rel("deploy.sql"), dryRun: true });
+    check(
+      "execute_sql_file dry run finds 3 batches and executes nothing",
+      r.structuredContent.batchCount === 3 &&
+        r.structuredContent.committed === false,
+      `batchCount=${r.structuredContent.batchCount}`
+    );
+    check(
+      "execute_sql_file dry run maps batch 3 to file line 5",
+      r.structuredContent.batches[2].startLine === 5,
+      `startLine=${r.structuredContent.batches[2].startLine}`
+    );
+
+    let threw = false;
+    try {
+      await tool.handler({ path: rel("deploy.sql"), dryRun: false });
+    } catch (err) {
+      threw = /needs writes enabled/i.test(err.message);
+    }
+    check("execute_sql_file rejects a real run when writes are off", threw);
+
+    process.env.MSSQL_ENABLE_WRITES = "true";
+    r = await tool.handler({ path: rel("deploy.sql"), dryRun: false });
+    check(
+      "execute_sql_file executes all batches and commits",
+      r.structuredContent.committed === true &&
+        r.structuredContent.batches.length === 3
+    );
+
+    r = await findTool("describe_procedure").handler({
+      procedure: "dbo.sp_IntegrationDeployed",
+    });
+    check(
+      "execute_sql_file actually created the procedure",
+      Array.isArray(r.structuredContent.parameters)
+    );
+
+    // The pinned-connection claim: a #temp table created in batch 1 must still
+    // exist in batch 2. If the batches used different pooled connections this
+    // fails with "Invalid object name '#IntegrationTmp'".
+    write("session.sql", [
+      "CREATE TABLE #IntegrationTmp (Id INT)",
+      "GO",
+      "INSERT INTO #IntegrationTmp (Id) VALUES (1), (2)",
+      "GO",
+      "SELECT COUNT(*) AS c FROM #IntegrationTmp",
+      "GO",
+    ]);
+    r = await tool.handler({
+      path: rel("session.sql"),
+      dryRun: false,
+      maxRowsPerBatch: 5,
+    });
+    check(
+      "execute_sql_file keeps session state across GO batches (one connection)",
+      r.structuredContent.batches[2].rows?.[0]?.c === 2,
+      JSON.stringify(r.structuredContent.batches[2])
+    );
+
+    // Mid-script failure: the error must name the failing FILE line, and the
+    // successful earlier batch must not survive.
+    write("broken.sql", [
+      "INSERT INTO dbo.Users (Name, Email) VALUES ('Ghost', 'g@example.com')",
+      "GO",
+      "SELECT 1",
+      "GO",
+      "SELECT * FROM dbo.NoSuchTable",
+      "GO",
+    ]);
+    let message = "";
+    try {
+      await tool.handler({ path: rel("broken.sql"), dryRun: false });
+    } catch (err) {
+      message = err.message;
+    }
+    check(
+      "execute_sql_file error points at the failing file line (5)",
+      /broken\.sql:5\b/.test(message),
+      message
+    );
+    r = await findTool("execute_read_query").handler({
+      query: "SELECT COUNT(*) AS c FROM dbo.Users WHERE Name = 'Ghost'",
+      limit: 10,
+      offset: 0,
+    });
+    check(
+      "execute_sql_file rolls the whole script back on failure",
+      r.structuredContent.recordset[0].c === 0
+    );
+
+    // USE would retarget a pooled connection.
+    write("with-use.sql", ["USE [master]", "GO", "SELECT 1", "GO"]);
+    threw = false;
+    try {
+      await tool.handler({ path: rel("with-use.sql"), dryRun: true });
+    } catch (err) {
+      threw = /starts with USE/.test(err.message);
+    }
+    check("execute_sql_file rejects a leading USE", threw);
+
+    // Outside the project folder, with no --allow-sql-dir root.
+    const outside = path.join(require("os").tmpdir(), `mcp-outside-${Date.now()}.sql`);
+    fs.writeFileSync(outside, "SELECT 1", "utf8");
+    threw = false;
+    try {
+      await tool.handler({ path: outside, dryRun: true });
+    } catch (err) {
+      threw = /outside the allowed folders/.test(err.message);
+    }
+    check("execute_sql_file rejects a file outside the allowed roots", threw);
+    fs.rmSync(outside, { force: true });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 async function main() {
