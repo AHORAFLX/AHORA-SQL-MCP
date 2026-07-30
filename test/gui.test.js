@@ -152,6 +152,63 @@ test("validate resuelve las cadenas vacias de Core desde el fichero de entorno",
   });
 });
 
+test("validate prueba la conexion de verdad y lo reporta aparte de resolver", async () => {
+  // El servidor del fixture no existe: la cadena se resuelve pero no se conecta, y
+  // eso tiene que distinguirse — son dos fallos distintos con soluciones distintas.
+  const root = coreProject();
+  await withGui(async ({ call, origin }) => {
+    const det = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+    const core = det.files.find((f) => f.type === "core");
+    const r = await call("/api/validate", {
+      origin,
+      body: {
+        configFile: core.path,
+        environment: det.defaultEnvironment,
+        names: [{ name: "DataConnectionString", alias: "data" }],
+      },
+    });
+    const [result] = r.json.results;
+    assert.equal(result.ok, true, "la cadena se resuelve");
+    assert.equal(typeof result.connected, "boolean", "y se informa de si conecta");
+  });
+});
+
+test("validate sin fichero de configuracion intenta conectar con los datos tecleados", async () => {
+  // Es el caso de la carpeta vacia: comprobar que los campos no estan vacios no
+  // vale nada, porque el fallo tipico es una errata.
+  await withGui(async ({ call, origin }) => {
+    const r = await call("/api/validate", {
+      origin,
+      body: {
+        configFile: null,
+        manual: {
+          server: "127.0.0.1,9999",
+          database: "BD",
+          user: "sa",
+          password: "no-importa",
+        },
+      },
+    });
+    assert.equal(r.status, 200);
+    const [result] = r.json.results;
+    assert.equal(result.manual, true);
+    assert.equal(result.ok, false, "no hay servidor en ese puerto");
+    assert.ok(result.error, "y se dice por que");
+    assert.ok(!result.error.includes("no-importa"), "sin filtrar la contrasena");
+  });
+});
+
+test("validate sin fichero y con datos incompletos falla con mensaje", async () => {
+  await withGui(async ({ call, origin }) => {
+    const r = await call("/api/validate", {
+      origin,
+      body: { configFile: null, manual: { server: "PC", database: "BD" } },
+    });
+    assert.equal(r.status, 400);
+    assert.match(r.json.error, /Faltan datos/);
+  });
+});
+
 test("validate informa del fallo sin reventar", async () => {
   const root = coreProject();
   await withGui(async ({ call, origin }) => {
@@ -277,4 +334,16 @@ test("la pagina servida es autocontenida: sin recursos externos", () => {
   assert.ok(!/src\s*=\s*["']https?:/i.test(html), "sin scripts externos");
   assert.ok(!/href\s*=\s*["']https?:/i.test(html), "sin hojas de estilo externas");
   assert.ok(html.includes("t0ken"), "el token debe viajar en la pagina");
+});
+
+test("la pagina precarga la carpeta de trabajo, igual que el asistente de terminal", () => {
+  // El exe no tiene que estar dentro del proyecto: la ruta se propone y se puede
+  // editar. Antes el campo salia vacio y habia que teclearla siempre.
+  const html = gui.renderPage("t0ken", "C:\\proy\\mio");
+  assert.match(html, /id="dir" value="C:\\proy\\mio"/);
+});
+
+test("la carpeta precargada se escapa para no romper el atributo", () => {
+  const html = gui.renderPage("t0ken", 'C:\\ra"ra&<x>');
+  assert.ok(html.includes('value="C:\\ra&quot;ra&amp;&lt;x>"'), "comillas y & escapados");
 });

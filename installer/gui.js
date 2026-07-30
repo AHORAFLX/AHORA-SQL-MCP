@@ -20,7 +20,6 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const http = require("http");
-const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 
@@ -40,51 +39,11 @@ const {
   CLIENTS,
   PROFILES,
 } = require("./setup");
+const { credentialsPathFor, writeCredentialsFile } = require("./credentials");
+const { probeConnection } = require("./probe");
 
 const PKG_VERSION = require("../package.json").version;
 const TOKEN_HEADER = "x-ahora-token";
-
-/** Donde se guardan las credenciales cuando el proyecto no tiene fichero de configuracion. */
-function credentialsPathFor(projectDir) {
-  const base =
-    process.platform === "win32"
-      ? path.join(process.env.APPDATA || os.homedir(), "ahora-sql-mcp")
-      : path.join(
-          process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"),
-          "ahora-sql-mcp"
-        );
-  const name = path.basename(path.resolve(projectDir)).replace(/[^a-zA-Z0-9_.-]/g, "_");
-  return path.join(base, `${name || "proyecto"}.json`);
-}
-
-function writeCredentialsFile(projectDir, connections) {
-  const target = credentialsPathFor(projectDir);
-  fs.mkdirSync(path.dirname(target), { recursive: true });
-
-  const one = (c) => ({
-    server: c.server,
-    database: c.database,
-    user: c.user,
-    password: c.password,
-    ...(c.port ? { port: c.port } : {}),
-  });
-  const doc =
-    connections.length === 1 && !connections[0].alias
-      ? one(connections[0])
-      : {
-          connections: Object.fromEntries(
-            connections.map((c) => [c.alias || "maindb", one(c)])
-          ),
-        };
-
-  fs.writeFileSync(target, `${JSON.stringify(doc, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  try {
-    fs.chmodSync(target, 0o600);
-  } catch {
-    // en Windows no aplica; el fichero queda igualmente fuera del repositorio
-  }
-  return target;
-}
 
 /** Detecta los ficheros de configuracion de un proyecto y sus nombres de conexion. */
 function detect(projectDir) {
@@ -110,25 +69,51 @@ function detect(projectDir) {
   return { root, files, defaultEnvironment: resolveEnvironment(undefined) };
 }
 
-/** Valida cada conexion elegida contra el fichero real. */
-function validate({ configFile, environment, names }) {
+/**
+ * Valida la conexion.
+ *
+ * Con fichero de configuracion: resuelve cada cadena y ademas intenta CONECTAR.
+ * Sin fichero: los datos vienen tecleados, asi que conectar es la unica forma de
+ * saber si son correctos — comprobar que los campos no estan vacios no vale nada.
+ */
+async function validate({ configFile, environment, names = [], manual }) {
+  if (!configFile) {
+    if (!manual || !manual.server || !manual.database || !manual.user || !manual.password) {
+      throw new Error("Faltan datos: servidor, base de datos, usuario y contrasena.");
+    }
+    const probe = await probeConnection({
+      datasource: manual.server,
+      initialcatalog: manual.database,
+      userid: manual.user,
+      password: manual.password,
+      ...(manual.port ? { datasource: `${manual.server},${manual.port}` } : {}),
+    });
+    return [{ name: "(datos introducidos)", manual: true, ...probe }];
+  }
+
   const resolved = resolveConfigFile(configFile);
-  return names.map(({ name, alias }) => {
+  const results = [];
+  for (const { name, alias } of names) {
     try {
       const { value, source } = readConnString(resolved, name, { environment });
-      const info = applyConnection({}, "MSSQL_", parseAdoConnectionString(value), name);
-      return {
+      const parts = parseAdoConnectionString(value);
+      const info = applyConnection({}, "MSSQL_", parts, name);
+      const probe = await probeConnection(parts);
+      results.push({
         name,
         alias,
         ok: true,
         target: info.target,
         database: info.database,
         source: path.basename(source),
-      };
+        connected: probe.ok,
+        connectError: probe.ok ? undefined : probe.error,
+      });
     } catch (err) {
-      return { name, alias, ok: false, error: err.message };
+      results.push({ name, alias, ok: false, error: err.message });
     }
-  });
+  }
+  return results;
 }
 
 function write(payload) {
@@ -245,9 +230,9 @@ function readBody(req) {
  * `onReady` recibe { url, port, token } en cuanto escucha: es lo que permite
  * probar los endpoints sin tener que rascar la URL de la salida por consola.
  */
-function startGui({ open = true, host = "127.0.0.1", onReady, quiet = false } = {}) {
+function startGui({ open = true, host = "127.0.0.1", onReady, quiet = false, cwd = process.cwd() } = {}) {
   const token = crypto.randomBytes(24).toString("hex");
-  const html = renderPage(token);
+  const html = renderPage(token, cwd);
 
   return new Promise((resolve, reject) => {
     let finished = false;
@@ -294,7 +279,7 @@ function startGui({ open = true, host = "127.0.0.1", onReady, quiet = false } = 
           case "/api/detect":
             return sendJson(res, 200, detect(body.projectDir));
           case "/api/validate":
-            return sendJson(res, 200, { results: validate(body) });
+            return sendJson(res, 200, { results: await validate(body) });
           case "/api/write":
             return sendJson(res, 200, write(body));
           case "/api/quit":
@@ -333,7 +318,19 @@ function startGui({ open = true, host = "127.0.0.1", onReady, quiet = false } = 
   });
 }
 
-function renderPage(token) {
+function escAttr(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+/**
+ * `cwd` precarga el campo de la carpeta del proyecto.
+ *
+ * Es lo mismo que hace el asistente de terminal al ofrecer process.cwd() como
+ * valor por defecto: si lanzas el instalador desde la carpeta del proyecto no
+ * tienes que teclear nada, y si no, editas el campo. El exe NO tiene que estar en
+ * el proyecto.
+ */
+function renderPage(token, cwd = process.cwd()) {
   const profiles = PROFILES.map(
     (p) => `<option value="${p.key}" data-canwrite="${p.canWrite}">${p.label}</option>`
   ).join("");
@@ -396,10 +393,12 @@ function renderPage(token) {
     <h2>1 · Proyecto</h2>
     <label for="dir">Carpeta raiz del proyecto</label>
     <div class="row">
-      <input type="text" id="dir" placeholder="C:\\ruta\\a\\mi\\proyecto">
+      <input type="text" id="dir" value="${escAttr(cwd)}" placeholder="C:\\ruta\\a\\mi\\proyecto">
       <button id="btnDetect">Detectar</button>
     </div>
-    <p class="hint">Se buscan Web.config y appsettings.json dentro de la carpeta.</p>
+    <p class="hint">Viene rellenado con la carpeta desde la que has lanzado el instalador.
+      <strong>Puedes cambiarla</strong>: el instalador no tiene que estar dentro del proyecto.
+      Aqui se buscan el Web.config y el appsettings.json.</p>
     <div id="detectOut"></div>
   </section>
 
@@ -452,9 +451,14 @@ function renderPage(token) {
     <fieldset>
       <legend>Cliente MCP</legend>
       <label><input type="checkbox" id="cClaude" checked style="width:auto">
-        Claude Code <span class="hint">(.mcp.json)</span></label>
+        Claude Code <span class="hint">— terminal, escritorio o extension de VS Code
+        (.mcp.json)</span></label>
       <label><input type="checkbox" id="cVscode" style="width:auto">
-        VS Code / Copilot <span class="hint">(.vscode/mcp.json)</span></label>
+        GitHub Copilot <span class="hint">— dentro de VS Code (.vscode/mcp.json)</span></label>
+      <p class="hint">Se distinguen por el agente, no por el editor: la extension de VS Code
+        <strong>es</strong> Claude Code y usa el mismo <code>.mcp.json</code>.</p>
+      <p class="hint">Claude Code pedira aprobar el servidor la primera vez que abras una sesion
+        sobre esta carpeta: hasta que aceptes no aparece ninguna herramienta.</p>
     </fieldset>
     <div class="row" style="margin-top:18px">
       <div></div><button id="btnWrite">Escribir configuracion</button>
@@ -562,37 +566,65 @@ function manualConnection() {
 }
 
 $("btnValidate").onclick = async () => {
-  $("validateOut").innerHTML = "Validando…";
+  $("btnValidate").disabled = true;
+  $("validateOut").innerHTML = "Probando la conexion contra el servidor…";
   try {
-    if (!chosenFile) {
-      const m = manualConnection();
-      if (!m.server || !m.database || !m.user || !m.password) {
-        throw new Error("Faltan datos: servidor, base de datos, usuario y contrasena.");
+    const manual = chosenFile ? null : manualConnection();
+    const names = chosenFile ? selectedNames() : [];
+    if (chosenFile && names.length === 0) throw new Error("Elige al menos una cadena de conexion.");
+
+    const { results } = await api("validate", {
+      configFile: chosenFile ? chosenFile.path : null,
+      environment: $("env").value,
+      names, manual,
+    });
+
+    const rows = results.map((r) => {
+      if (r.manual) {
+        return r.ok
+          ? '<li><span class="ok">✓</span> conectado a <strong>' + esc(r.target) + "</strong> / " +
+            esc(r.database) + (r.version ? ' <span class="hint">' + esc(r.version) + "</span>" : "") + "</li>"
+          : '<li><span class="err">✗</span> no conecta a <strong>' + esc(r.target) +
+            '</strong><br><span class="err">' + esc(r.error) + "</span></li>";
       }
-      validated = { manual: [m] };
-      $("validateOut").innerHTML = '<div class="banner good">Datos completos. ' +
-        "Se guardaran fuera del repositorio.</div>";
-    } else {
-      const names = selectedNames();
-      if (names.length === 0) throw new Error("Elige al menos una cadena de conexion.");
-      const { results } = await api("validate", {
-        configFile: chosenFile.path, environment: $("env").value, names,
-      });
-      const rows = results.map((r) => r.ok
-        ? '<li><span class="ok">✓</span> <strong>' + esc(r.name) + "</strong> → " +
-          esc(r.target) + " / " + esc(r.database) + ' <span class="hint">(de ' + esc(r.source) + ")</span></li>"
-        : '<li><span class="err">✗</span> <strong>' + esc(r.name) + "</strong> " +
-          '<span class="err">' + esc(r.error) + "</span></li>").join("");
-      $("validateOut").innerHTML = '<ul class="list">' + rows + "</ul>";
-      if (results.some((r) => !r.ok)) {
-        $("validateOut").innerHTML += '<div class="banner warn">Alguna cadena no se resuelve. ' +
-          "En .NET Core la causa habitual es el entorno.</div>";
-        return;
+      if (!r.ok) {
+        return '<li><span class="err">✗</span> <strong>' + esc(r.name) + "</strong> " +
+               '<span class="err">' + esc(r.error) + "</span></li>";
       }
-      validated = { names: results.map((r) => ({ name: r.name, alias: r.alias })) };
+      return '<li><span class="' + (r.connected ? "ok" : "err") + '">' + (r.connected ? "✓" : "✗") +
+        "</span> <strong>" + esc(r.name) + "</strong> → " + esc(r.target) + " / " + esc(r.database) +
+        ' <span class="hint">(de ' + esc(r.source) + ")</span>" +
+        (r.connected ? "" : '<br><span class="err">resuelta, pero no conecta: ' + esc(r.connectError) + "</span>") +
+        "</li>";
+    }).join("");
+    $("validateOut").innerHTML = '<ul class="list">' + rows + "</ul>";
+
+    // Que no resuelva es un error del que no se puede seguir: no hay datos.
+    if (results.some((r) => !r.manual && !r.ok)) {
+      $("validateOut").innerHTML += '<div class="banner warn">Alguna cadena no se resuelve. ' +
+        "En .NET Core la causa habitual es el entorno.</div>";
+      return;
     }
-    $("s3").hidden = false;
-  } catch (e) { $("validateOut").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; }
+    // Que no conecte si puede ser circunstancial (VPN, servidor apagado), asi que
+    // se puede seguir, pero hay que decirlo a proposito.
+    const noConecta = results.some((r) => r.manual ? !r.ok : !r.connected);
+    if (noConecta) {
+      $("validateOut").innerHTML +=
+        '<div class="banner warn">Los datos son legibles pero el servidor no responde. ' +
+        "Puede ser la VPN, el SQL Browser parado o una errata.<br>" +
+        '<label style="margin-top:8px"><input type="checkbox" id="forzar" style="width:auto"> ' +
+        "Continuar de todas formas</label></div>";
+      $("forzar").onchange = () => { $("s3").hidden = !$("forzar").checked; };
+    }
+    validated = chosenFile
+      ? { names: results.map((r) => ({ name: r.name, alias: r.alias })) }
+      : { manual: [manual] };
+    if (!noConecta) $("s3").hidden = false;
+  } catch (e) {
+    $("validateOut").innerHTML = '<p class="err">' + esc(e.message) + "</p>";
+  } finally {
+    $("btnValidate").disabled = false;
+  }
 };
 
 $("profile").onchange = () => {
@@ -634,9 +666,17 @@ $("btnWrite").onclick = async () => {
     }
     if (res.production) html += '<div class="banner warn">Marcada como PRODUCCION, solo lectura.</div>';
     else if (res.allowWrites) html += '<div class="banner warn">Escritura habilitada. Solo local o pruebas.</div>';
-    html += "<p><strong>Ahora reinicia el cliente MCP</strong> — sin reiniciar no lee la " +
-            "configuracion. Despues pide al agente: «lista las bases de datos configuradas». " +
-            "Debe responder con " + res.dbKeys.map((k) => "<code>" + esc(k) + "</code>").join(" y ") + ".</p>" +
+    html += "<p><strong>Ahora abre una sesion NUEVA sobre esta carpeta</strong> — la " +
+            "configuracion se lee al arrancar la sesion, y es del proyecto: una sesion abierta " +
+            "sobre otra carpeta no la ve.</p><ul class=\\"list\\">" +
+            "<li><strong>Claude Desktop</strong> (pestana Code): Ctrl+N y elige esta carpeta. " +
+            "No hace falta cerrar la aplicacion.</li>" +
+            "<li><strong>Claude Code en terminal</strong>: <code>cd</code> aqui y ejecuta " +
+            "<code>claude</code>. La primera vez pedira aprobar el servidor del proyecto.</li>" +
+            "<li><strong>VS Code</strong>: recarga la ventana con esta carpeta como espacio de " +
+            "trabajo.</li></ul>" +
+            "<p>Despues pide al agente: «lista las bases de datos configuradas». Debe responder con " +
+            res.dbKeys.map((k) => "<code>" + esc(k) + "</code>").join(" y ") + ".</p>" +
             '<p style="margin-top:18px"><button class="sec" id="btnQuit">Cerrar el instalador</button></p>';
     $("doneOut").innerHTML = html;
     $("s4").hidden = false;

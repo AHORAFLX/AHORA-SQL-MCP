@@ -28,16 +28,16 @@ if errorlevel 1 (
   exit /b 1
 )
 
-REM Se ejecuta desde la carpeta del proyecto, no desde la del .cmd: el instalador
-REM propone el directorio actual como raiz del proyecto.
+REM El instalador propone la carpeta actual como raiz del proyecto, pero se puede
+REM cambiar dentro. Lanzarlo desde el proyecto solo ahorra teclearla.
 echo  Carpeta actual: %CD%
 echo.
-echo  Si esta no es la raiz de tu proyecto, cierra esta ventana, copia el .cmd
-echo  a la carpeta del proyecto y vuelve a ejecutarlo desde alli.
+echo  El instalador propondra esta carpeta como raiz del proyecto. Si no es la
+echo  correcta, podras cambiarla dentro: no hace falta mover este fichero.
 echo.
 pause
 
-npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.2.0 ahora-setup
+npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.3.0 ahora-setup
 
 echo.
 if errorlevel 1 (

@@ -29,6 +29,19 @@ precedence order anyone could guess from reading a `.mcp.json`:
 | Client environment | `--from-env` | Takes the inherited `MSSQL_*` connection variables instead of argv, so credentials live in the client's `env` block. The only exception to env sanitizing — and `MSSQL_ENABLE_WRITES` / `MSSQL_SQL_DIRS` are still overwritten, so the environment can never enable writes. |
 | Credentials file | `--credentials-file <ruta>` | A JSON **outside the repository** (the installer writes it under `%APPDATA%\ahora-sql-mcp\`). For projects with no config file: `.mcp.json` gets committed, so credentials must not live there — only the path does. Flat shape for one DB, or `{"connections": {"<dbKey>": {...}}}` for several. |
 
+### The installer's connection probe
+
+Both installer front-ends **actually connect** before writing anything, via
+`installer/probe.js`, which runs the values through the same pipeline the server will use
+(`applyConnection` → `MSSQL_*` → `loadConfigsFromEnv` → `ConnectionPool`) and then issues
+`SELECT DB_NAME()`. If it connects there, it connects at runtime.
+
+This matters most with no config file: the values were typed by a human, so the usual failure is a
+typo, and field-presence checks catch none of them. A failed probe is a *result*, not an exception —
+the DB may legitimately be unreachable (VPN, stopped SQL Browser), so the installer reports it and
+requires an explicit confirmation to continue. Timeout is bounded (8 s) so a wrong host cannot stall
+a training session, and the password is stripped from any error message.
+
 ### Production guardrail
 
 `--production` marks the connection and is **incompatible with `--allow-writes`**: passing both aborts
@@ -308,6 +321,8 @@ bin/
 installer/
 ├── setup.js              # guided installer (MCP config only): terminal wizard + entry point
 ├── gui.js                # same logic behind a local self-contained HTML form
+├── probe.js              # real connection test, through the server's own pipeline
+├── credentials.js        # credentials file outside the repo (%APPDATA%)
 ├── exe-entry.js          # entry for the packaged exe (no require.main there)
 ├── build-exe.js          # Node SEA build -> dist/ahora-setup.exe
 └── INSTALAR-AHORA.cmd    # double-click launcher, no binary

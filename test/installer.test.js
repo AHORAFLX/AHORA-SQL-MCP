@@ -98,6 +98,26 @@ test("buildArgs fija la version del paquete, nunca una rama", () => {
   assert.match(PKG_SPEC, /^github:AHORAFLX\/AHORA-SQL-MCP#v\d+\.\d+\.\d+$/);
 });
 
+test("el instalador comprueba el Node DE LA MAQUINA, no el que lo ejecuta", () => {
+  // El .exe lleva su propio Node embebido: mirar process.versions.node daria ✓ en
+  // un equipo sin Node, y la configuracion escrita arranca el servidor con npx.
+  const { execFileSync } = require("node:child_process");
+  const entry = path.join(__dirname, "..", "installer", "setup.js");
+  let out = "";
+  try {
+    out = execFileSync(process.execPath, [entry, "--cli"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      // PATH sin node: es lo que se encontrara el .exe en una maquina limpia.
+      env: { ...process.env, PATH: process.platform === "win32" ? "C:\\Windows\\System32" : "/nonexistent" },
+    });
+  } catch (err) {
+    out = err.stdout || "";
+  }
+  assert.match(out, /No hay Node\.js instalado en este equipo/);
+  assert.ok(!/✓ Node/.test(out), "no puede dar por bueno el runtime embebido");
+});
+
 test("writeClientConfig: Claude Code usa .mcp.json y la clave mcpServers", () => {
   const root = tempDir("inst-claude-");
   const { target } = writeClientConfig(CLIENTS.claude, root, ["--yes", "x"]);

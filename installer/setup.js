@@ -13,12 +13,16 @@
  * falla hasta que alguien invoca una herramienta y no entiende el error; aqui el
  * fallo sale en el momento, delante de quien esta formando.
  *
+ * Funciona igual sobre una carpeta vacia: si no hay ningun fichero de configuracion
+ * del que leer la conexion, se piden los datos y se guardan fuera del repositorio.
+ *
  * Se puede lanzar sin instalar nada:
- *   npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.1.0 ahora-setup
+ *   npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP ahora-setup
  */
 const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
+const { execFileSync } = require("child_process");
 
 const {
   resolveConfigFile,
@@ -28,6 +32,8 @@ const {
   applyConnection,
   resolveEnvironment,
 } = require("../bin/start-mssql-mcp");
+const { writeCredentialsFile } = require("./credentials");
+const { probeConnection } = require("./probe");
 
 const PKG_VERSION = require("../package.json").version;
 const PKG_SPEC = `github:AHORAFLX/AHORA-SQL-MCP#v${PKG_VERSION}`;
@@ -50,14 +56,49 @@ function stripBom(text) {
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 }
 
+/** Version de un ejecutable del PATH de la MAQUINA, o null si no esta. */
+function toolVersion(command) {
+  try {
+    return execFileSync(command, ["--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      shell: process.platform === "win32",
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Comprueba el Node DE LA MAQUINA, no el que ejecuta esto.
+ *
+ * Es una distincion que importa: el .exe lleva su propio Node embebido, asi que
+ * mirar process.versions.node siempre da ✓ aunque en el equipo no haya Node
+ * instalado. Y la configuracion que escribimos arranca el servidor con `npx`, asi
+ * que sin Node en el PATH el instalador terminaria "bien" dejando un .mcp.json que
+ * no funciona.
+ */
 function checkNode() {
-  const major = Number(process.versions.node.split(".")[0]);
-  if (major < MIN_NODE_MAJOR) {
-    say(`✗ Node ${process.versions.node} es demasiado antiguo. Hace falta ${MIN_NODE_MAJOR} o superior.`);
+  const nodeVersion = toolVersion("node");
+  if (!nodeVersion) {
+    say("✗ No hay Node.js instalado en este equipo (no esta en el PATH).");
+    say("  La configuracion que se escribe arranca el servidor con `npx`, asi que");
+    say("  Node es imprescindible aunque este instalador funcione sin el.");
     say("  Instala Node LTS desde https://nodejs.org/ y vuelve a lanzar esto.");
     process.exit(1);
   }
-  say(`✓ Node ${process.versions.node}`);
+  const major = Number(String(nodeVersion).replace(/^v/, "").split(".")[0]);
+  if (Number.isFinite(major) && major < MIN_NODE_MAJOR) {
+    say(`✗ Node ${nodeVersion} es demasiado antiguo. Hace falta ${MIN_NODE_MAJOR} o superior.`);
+    say("  Instala Node LTS desde https://nodejs.org/ y vuelve a lanzar esto.");
+    process.exit(1);
+  }
+  if (!toolVersion("npx")) {
+    say(`✗ Node ${nodeVersion} esta instalado, pero npx no responde.`);
+    say("  Reinstala Node LTS: npx viene con el.");
+    process.exit(1);
+  }
+  say(`✓ Node ${nodeVersion} en el equipo`);
 }
 
 /**
@@ -189,14 +230,22 @@ function readJsonIfExists(file) {
   }
 }
 
+/**
+ * Los dos clientes se distinguen por el AGENTE, no por el editor.
+ *
+ * Es la confusion facil: la extension de VS Code ES Claude Code corriendo dentro
+ * del editor, y usa el mismo `.mcp.json` que la terminal y el escritorio. La
+ * opcion de VS Code es para GitHub Copilot, que es otro agente con su propio
+ * fichero. Etiquetar esto como "VS Code" a secas lleva a elegir el equivocado.
+ */
 const CLIENTS = {
   claude: {
-    label: "Claude Code  (.mcp.json, clave mcpServers)",
+    label: "Claude Code  —  terminal, escritorio o extension de VS Code  (.mcp.json)",
     file: (root) => path.join(root, ".mcp.json"),
     key: "mcpServers",
   },
   vscode: {
-    label: "VS Code / Copilot  (.vscode/mcp.json, clave servers)",
+    label: "GitHub Copilot dentro de VS Code  (.vscode/mcp.json)",
     file: (root) => path.join(root, ".vscode", "mcp.json"),
     key: "servers",
   },
@@ -261,6 +310,31 @@ function writeClientConfig(client, root, args) {
   return { target, replaced, others: Object.keys(doc[client.key]).filter((k) => k !== "mssql") };
 }
 
+/**
+ * Instrucciones de "reinicio" concretas por cliente.
+ *
+ * La configuracion se lee al arrancar la sesion, y es de ambito PROYECTO: si la
+ * sesion no se abre sobre la carpeta donde acabamos de escribir, no la ve.
+ */
+function restartHint(clientKeys) {
+  const lines = [];
+  if (clientKeys.includes("claude")) {
+    lines.push(
+      "· Claude Desktop (pestana Code): Ctrl+N, sesion nueva, y elige esta carpeta.",
+      "  No hace falta cerrar la aplicacion.",
+      "· Claude Code en terminal: cd a esta carpeta y ejecuta `claude`."
+    );
+    lines.push("  La primera vez te pedira APROBAR el servidor del proyecto: acepta.");
+  }
+  if (clientKeys.includes("vscode")) {
+    lines.push(
+      "· VS Code: recarga la ventana con la carpeta abierta como espacio de trabajo,",
+      "  o arranca el servidor desde la lista de servidores MCP."
+    );
+  }
+  return lines;
+}
+
 async function main() {
   title(`Instalador AHORA-SQL-MCP  v${PKG_VERSION}`);
   say("Deja el MCP de SQL configurado en la carpeta de tu proyecto.");
@@ -281,90 +355,147 @@ async function main() {
     title("2/5  Fichero de configuracion");
     say("Buscando Web.config / appsettings.json...");
     const candidates = findConfigFiles(root);
-    let configFile;
+    const MANUAL = "No hay ninguno: introduzco los datos de conexion a mano";
+    let configFile = null;
+
     if (candidates.length === 0) {
-      say("No he encontrado ninguno.");
-      configFile = path.resolve(await ask(rl, "Ruta del Web.config o appsettings.json"));
+      // Carpeta sin proyecto .NET: es un caso normal, no un error. Un implantador
+      // que solo quiere mirar una base de datos no tiene Web.config ninguno.
+      say("No he encontrado ninguno en esta carpeta.");
+      const options = ["Indico la ruta de un Web.config o appsettings.json", MANUAL];
+      const chosen = await pickFromList(rl, options, "Que hago");
+      if (chosen !== MANUAL) configFile = path.resolve(await ask(rl, "Ruta"));
     } else {
       say(`Encontrados ${candidates.length}:`);
-      const options = [...candidates.map((c) => path.relative(root, c) || c), "otra ruta…"];
+      const options = [
+        ...candidates.map((c) => path.relative(root, c) || c),
+        "otra ruta…",
+        MANUAL,
+      ];
       const chosen = await pickFromList(rl, options, "Cual uso");
-      configFile =
-        chosen === "otra ruta…"
-          ? path.resolve(await ask(rl, "Ruta"))
-          : path.join(root, chosen);
+      if (chosen === MANUAL) configFile = null;
+      else if (chosen === "otra ruta…") configFile = path.resolve(await ask(rl, "Ruta"));
+      else configFile = path.join(root, chosen);
     }
 
-    let resolved;
-    try {
-      resolved = resolveConfigFile(configFile);
-    } catch (err) {
-      say(`✗ ${err.message}`);
-      process.exit(1);
+    let resolved = null;
+    let isCore = false;
+    if (configFile) {
+      try {
+        resolved = resolveConfigFile(configFile);
+      } catch (err) {
+        say(`✗ ${err.message}`);
+        process.exit(1);
+      }
+      isCore = path.extname(resolved).toLowerCase() === ".json";
+      say(`✓ ${resolved}   (${isCore ? ".NET Core" : ".NET Framework"})`);
+    } else {
+      say("✓ Sin fichero de configuracion: los datos se pediran a continuacion.");
     }
-    const isCore = path.extname(resolved).toLowerCase() === ".json";
-    say(`✓ ${resolved}   (${isCore ? ".NET Core" : ".NET Framework"})`);
 
     // ── Cadenas de conexion, con validacion ──
-    title("3/5  Cadenas de conexion");
-    let environment = isCore
-      ? await ask(rl, "Entorno de appsettings", resolveEnvironment(undefined))
-      : undefined;
-
-    let names = listConnectionNames(resolved, { environment });
-    if (names.length === 0) {
-      say("✗ Ese fichero no declara ninguna cadena de conexion.");
-      process.exit(1);
-    }
-    say(`Declaradas: ${names.join(", ")}`);
-
+    title("3/5  Conexion");
     const connections = [];
-    const validate = (name, alias) => {
-      try {
-        const { value, source } = readConnString(resolved, name, { environment });
-        const probe = {};
-        const info = applyConnection(probe, "MSSQL_", parseAdoConnectionString(value), name);
-        say(`   ✓ ${name} → ${info.target} / ${info.database}   (de ${path.basename(source)})`);
-        connections.push({ name, alias });
-        return true;
-      } catch (err) {
-        say(`   ✗ ${name}: ${err.message}`);
-        return false;
+    const manualConnections = [];
+    let environment;
+
+    if (!resolved) {
+      // Datos a mano. Aqui la prueba de conexion no es un lujo: lo que falla
+      // normalmente es una errata al teclear, y sin conectar no se ve.
+      const server = await ask(rl, "Servidor (p. ej. PC_158\\SQL2022 o 10.0.0.9,1433)");
+      const database = await ask(rl, "Base de datos");
+      const user = await ask(rl, "Usuario");
+      const password = await ask(rl, "Contrasena");
+      if (!server || !database || !user || !password) {
+        say("✗ Faltan datos. Nada escrito.");
+        process.exit(1);
       }
-    };
+      const manual = { server, database, user, password };
 
-    const flexygo =
-      names.length >= 2 &&
-      (await askYesNo(
-        rl,
-        "¿Es Flexygo (necesita la BD de configuracion y la de datos)?",
-        true
-      ));
-
-    if (flexygo) {
-      say("Elige la de CONFIGURACION:");
-      const confName = await pickFromList(rl, names, "Configuracion");
-      say("Elige la de DATOS:");
-      const dataName = await pickFromList(rl, names.filter((n) => n !== confName), "Datos");
       say();
-      say("Validando contra el fichero real:");
-      if (!validate(confName, "config") || !validate(dataName, "data")) {
+      say("Probando la conexion de verdad...");
+      const result = await probeConnection({
+        datasource: server,
+        initialcatalog: database,
+        userid: user,
+        password,
+      });
+      if (result.ok) {
+        say(`   ✓ conectado a ${result.target} / ${result.database}`);
+        if (result.version) say(`     ${result.version}`);
+      } else {
+        say(`   ✗ no he podido conectar: ${result.error}`);
         say();
-        say("✗ Alguna cadena no se ha podido resolver. Nada escrito.");
-        if (isCore) {
-          say("  En .NET Core la causa habitual es el entorno: prueba otro nombre");
-          say("  (el error de arriba dice en que ficheros ha buscado).");
+        if (!(await askYesNo(rl, "¿Sigo de todas formas?", false))) {
+          say("✗ Nada escrito. Corrige los datos y vuelve a lanzarlo.");
+          process.exit(1);
         }
+      }
+      manualConnections.push(manual);
+    } else {
+      environment = isCore
+        ? await ask(rl, "Entorno de appsettings", resolveEnvironment(undefined))
+        : undefined;
+
+      const names = listConnectionNames(resolved, { environment });
+      if (names.length === 0) {
+        say("✗ Ese fichero no declara ninguna cadena de conexion.");
         process.exit(1);
       }
-    } else {
-      const only = names.length === 1 ? names[0] : await pickFromList(rl, names, "Cual expongo");
-      say();
-      say("Validando contra el fichero real:");
-      if (!validate(only, undefined)) {
+      say(`Declaradas: ${names.join(", ")}`);
+
+      const validate = (name, alias) => {
+        try {
+          const { value, source } = readConnString(resolved, name, { environment });
+          const env = {};
+          const info = applyConnection(env, "MSSQL_", parseAdoConnectionString(value), name);
+          say(`   ✓ ${name} → ${info.target} / ${info.database}   (de ${path.basename(source)})`);
+          connections.push({ name, alias });
+          return true;
+        } catch (err) {
+          say(`   ✗ ${name}: ${err.message}`);
+          return false;
+        }
+      };
+
+      const flexygo =
+        names.length >= 2 &&
+        (await askYesNo(
+          rl,
+          "¿Es Flexygo (necesita la BD de configuracion y la de datos)?",
+          true
+        ));
+
+      if (flexygo) {
+        say("Elige la de CONFIGURACION:");
+        const confName = await pickFromList(rl, names, "Configuracion");
+        say("Elige la de DATOS:");
+        const dataName = await pickFromList(
+          rl,
+          names.filter((n) => n !== confName),
+          "Datos"
+        );
         say();
-        say("✗ La cadena no se ha podido resolver. Nada escrito.");
-        process.exit(1);
+        say("Validando contra el fichero real:");
+        if (!validate(confName, "config") || !validate(dataName, "data")) {
+          say();
+          say("✗ Alguna cadena no se ha podido resolver. Nada escrito.");
+          if (isCore) {
+            say("  En .NET Core la causa habitual es el entorno: prueba otro nombre");
+            say("  (el error de arriba dice en que ficheros ha buscado).");
+          }
+          process.exit(1);
+        }
+      } else {
+        const only =
+          names.length === 1 ? names[0] : await pickFromList(rl, names, "Cual expongo");
+        say();
+        say("Validando contra el fichero real:");
+        if (!validate(only, undefined)) {
+          say();
+          say("✗ La cadena no se ha podido resolver. Nada escrito.");
+          process.exit(1);
+        }
       }
     }
 
@@ -418,8 +549,18 @@ async function main() {
 
     // ── Escribir ──
     title("5/5  Escribiendo configuracion");
+
+    // Sin fichero de configuracion, las credenciales van a %APPDATA%: el .mcp.json
+    // se commitea y no puede llevarlas dentro.
+    let credentialsFile;
+    if (manualConnections.length > 0) {
+      credentialsFile = writeCredentialsFile(root, manualConnections);
+      say(`✓ Credenciales, fuera del repositorio: ${credentialsFile}`);
+    }
+
     const args = buildArgs({
       configFile: resolved,
+      credentialsFile,
       connections,
       environment: isCore ? environment : undefined,
       allowWrites,
@@ -433,17 +574,28 @@ async function main() {
       if (others.length > 0) say(`   Se han conservado: ${others.join(", ")}`);
     }
 
+
     // ── Cierre ──
     title("Listo");
     say("Siguiente paso, y es imprescindible:");
     say();
-    say("  1. REINICIA el cliente MCP. Sin reiniciar no lee la configuracion.");
+    // "Reinicia el cliente" no le dice nada a nadie: en el escritorio no hay que
+    // cerrar la aplicacion, y la configuracion es del PROYECTO, asi que la sesion
+    // tiene que abrirse sobre esta carpeta o no la vera.
+    say(`  1. Abre una sesion NUEVA sobre esta carpeta:`);
+    say(`     ${root}`);
+    for (const line of restartHint(clientKeys)) say(`     ${line}`);
     say("  2. Pide al agente: «lista las bases de datos configuradas».");
     say(
-      `     Debe responder con ${connections.map((c) => `'${c.alias || "maindb"}'`).join(" y ")}.`
+      `     Debe responder con ${
+        (connections.length > 0 ? connections : manualConnections)
+          .map((c) => `'${c.alias || "maindb"}'`)
+          .join(" y ") || "'maindb'"
+      }.`
     );
     say();
-    say("Si no aparece ninguna herramienta de SQL, es que no has reiniciado.");
+    say("Si no aparece ninguna herramienta de SQL, casi siempre es una de dos:");
+    say("no has abierto una sesion nueva, o la has abierto sobre otra carpeta.");
     say("Para reconfigurar, vuelve a lanzar este instalador.");
     say();
   } finally {
