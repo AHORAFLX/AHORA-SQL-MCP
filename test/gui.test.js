@@ -311,6 +311,92 @@ test("las credenciales manuales NO acaban en el .mcp.json", async () => {
   });
 });
 
+test("write anade las reglas de lectura y NO las de escritura", async () => {
+  const root = coreProject();
+  await withGui(async ({ call, origin }) => {
+    const det = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+    const core = det.files.find((f) => f.type === "core");
+    const r = await call("/api/write", {
+      origin,
+      body: {
+        projectDir: root,
+        configFile: core.path,
+        environment: det.defaultEnvironment,
+        connections: [{ name: "DataConnectionString", alias: "data" }],
+        profileKey: "local",
+        allowWrites: true,
+        allowRules: true,
+        allowWriteRules: false,
+        clients: ["claude"],
+      },
+    });
+    assert.ok(r.json.permissions, "debe reportar las reglas escritas");
+    const allow = JSON.parse(fs.readFileSync(r.json.permissions.target, "utf8")).permissions.allow;
+    assert.ok(allow.includes("mcp__mssql__execute_read_query"));
+    assert.ok(
+      !allow.some((x) => x.includes("execute_write_query") || x.includes("execute_sql_file")),
+      `sin reglas de escritura: ${allow.join(", ")}`
+    );
+  });
+});
+
+test("write en produccion nunca anade reglas de escritura, aunque se pidan", async () => {
+  // El perfil manda sobre la casilla, igual que con --allow-writes.
+  const root = coreProject();
+  await withGui(async ({ call, origin }) => {
+    const det = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+    const core = det.files.find((f) => f.type === "core");
+    const r = await call("/api/write", {
+      origin,
+      body: {
+        projectDir: root,
+        configFile: core.path,
+        environment: det.defaultEnvironment,
+        connections: [{ name: "DataConnectionString", alias: "data" }],
+        profileKey: "produccion",
+        allowWrites: true,
+        allowRules: true,
+        allowWriteRules: true,
+        clients: ["claude"],
+      },
+    });
+    const allow = JSON.parse(fs.readFileSync(r.json.permissions.target, "utf8")).permissions.allow;
+    assert.ok(
+      !allow.some((x) => x.includes("execute_write_query") || x.includes("execute_sql_file")),
+      `produccion no puede acabar con escrituras permitidas: ${allow.join(", ")}`
+    );
+  });
+});
+
+test("write no toca los permisos si no se piden las reglas", async () => {
+  const root = coreProject();
+  await withGui(async ({ call, origin }) => {
+    const det = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+    const core = det.files.find((f) => f.type === "core");
+    const r = await call("/api/write", {
+      origin,
+      body: {
+        projectDir: root,
+        configFile: core.path,
+        environment: det.defaultEnvironment,
+        connections: [{ name: "DataConnectionString", alias: "data" }],
+        profileKey: "local",
+        allowRules: false,
+        clients: ["claude"],
+      },
+    });
+    assert.equal(r.json.permissions, undefined);
+    assert.ok(!fs.existsSync(path.join(root, ".claude", "settings.local.json")));
+  });
+});
+
+test("la casilla de reglas de escritura llega oculta en la pagina", () => {
+  // Solo debe aparecer cuando la escritura esta habilitada; el JS la muestra.
+  const html = gui.renderPage("t0ken");
+  assert.match(html, /id="wrapWriteRules" hidden/);
+  assert.match(html, /id="cRules" checked/, "las de lectura si vienen marcadas");
+});
+
 test("write sin cliente ni conexion falla con mensaje, no con excepcion", async () => {
   const root = coreProject();
   await withGui(async ({ call, origin }) => {

@@ -95,6 +95,55 @@ test("probeConnection aplica un timeout acotado, para no colgar una formacion", 
   assert.equal(config.pool.max, 1, "una sola conexion: es solo una prueba");
 });
 
+test("un timeout contra instancia nombrada sugiere el SQL Browser", async () => {
+  // Sin esta pista el mensaje del driver es un callejon sin salida: parece que no
+  // hay acceso a la BD cuando el acceso esta bien y lo que falta es el servicio.
+  const mssql = {
+    ConnectionPool: function () {
+      this.connect = async () => {
+        throw Object.assign(new Error("Failed to connect to PC_158\\SQL2022 in 8000ms"), {
+          code: "ETIMEOUT",
+        });
+      };
+      this.close = async () => {};
+    },
+  };
+  const r = await probeConnection(PARTS, { mssql });
+  assert.equal(r.ok, false);
+  assert.match(r.hint, /SQL Browser/);
+  assert.match(r.hint, /--port/);
+});
+
+test("no se sugiere el SQL Browser cuando no hay instancia nombrada", async () => {
+  const mssql = {
+    ConnectionPool: function () {
+      this.connect = async () => {
+        throw Object.assign(new Error("Failed to connect in 8000ms"), { code: "ETIMEOUT" });
+      };
+      this.close = async () => {};
+    },
+  };
+  const r = await probeConnection(
+    { datasource: "10.0.0.9,1433", initialcatalog: "BD", userid: "sa", password: "x" },
+    { mssql }
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.hint, undefined, "un host con puerto no tiene nada que ver con SQL Browser");
+});
+
+test("no se sugiere el SQL Browser si el fallo no es un timeout", async () => {
+  const mssql = {
+    ConnectionPool: function () {
+      this.connect = async () => {
+        throw Object.assign(new Error("Login failed for user"), { code: "ELOGIN" });
+      };
+      this.close = async () => {};
+    },
+  };
+  const r = await probeConnection(PARTS, { mssql });
+  assert.equal(r.hint, undefined, "unas credenciales malas no las arregla SQL Browser");
+});
+
 test("sanitizeError tapa el secreto y conserva el codigo", () => {
   const out = sanitizeError(Object.assign(new Error("bad p4ss"), { code: "ELOGIN" }), "p4ss");
   assert.equal(out, "bad *** (ELOGIN)");

@@ -34,6 +34,7 @@ const {
 } = require("../bin/start-mssql-mcp");
 const { writeCredentialsFile } = require("./credentials");
 const { probeConnection } = require("./probe");
+const { allowMcpTools } = require("./permissions");
 
 const PKG_VERSION = require("../package.json").version;
 const PKG_SPEC = `github:AHORAFLX/AHORA-SQL-MCP#v${PKG_VERSION}`;
@@ -397,6 +398,7 @@ async function main() {
     title("3/5  Conexion");
     const connections = [];
     const manualConnections = [];
+    const probes = [];
     let environment;
 
     if (!resolved) {
@@ -425,6 +427,7 @@ async function main() {
         if (result.version) say(`     ${result.version}`);
       } else {
         say(`   ✗ no he podido conectar: ${result.error}`);
+        if (result.hint) say(`     ${result.hint}`);
         say();
         if (!(await askYesNo(rl, "¿Sigo de todas formas?", false))) {
           say("✗ Nada escrito. Corrige los datos y vuelve a lanzarlo.");
@@ -444,18 +447,34 @@ async function main() {
       }
       say(`Declaradas: ${names.join(", ")}`);
 
-      const validate = (name, alias) => {
+      /**
+       * Resolver la cadena y CONECTAR son dos comprobaciones distintas con
+       * soluciones distintas, asi que se reportan por separado. Que no conecte no
+       * aborta: puede ser la VPN o el SQL Browser parado.
+       */
+      const validate = async (name, alias) => {
+        let parts;
+        let source;
         try {
-          const { value, source } = readConnString(resolved, name, { environment });
-          const env = {};
-          const info = applyConnection(env, "MSSQL_", parseAdoConnectionString(value), name);
+          const read = readConnString(resolved, name, { environment });
+          source = read.source;
+          parts = parseAdoConnectionString(read.value);
+          const info = applyConnection({}, "MSSQL_", parts, name);
           say(`   ✓ ${name} → ${info.target} / ${info.database}   (de ${path.basename(source)})`);
-          connections.push({ name, alias });
-          return true;
         } catch (err) {
           say(`   ✗ ${name}: ${err.message}`);
           return false;
         }
+        const probe = await probeConnection(parts);
+        if (probe.ok) {
+          say(`     conecta ✓${probe.version ? "  " + probe.version : ""}`);
+        } else {
+          say(`     resuelta, pero NO conecta: ${probe.error}`);
+          if (probe.hint) say(`     ${probe.hint}`);
+          probes.push(name);
+        }
+        connections.push({ name, alias });
+        return true;
       };
 
       const flexygo =
@@ -477,7 +496,9 @@ async function main() {
         );
         say();
         say("Validando contra el fichero real:");
-        if (!validate(confName, "config") || !validate(dataName, "data")) {
+        const okConf = await validate(confName, "config");
+        const okData = await validate(dataName, "data");
+        if (!okConf || !okData) {
           say();
           say("✗ Alguna cadena no se ha podido resolver. Nada escrito.");
           if (isCore) {
@@ -491,7 +512,7 @@ async function main() {
           names.length === 1 ? names[0] : await pickFromList(rl, names, "Cual expongo");
         say();
         say("Validando contra el fichero real:");
-        if (!validate(only, undefined)) {
+        if (!(await validate(only, undefined))) {
           say();
           say("✗ La cadena no se ha podido resolver. Nada escrito.");
           process.exit(1);
@@ -572,6 +593,36 @@ async function main() {
       const { target, replaced, others } = writeClientConfig(CLIENTS[key], root, args);
       say(`✓ ${target}${replaced ? "   (servidor 'mssql' actualizado)" : ""}`);
       if (others.length > 0) say(`   Se han conservado: ${others.join(", ")}`);
+    }
+
+    // Reglas de permisos. En modo auto, Claude Code puede denegar hasta una
+    // consulta de lectura, y el mensaje que sale ("Blocked by classifier") no
+    // menciona el MCP por ningun lado.
+    if (clientKeys.includes("claude")) {
+      say();
+      say("En modo auto, Claude Code puede denegar las llamadas al MCP sin avisar");
+      say("de que vienen de aqui. Puedo permitir de antemano la introspeccion y las");
+      say("consultas de lectura.");
+      if (await askYesNo(rl, "¿Anado esas reglas?", true)) {
+        // Las escrituras se ofrecen aparte y por defecto NO: son el freno que
+        // interesa conservar, sobre todo si la BD no es la maquina de uno.
+        let includeWrites = false;
+        if (allowWrites) {
+          includeWrites = await askYesNo(
+            rl,
+            "   ¿Permitir tambien las ESCRITURAS sin preguntar? (solo en tu maquina)",
+            false
+          );
+        }
+        const perms = allowMcpTools(root, { includeWrites });
+        say(`✓ ${perms.target}`);
+        if (perms.alreadyHadAll) say("   (ya estaban todas)");
+        else say(`   Anadidas: ${perms.added.join(", ")}`);
+        if (!includeWrites) {
+          say("   Las escrituras seguiran pidiendote permiso.");
+        }
+        if (perms.backup) say(`   El fichero anterior no era JSON; copia en ${perms.backup}`);
+      }
     }
 
 

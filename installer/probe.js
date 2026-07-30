@@ -26,6 +26,24 @@ function sanitizeError(err, secret) {
 }
 
 /**
+ * Pista para el fallo mas comun, que de otro modo es un callejon sin salida.
+ *
+ * Un ETIMEOUT contra una instancia nombrada casi siempre es el servicio SQL
+ * Browser parado: es quien traduce el nombre de instancia a su puerto, por UDP
+ * 1434. Sin esa pista, el mensaje del driver ("Failed to connect ... ETIMEOUT") no
+ * apunta a nada y parece que no hay acceso, cuando el acceso esta perfectamente.
+ */
+function hintFor({ viaInstance, error }) {
+  if (!viaInstance) return null;
+  if (!/ETIMEOUT|timeout/i.test(String(error))) return null;
+  return (
+    "Es una instancia nombrada y ha dado tiempo de espera: lo habitual es que el " +
+    "servicio SQL Browser este parado (es quien traduce el nombre de instancia a " +
+    "su puerto). Arrancalo, o indica el puerto con --port."
+  );
+}
+
+/**
  * Intenta conectar con unas `parts` de conexion ya normalizadas.
  *
  * Devuelve `{ ok, target, database, ... }` y NUNCA lanza: un fallo de conexion es
@@ -37,12 +55,14 @@ async function probeConnection(parts, { timeoutMs = DEFAULT_TIMEOUT_MS, mssql = 
   const secret = parts.password || parts.pwd;
   let target = "";
   let database = "";
+  let viaInstance = false;
   let pool;
   try {
     const env = {};
     const info = applyConnection(env, "MSSQL_", parts, "prueba");
     target = info.target;
     database = info.database;
+    viaInstance = info.viaInstance;
 
     const { configs } = loadConfigsFromEnv(env);
     const config = configs.maindb;
@@ -63,7 +83,9 @@ async function probeConnection(parts, { timeoutMs = DEFAULT_TIMEOUT_MS, mssql = 
       version: String(row.version || "").split("\n")[0].trim(),
     };
   } catch (err) {
-    return { ok: false, target, database, error: sanitizeError(err, secret) };
+    const error = sanitizeError(err, secret);
+    const hint = hintFor({ viaInstance, error });
+    return { ok: false, target, database, error, ...(hint ? { hint } : {}) };
   } finally {
     if (pool) {
       try {
@@ -75,4 +97,4 @@ async function probeConnection(parts, { timeoutMs = DEFAULT_TIMEOUT_MS, mssql = 
   }
 }
 
-module.exports = { probeConnection, sanitizeError, DEFAULT_TIMEOUT_MS };
+module.exports = { probeConnection, sanitizeError, hintFor, DEFAULT_TIMEOUT_MS };

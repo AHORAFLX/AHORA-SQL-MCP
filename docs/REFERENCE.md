@@ -42,6 +42,30 @@ the DB may legitimately be unreachable (VPN, stopped SQL Browser), so the instal
 requires an explicit confirmation to continue. Timeout is bounded (8 s) so a wrong host cannot stall
 a training session, and the password is stripped from any error message.
 
+### Permission rules the installer writes
+
+In Claude Code's `auto` mode every tool call goes through a safety classifier, which can deny even
+`execute_read_query` — and the message the user sees (`Blocked by classifier`) never mentions the MCP,
+so nobody connects the two. The installer offers to pre-authorize the read surface in
+`permissions.allow`:
+
+```
+mcp__mssql__list_*
+mcp__mssql__describe_*
+mcp__mssql__execute_read_query
+```
+
+`execute_write_query` and `execute_sql_file` are **deliberately left out** and only added on an
+explicit second opt-in, available solely when writes are enabled — the prompt on a write is the brake
+worth keeping.
+
+Two details that would otherwise make this useless: allow-rule wildcards are only honored **after** a
+literal `mcp__<server>__` prefix (a bare `mcp__*` allow is skipped with a warning), and
+`.claude/settings.local.json` is loaded from the **git repository root** even when the session starts
+in a subdirectory — so `installer/permissions.js` resolves the repo root rather than writing a file
+nobody reads. This is the same file and format Claude Code itself writes when you answer "don't ask
+again", so the merge is additive and idempotent.
+
 ### Production guardrail
 
 `--production` marks the connection and is **incompatible with `--allow-writes`**: passing both aborts
@@ -323,6 +347,7 @@ installer/
 ├── gui.js                # same logic behind a local self-contained HTML form
 ├── probe.js              # real connection test, through the server's own pipeline
 ├── credentials.js        # credentials file outside the repo (%APPDATA%)
+├── permissions.js        # permissions.allow rules so auto mode doesn't deny reads
 ├── exe-entry.js          # entry for the packaged exe (no require.main there)
 ├── build-exe.js          # Node SEA build -> dist/ahora-setup.exe
 └── INSTALAR-AHORA.cmd    # double-click launcher, no binary

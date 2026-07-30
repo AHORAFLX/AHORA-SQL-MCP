@@ -27,7 +27,7 @@ El paso 1 (skills) se hace con un comando y no tiene más. El paso 2 (el MCP) es
 enjundia, y hay un instalador que lo hace por ti. Ábrelo **desde la carpeta de tu proyecto**:
 
 ```bash
-npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.3.0 ahora-setup
+npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.4.0 ahora-setup
 ```
 
 Se abre un formulario en el navegador: detecta tu `Web.config` o `appsettings.json`, **se conecta de
@@ -44,6 +44,11 @@ ruta. Abres esa carpeta con tu cliente y ya tienes acceso a la BD.
 
 Si el servidor no responde te lo dice y te deja seguir marcando una casilla, porque puede ser la VPN
 o el SQL Browser parado y no una errata.
+
+También ofrece **permitir de antemano las consultas de lectura**, para que el modo auto de Claude Code
+no te las deniegue en mitad de una demo con un mensaje que no menciona el MCP. Las **escrituras se
+quedan fuera** salvo que lo pidas expresamente: que te pregunte antes de escribir es el freno que
+interesa conservar.
 
 - `--cli` → asistente de terminal en vez de formulario (necesario por RDP sin navegador).
 - `--no-open` → no lanza el navegador, solo imprime la URL.
@@ -93,7 +98,7 @@ Lo único que tienes que cambiar es la ruta del fichero de configuración.
     "mssql": {
       "command": "npx",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.3.0", "start-mssql-mcp",
+        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.4.0", "start-mssql-mcp",
         "--config-file", "C:/ruta/al/proyecto/Web.config",
         "--connection-name", "ConfConnectionString:config",
         "--connection-name", "DataConnectionString:data"
@@ -113,7 +118,7 @@ Igual, pero apuntando a la carpeta que contiene el `appsettings.json` (normalmen
     "mssql": {
       "command": "npx",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.3.0", "start-mssql-mcp",
+        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.4.0", "start-mssql-mcp",
         "--config-file", "C:/ruta/al/proyecto/Backend/conf",
         "--connection-name", "ConfConnectionString:config",
         "--connection-name", "DataConnectionString:data"
@@ -141,7 +146,7 @@ Los datos van en `env`, nunca en los argumentos: `.mcp.json` se commitea.
     "mssql": {
       "command": "npx",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.3.0", "start-mssql-mcp",
+        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.4.0", "start-mssql-mcp",
         "--from-env"
       ],
       "env": {
@@ -200,6 +205,7 @@ Los datos van en `env`, nunca en los argumentos: `.mcp.json` se commitea.
 | No aparece ninguna herramienta de SQL | No has abierto una sesión nueva, o la has abierto sobre otra carpeta |
 | `⏸ Pending approval` al mirar con `claude mcp list` | Falta aprobar el servidor: abre una sesión sobre la carpeta y acepta. Si lo rechazaste, `claude mcp reset-project-choices` |
 | Elegí "VS Code" pero uso la extensión de Claude Code | Son agentes distintos. La extensión **es** Claude Code y lee `.mcp.json`; la opción de VS Code es para GitHub Copilot |
+| `Permission denied ... Blocked by classifier` al usar una herramienta | Es la capa de permisos de Claude Code en modo auto, no el MCP. El instalador puede añadir las reglas; o añádelas a mano en `permissions.allow` de `.claude/settings.local.json`: `mcp__mssql__list_*`, `mcp__mssql__describe_*`, `mcp__mssql__execute_read_query` |
 | `No se encontro la cadena de conexion`, con el nombre correcto | .NET Core: la cadena está vacía en `appsettings.json` y tu entorno no es `Development`. Añade `"--environment", "<nombre>"`. El error te dice en qué ficheros ha buscado |
 | El error lista nombres de conexión distintos a los que pusiste | Los nombres varían entre proyectos. Usa los que te lista |
 | Timeout al conectar, con instancia nombrada | El servicio SQL Browser está parado. Añade `"--port", "1433"` |

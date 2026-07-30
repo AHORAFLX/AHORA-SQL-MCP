@@ -41,6 +41,7 @@ const {
 } = require("./setup");
 const { credentialsPathFor, writeCredentialsFile } = require("./credentials");
 const { probeConnection } = require("./probe");
+const { allowMcpTools } = require("./permissions");
 
 const PKG_VERSION = require("../package.json").version;
 const TOKEN_HEADER = "x-ahora-token";
@@ -108,6 +109,7 @@ async function validate({ configFile, environment, names = [], manual }) {
         source: path.basename(source),
         connected: probe.ok,
         connectError: probe.ok ? undefined : probe.error,
+        hint: probe.hint,
       });
     } catch (err) {
       results.push({ name, alias, ok: false, error: err.message });
@@ -162,10 +164,21 @@ function write(payload) {
   }
   if (written.length === 0) throw new Error("No se ha indicado ningun cliente MCP.");
 
+  // Reglas de permisos: sin ellas, el modo auto puede denegar hasta una lectura y
+  // el mensaje no menciona el MCP.
+  let permissions;
+  if (payload.allowRules && clients.includes("claude")) {
+    permissions = allowMcpTools(root, {
+      // Las escrituras solo si se piden Y el perfil las admite.
+      includeWrites: Boolean(payload.allowWriteRules) && allowWrites,
+    });
+  }
+
   return {
     written,
     args,
     credentialsFile,
+    permissions,
     production: profile.production,
     allowWrites,
     dbKeys: connections.length > 0
@@ -459,6 +472,14 @@ function renderPage(token, cwd = process.cwd()) {
         <strong>es</strong> Claude Code y usa el mismo <code>.mcp.json</code>.</p>
       <p class="hint">Claude Code pedira aprobar el servidor la primera vez que abras una sesion
         sobre esta carpeta: hasta que aceptes no aparece ninguna herramienta.</p>
+      <label style="margin-top:12px"><input type="checkbox" id="cRules" checked style="width:auto">
+        Permitir consultas de lectura sin preguntar</label>
+      <p class="hint">En modo auto, Claude Code puede denegar hasta una consulta de lectura con un
+        mensaje que no menciona el MCP. Esto lo evita.</p>
+      <label id="wrapWriteRules" hidden><input type="checkbox" id="cWriteRules" style="width:auto">
+        Permitir tambien las <strong>escrituras</strong> sin preguntar</label>
+      <p class="hint" id="hintWriteRules" hidden>Solo en tu maquina. Si no lo marcas, cada
+        escritura te pedira permiso, que es el freno que interesa conservar.</p>
     </fieldset>
     <div class="row" style="margin-top:18px">
       <div></div><button id="btnWrite">Escribir configuracion</button>
@@ -585,7 +606,8 @@ $("btnValidate").onclick = async () => {
           ? '<li><span class="ok">✓</span> conectado a <strong>' + esc(r.target) + "</strong> / " +
             esc(r.database) + (r.version ? ' <span class="hint">' + esc(r.version) + "</span>" : "") + "</li>"
           : '<li><span class="err">✗</span> no conecta a <strong>' + esc(r.target) +
-            '</strong><br><span class="err">' + esc(r.error) + "</span></li>";
+            '</strong><br><span class="err">' + esc(r.error) + "</span>" +
+            (r.hint ? '<br><span class="hint">' + esc(r.hint) + "</span>" : "") + "</li>";
       }
       if (!r.ok) {
         return '<li><span class="err">✗</span> <strong>' + esc(r.name) + "</strong> " +
@@ -595,6 +617,7 @@ $("btnValidate").onclick = async () => {
         "</span> <strong>" + esc(r.name) + "</strong> → " + esc(r.target) + " / " + esc(r.database) +
         ' <span class="hint">(de ' + esc(r.source) + ")</span>" +
         (r.connected ? "" : '<br><span class="err">resuelta, pero no conecta: ' + esc(r.connectError) + "</span>") +
+        (r.connected || !r.hint ? "" : '<br><span class="hint">' + esc(r.hint) + "</span>") +
         "</li>";
     }).join("");
     $("validateOut").innerHTML = '<ul class="list">' + rows + "</ul>";
@@ -627,13 +650,23 @@ $("btnValidate").onclick = async () => {
   }
 };
 
+function syncWriteRules() {
+  // Las reglas de escritura solo tienen sentido si la escritura esta habilitada.
+  const on = $("writes").checked && !$("writeBox").hidden;
+  $("wrapWriteRules").hidden = !on;
+  $("hintWriteRules").hidden = !on;
+  if (!on) $("cWriteRules").checked = false;
+}
+
 $("profile").onchange = () => {
   const opt = $("profile").selectedOptions[0];
   const canWrite = opt.dataset.canwrite === "true";
   $("writeBox").hidden = !canWrite;
   $("prodWarn").hidden = canWrite;
   if (!canWrite) $("writes").checked = false;
+  syncWriteRules();
 };
+$("writes").onchange = syncWriteRules;
 
 $("btnWrite").onclick = async () => {
   $("btnWrite").disabled = true;
@@ -653,6 +686,8 @@ $("btnWrite").onclick = async () => {
       manualConnections: validated.manual || [],
       profileKey: $("profile").value,
       allowWrites: $("writes").checked,
+      allowRules: $("cRules").checked,
+      allowWriteRules: $("cWriteRules").checked,
       sqlDirs, clients,
     });
 
@@ -663,6 +698,12 @@ $("btnWrite").onclick = async () => {
         "</li>").join("") + "</ul>";
     if (res.credentialsFile) {
       html += '<p>Credenciales, fuera del repositorio:</p><pre>' + esc(res.credentialsFile) + "</pre>";
+    }
+    if (res.permissions) {
+      html += "<p>Reglas de permisos en <code>" + esc(res.permissions.target) + "</code>:</p>" +
+        (res.permissions.alreadyHadAll
+          ? '<p class="hint">Ya estaban todas.</p>'
+          : "<pre>" + esc(res.permissions.added.join("\\n")) + "</pre>");
     }
     if (res.production) html += '<div class="banner warn">Marcada como PRODUCCION, solo lectura.</div>';
     else if (res.allowWrites) html += '<div class="banner warn">Escritura habilitada. Solo local o pruebas.</div>';

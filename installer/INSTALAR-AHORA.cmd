@@ -37,7 +37,7 @@ echo  correcta, podras cambiarla dentro: no hace falta mover este fichero.
 echo.
 pause
 
-npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.3.0 ahora-setup
+npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.4.0 ahora-setup
 
 echo.
 if errorlevel 1 (
