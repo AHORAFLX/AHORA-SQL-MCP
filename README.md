@@ -5,6 +5,14 @@ acceso al esquema real de la base de datos para que las skills de
 [AHORA-SCO-SKILLS](https://github.com/AHORAFLX/AHORA-SCO-SKILLS) puedan verificar tablas,
 columnas, vistas y procedimientos **antes** de generar T-SQL, en lugar de suponerlos.
 
+> **¿Vienes a instalarlo por primera vez?** → **[INSTALAR.md](INSTALAR.md)**, guía de cinco minutos
+> con el `.mcp.json` listo para copiar. O deja que el instalador guiado escriba la configuración por
+> ti, validando la conexión antes:
+>
+> ```bash
+> npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.2.0 ahora-setup
+> ```
+
 > **Este repositorio no se instala a mano.** Usa la skill `setup-mcp-sql` del repositorio de
 > skills: clona este repo, ejecuta `npm ci` y genera el `.mcp.json` del proyecto.
 
@@ -20,7 +28,7 @@ configuración en proyectos de AHORA.
 Requiere Node 18 o superior.
 
 ```bash
-git clone --branch v1.1.0 --depth 1 https://github.com/AHORAFLX/AHORA-SQL-MCP.git
+git clone --branch v1.2.0 --depth 1 https://github.com/AHORAFLX/AHORA-SQL-MCP.git
 cd AHORA-SQL-MCP
 npm ci
 ```
@@ -38,10 +46,10 @@ expongan como `mcp__mssql__*`, y las skills de SC0 dependen de esos nombres. Ren
 produce ningún error: simplemente las skills dejan de encontrar la base de datos y vuelven a
 generar SQL sin verificar, que es el peor modo de fallo posible.
 
-Hay que elegir **una** fuente de conexión de las cuatro: `--config-file` (Web.config de
+Hay que elegir **una** fuente de conexión de las cinco: `--config-file` (Web.config de
 Framework o `appsettings.json` de Core), `--connection-string`, los datos sueltos
-(`--server/--database/--user/--password`) o `--from-env`. Mezclarlas es un error de arranque, no
-hay precedencia que adivinar.
+(`--server/--database/--user/--password`), `--from-env` o `--credentials-file`. Mezclarlas es un
+error de arranque, no hay precedencia que adivinar.
 
 ### Una sola base de datos (solo lectura)
 

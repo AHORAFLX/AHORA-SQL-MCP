@@ -3,6 +3,8 @@ import { defineConfig } from "eslint/config";
 import globals from "globals";
 
 export default defineConfig([
+  // dist/ es el bundle generado por installer/build-exe.js, no codigo fuente.
+  { ignores: ["dist/**"] },
   {
     files: ["**/*.{js,mjs,cjs}"],
     plugins: { js },

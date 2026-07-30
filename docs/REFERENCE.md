@@ -27,6 +27,14 @@ precedence order anyone could guess from reading a `.mcp.json`:
 | Loose ADO string | `--connection-string` (repeatable, `--alias` each when >1) | No config file needed. Password ends up in argv. |
 | Loose values | `--server --database --user --password` (+ `--encrypt`, `--trust-server-certificate`) | Same caveat. |
 | Client environment | `--from-env` | Takes the inherited `MSSQL_*` connection variables instead of argv, so credentials live in the client's `env` block. The only exception to env sanitizing — and `MSSQL_ENABLE_WRITES` / `MSSQL_SQL_DIRS` are still overwritten, so the environment can never enable writes. |
+| Credentials file | `--credentials-file <ruta>` | A JSON **outside the repository** (the installer writes it under `%APPDATA%\ahora-sql-mcp\`). For projects with no config file: `.mcp.json` gets committed, so credentials must not live there — only the path does. Flat shape for one DB, or `{"connections": {"<dbKey>": {...}}}` for several. |
+
+### Production guardrail
+
+`--production` marks the connection and is **incompatible with `--allow-writes`**: passing both aborts
+at startup. The point is that the decision is taken once, when configuring, and then enforced —
+someone adding `--allow-writes` to a production `.mcp.json` later gets a hard failure rather than a
+warning they can ignore. The banner shows `· PRODUCCION`.
 
 ADO keywords are normalized by lowercasing **and removing spaces**, so
 `Trust Server Certificate` (the form Core writes) and `TrustServerCertificate` (the form Framework
@@ -297,6 +305,12 @@ This puts credentials in a file that tends to get committed. Prefer the wrapper.
 ```
 bin/
 └── start-mssql-mcp.js    # AHORA policy layer: config file -> env, read/write mode
+installer/
+├── setup.js              # guided installer (MCP config only): terminal wizard + entry point
+├── gui.js                # same logic behind a local self-contained HTML form
+├── exe-entry.js          # entry for the packaged exe (no require.main there)
+├── build-exe.js          # Node SEA build -> dist/ahora-setup.exe
+└── INSTALAR-AHORA.cmd    # double-click launcher, no binary
 src/
 ├── index.js              # stdio entry
 ├── server.js             # McpServer factory

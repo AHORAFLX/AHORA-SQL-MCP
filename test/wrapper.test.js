@@ -12,6 +12,7 @@ const {
   cleanEnv,
   applyConnection,
   partsFromFlags,
+  readCredentialsFile,
   readConnString,
   listConnectionNames,
   readWebConfigConnections,
@@ -569,4 +570,102 @@ test("describeEnvConnections: modo simple y modo multi", () => {
 
 test("describeEnvConnections: sin MSSQL_* de conexion falla explicando que poner", () => {
   assert.throws(() => describeEnvConnections({ PATH: "x" }), /--from-env no ha encontrado/);
+});
+
+// ── --credentials-file ──
+
+function writeCreds(doc) {
+  const dir = tempDir("wrapper-creds-");
+  const file = path.join(dir, "creds.json");
+  fs.writeFileSync(file, JSON.stringify(doc), "utf8");
+  return file;
+}
+
+test("readCredentialsFile: forma simple", () => {
+  const file = writeCreds({
+    server: "PC_158\\SQL2022",
+    database: "BD",
+    user: "sa",
+    password: "x",
+  });
+  const entries = readCredentialsFile(file);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].alias, undefined);
+
+  const env = {};
+  const info = applyConnection(env, "MSSQL_", entries[0].parts, "creds");
+  assert.equal(env.MSSQL_SERVER, "PC_158");
+  assert.equal(env.MSSQL_INSTANCE_NAME, "SQL2022");
+  assert.equal(env.MSSQL_DATABASE, "BD");
+  assert.equal(info.database, "BD");
+});
+
+test("readCredentialsFile: el puerto explicito descarta la instancia", () => {
+  const file = writeCreds({
+    server: "10.0.0.9",
+    port: 1433,
+    database: "BD",
+    user: "sa",
+    password: "x",
+  });
+  const env = {};
+  applyConnection(env, "MSSQL_", readCredentialsFile(file)[0].parts, "creds");
+  assert.equal(env.MSSQL_PORT, "1433");
+  assert.ok(!("MSSQL_INSTANCE_NAME" in env));
+});
+
+test("readCredentialsFile: forma multi-BD, la clave es el dbKey", () => {
+  const file = writeCreds({
+    connections: {
+      config: { server: "PC", database: "Conf", user: "sa", password: "x" },
+      data: { server: "PC", database: "Datos", user: "sa", password: "x" },
+    },
+  });
+  const entries = readCredentialsFile(file);
+  assert.deepEqual(
+    entries.map((e) => e.alias),
+    ["config", "data"]
+  );
+});
+
+test("readCredentialsFile: encrypt y trustServerCertificate booleanos se aceptan", () => {
+  const file = writeCreds({
+    server: "PC",
+    database: "BD",
+    user: "sa",
+    password: "x",
+    encrypt: false,
+    trustServerCertificate: true,
+  });
+  const env = {};
+  applyConnection(env, "MSSQL_", readCredentialsFile(file)[0].parts, "creds");
+  assert.equal(env.MSSQL_ENCRYPT, "false");
+  assert.equal(env.MSSQL_TRUST_SERVER_CERTIFICATE, "true");
+});
+
+test("readCredentialsFile: errores accionables", () => {
+  assert.throws(() => readCredentialsFile("C:\\no-existe\\creds.json"), /No existe el fichero/);
+
+  const dir = tempDir("wrapper-creds-malo-");
+  const roto = path.join(dir, "roto.json");
+  fs.writeFileSync(roto, "{ no soy json", "utf8");
+  assert.throws(() => readCredentialsFile(roto), /no se pudo interpretar|No se pudo interpretar/i);
+
+  assert.throws(() => readCredentialsFile(writeCreds({ connections: {} })), /no declara ninguna conexion/);
+});
+
+test("resolveSources: --credentials-file es una fuente y excluye a las demas", () => {
+  const file = writeCreds({ server: "PC", database: "BD", user: "sa", password: "x" });
+  assert.equal(resolveSources(args({ credentialsFile: file })).kind, "credentialsFile");
+  assert.throws(
+    () => resolveSources(args({ credentialsFile: file, fromEnv: true })),
+    /una sola fuente/
+  );
+});
+
+// ── --production ──
+
+test("parseArgs: --production se recoge y por defecto es false", () => {
+  assert.equal(parseArgs(["--production"]).production, true);
+  assert.equal(parseArgs([]).production, false);
 });

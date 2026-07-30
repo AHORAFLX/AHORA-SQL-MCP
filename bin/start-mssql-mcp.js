@@ -54,6 +54,7 @@ const USAGE =
   "  b) --connection-string <cadena ADO.NET>         (repetible; con varias, cada una necesita --alias)\n" +
   "  c) --server <host[\\instancia]> --database <BD> --user <usuario> --password <clave>\n" +
   "  d) --from-env                                   (toma las MSSQL_* del entorno del cliente MCP)\n" +
+  "  e) --credentials-file <ruta a un JSON>          (credenciales fuera del repositorio)\n" +
   "\n" +
   "Opcionales:\n" +
   "  --environment <nombre>        entorno de appsettings.<entorno>.json (def.: ASPNETCORE_ENVIRONMENT o Development)\n" +
@@ -61,6 +62,7 @@ const USAGE =
   "  --port <puerto>              salida si SQL Browser esta parado\n" +
   "  --encrypt <true|false>       solo con la fuente (c)\n" +
   "  --trust-server-certificate <true|false>   solo con la fuente (c)\n" +
+  "  --production                 marca la conexion como produccion; incompatible con --allow-writes\n" +
   "  --allow-writes               solo local o pruebas\n" +
   "  --allow-sql-dir <carpeta>    repetible; carpetas extra para execute_sql_file";
 
@@ -71,6 +73,7 @@ function parseArgs(argv) {
     aliases: [],
     allowWrites: false,
     fromEnv: false,
+    production: false,
     sqlDirs: [],
   };
   for (let i = 0; i < argv.length; i++) {
@@ -88,6 +91,8 @@ function parseArgs(argv) {
     else if (argv[i] === "--trust-server-certificate")
       out.trustServerCertificate = argv[++i];
     else if (argv[i] === "--from-env") out.fromEnv = true;
+    else if (argv[i] === "--credentials-file") out.credentialsFile = argv[++i];
+    else if (argv[i] === "--production") out.production = true;
     else if (argv[i] === "--allow-writes") out.allowWrites = true;
     else if (argv[i] === "--allow-sql-dir") out.sqlDirs.push(argv[++i]);
     else if (argv[i] === "--port") out.port = argv[++i];
@@ -459,6 +464,61 @@ function applyConnection(env, prefix, parts, label, portOverride) {
   };
 }
 
+/**
+ * Lee credenciales de un JSON que vive FUERA del repositorio.
+ *
+ * Es la salida para los proyectos sin Web.config ni appsettings.json: las
+ * credenciales no pueden ir en el .mcp.json porque ese fichero se commitea, asi
+ * que se guardan en %APPDATA% y aqui solo viaja la ruta.
+ *
+ * Forma simple:
+ *   { "server": "PC\\INST", "database": "BD", "user": "sa", "password": "x" }
+ * Multi-BD (la clave es el dbKey):
+ *   { "connections": { "config": { ... }, "data": { ... } } }
+ */
+function readCredentialsFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`No existe el fichero de credenciales: ${filePath}`);
+  }
+  let json;
+  try {
+    json = JSON.parse(stripBom(fs.readFileSync(filePath, "utf8")));
+  } catch (err) {
+    throw new Error(`No se pudo interpretar ${filePath} como JSON: ${err.message}`);
+  }
+
+  const toEntry = (alias, raw) => {
+    const label = alias || "credenciales";
+    if (!raw || typeof raw !== "object") {
+      throw new Error(`[${label}] entrada no valida en ${filePath}`);
+    }
+    const server = raw.port ? `${raw.server},${raw.port}` : raw.server;
+    return {
+      alias,
+      parts: partsFromFlags({
+        server,
+        database: raw.database,
+        user: raw.user,
+        password: raw.password,
+        encrypt: raw.encrypt === undefined ? undefined : String(raw.encrypt),
+        trustServerCertificate:
+          raw.trustServerCertificate === undefined
+            ? undefined
+            : String(raw.trustServerCertificate),
+      }),
+    };
+  };
+
+  if (json.connections && typeof json.connections === "object") {
+    const aliases = Object.keys(json.connections);
+    if (aliases.length === 0) {
+      throw new Error(`${filePath} no declara ninguna conexion dentro de "connections".`);
+    }
+    return aliases.map((alias) => toEntry(alias, json.connections[alias]));
+  }
+  return [toEntry(undefined, json)];
+}
+
 function partsFromFlags({
   server,
   database,
@@ -490,6 +550,7 @@ function resolveSources(args) {
     args.connectionStrings.length > 0 && "--connection-string",
     hasFlags && "--server/--database/--user/--password",
     args.fromEnv && "--from-env",
+    args.credentialsFile && "--credentials-file",
   ].filter(Boolean);
 
   if (used.length === 0) return { kind: "none" };
@@ -500,6 +561,13 @@ function resolveSources(args) {
   }
 
   if (args.fromEnv) return { kind: "env" };
+
+  if (args.credentialsFile) {
+    return {
+      kind: "credentialsFile",
+      entries: readCredentialsFile(args.credentialsFile),
+    };
+  }
 
   if (args.configFile) {
     if (args.connections.length === 0) {
@@ -571,6 +639,18 @@ function describeEnvConnections(env) {
 function main() {
   const args = parseArgs(process.argv.slice(2));
 
+  // La decision de "esto es produccion" se toma una vez, al configurar, y queda
+  // escrita en el .mcp.json. Aqui se hace cumplir: anadir --allow-writes a mano
+  // mas tarde falla al arrancar en lugar de limitarse a avisar.
+  if (args.production && args.allowWrites) {
+    console.error(
+      "--production y --allow-writes son incompatibles.\n" +
+        "Esta configuracion esta marcada como PRODUCCION. Si de verdad necesitas\n" +
+        "escribir, quita --production a conciencia y asume lo que implica."
+    );
+    process.exit(1);
+  }
+
   let source;
   try {
     source = resolveSources(args);
@@ -600,7 +680,10 @@ function main() {
         let alias;
         let label;
 
-        if (source.kind === "configFile") {
+        if (source.kind === "credentialsFile") {
+          alias = entry.alias;
+          label = alias || "credenciales";
+        } else if (source.kind === "configFile") {
           const [name, aliasFromEntry] = String(entry).split(":");
           if (!name) throw new Error(`--connection-name vacio en '${entry}'`);
           if (multi && !aliasFromEntry) {
@@ -634,9 +717,11 @@ function main() {
         }
         const prefix = multi ? `MSSQL_${alias.toUpperCase()}_` : "MSSQL_";
         const parts =
-          source.kind === "flags"
-            ? partsFromFlags(args)
-            : parseAdoConnectionString(connString);
+          source.kind === "credentialsFile"
+            ? entry.parts
+            : source.kind === "flags"
+              ? partsFromFlags(args)
+              : parseAdoConnectionString(connString);
         const info = applyConnection(env, prefix, parts, label, args.port);
         resolved.push({ key: multi ? alias.toLowerCase() : "maindb", ...info });
       });
@@ -669,10 +754,13 @@ function main() {
     connectionString: "--connection-string",
     flags: "--server/--database/--user/--password",
     env: "MSSQL_* del entorno del cliente MCP (--from-env)",
+    credentialsFile: `${args.credentialsFile} (credenciales fuera del repositorio)`,
   }[source.kind];
 
   console.error("─".repeat(64));
-  console.error(`AHORA-SQL-MCP — modo ${mode}`);
+  console.error(
+    `AHORA-SQL-MCP — modo ${mode}${args.production ? "  ·  PRODUCCION" : ""}`
+  );
   console.error(`  Conexion desde: ${origin}`);
   for (const r of resolved) {
     console.error(`  [${r.key}] ${r.target} / ${r.database}`);
@@ -715,6 +803,7 @@ module.exports = {
   cleanEnv,
   applyConnection,
   partsFromFlags,
+  readCredentialsFile,
   readConnString,
   listConnectionNames,
   readWebConfigConnections,

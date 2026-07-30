@@ -1,6 +1,6 @@
 {
   "name": "@ahoraflx/sql-mcp",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Servidor MCP de SQL Server para los proyectos Flexygo y AHORA_ERP.",
   "keywords": [
     "mssql",
@@ -24,12 +24,15 @@
   "main": "src/index.js",
   "bin": {
     "ahora-sql-mcp": "./src/index.js",
-    "start-mssql-mcp": "./bin/start-mssql-mcp.js"
+    "start-mssql-mcp": "./bin/start-mssql-mcp.js",
+    "ahora-setup": "./installer/setup.js"
   },
   "files": [
     "src/",
     "bin/",
+    "installer/",
     "README.md",
+    "INSTALAR.md",
     "LICENSE"
   ],
   "scripts": {
