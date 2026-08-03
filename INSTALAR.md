@@ -27,7 +27,7 @@ El paso 1 (skills) se hace con un comando y no tiene más. El paso 2 (el MCP) es
 enjundia, y hay un instalador que lo hace por ti. Ábrelo **desde la carpeta de tu proyecto**:
 
 ```bash
-npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.7.0 ahora-setup
+npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.8.0 ahora-setup
 ```
 
 Se abre un formulario en el navegador: detecta tu `Web.config` o `appsettings.json`, **se conecta de
@@ -104,7 +104,7 @@ Lo único que tienes que cambiar es la ruta del fichero de configuración.
     "ahora-sql": {
       "command": "npx",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.7.0", "start-mssql-mcp",
+        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.8.0", "start-mssql-mcp",
         "--config-file", "C:/ruta/al/proyecto/Web.config",
         "--connection-name", "ConfConnectionString:config",
         "--connection-name", "DataConnectionString:data"
@@ -124,7 +124,7 @@ Igual, pero apuntando a la carpeta que contiene el `appsettings.json` (normalmen
     "ahora-sql": {
       "command": "npx",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.7.0", "start-mssql-mcp",
+        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.8.0", "start-mssql-mcp",
         "--config-file", "C:/ruta/al/proyecto/Backend/conf",
         "--connection-name", "ConfConnectionString:config",
         "--connection-name", "DataConnectionString:data"
@@ -137,6 +137,12 @@ Igual, pero apuntando a la carpeta que contiene el `appsettings.json` (normalmen
 ### Una sola base de datos
 
 Quita el `--connection-name` que no necesites. El `dbKey` pasa a ser `maindb`.
+
+### Más de dos
+
+Añade un `--connection-name NOMBRE:alias` por cada una. No hay tope, y el instalador guiado deja
+marcarlas todas. El alias acaba dentro de un nombre de variable de entorno, así que solo admite
+letras, dígitos y guion bajo, empezando por letra.
 
 ### Sin `Web.config` ni `appsettings.json`
 
@@ -152,7 +158,7 @@ Los datos van en `env`, nunca en los argumentos: `.mcp.json` se commitea.
     "ahora-sql": {
       "command": "npx",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.7.0", "start-mssql-mcp",
+        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.8.0", "start-mssql-mcp",
         "--from-env"
       ],
       "env": {
