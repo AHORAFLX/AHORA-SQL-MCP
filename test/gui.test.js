@@ -39,12 +39,22 @@ function coreProject() {
   return root;
 }
 
+/**
+ * Instalacion de mentira. Las pruebas no pueden instalar el paquete de GitHub: seria
+ * lento y dependeria de la red. Devuelve la ruta que devolveria la de verdad.
+ */
+const FAKE_ENTRY = path
+  .join("C:", "fake", "AHORA-SQL-MCP", "node_modules", "@ahoraflx", "sql-mcp", "bin", "start-mssql-mcp.js")
+  .replace(/\\/g, "/");
+const fakeInstall = () => ({ entry: FAKE_ENTRY, dir: "C:/fake/AHORA-SQL-MCP", reused: true });
+
 /** Arranca el formulario y devuelve un cliente ya autenticado. */
-async function withGui(fn) {
+async function withGui(fn, { install = fakeInstall } = {}) {
   let info;
   const closed = gui.startGui({
     open: false,
     quiet: true,
+    install,
     onReady: (i) => {
       info = i;
     },

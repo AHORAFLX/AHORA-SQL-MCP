@@ -1,4 +1,4 @@
-const test = require("node:test");
+﻿const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
@@ -103,7 +103,7 @@ test("buildArgs fija la version del paquete, nunca una rama", () => {
 });
 
 test("el instalador comprueba el Node DE LA MAQUINA, no el que lo ejecuta", () => {
-  // El .exe lleva su propio Node embebido: mirar process.versions.node daria ✓ en
+  // El .exe lleva su propio Node embebido: mirar process.versions.node daria âœ“ en
   // un equipo sin Node, y la configuracion escrita arranca el servidor con npx.
   const { execFileSync } = require("node:child_process");
   const entry = path.join(__dirname, "..", "installer", "setup.js");
@@ -119,12 +119,12 @@ test("el instalador comprueba el Node DE LA MAQUINA, no el que lo ejecuta", () =
     out = err.stdout || "";
   }
   assert.match(out, /No hay Node\.js instalado en este equipo/);
-  assert.ok(!/✓ Node/.test(out), "no puede dar por bueno el runtime embebido");
+  assert.ok(!/âœ“ Node/.test(out), "no puede dar por bueno el runtime embebido");
 });
 
 test("writeClientConfig: Claude Code usa .mcp.json y la clave mcpServers", () => {
   const root = tempDir("inst-claude-");
-  const { target } = writeClientConfig(CLIENTS.claude, root, ["--yes", "x"]);
+  const { target } = writeClientConfig(CLIENTS.claude, root, { command: "npx", args: ["--yes", "x"] });
   assert.equal(target, path.join(root, ".mcp.json"));
   const doc = JSON.parse(fs.readFileSync(target, "utf8"));
   assert.deepEqual(Object.keys(doc), ["mcpServers"]);
@@ -133,7 +133,7 @@ test("writeClientConfig: Claude Code usa .mcp.json y la clave mcpServers", () =>
 
 test("writeClientConfig: VS Code usa .vscode/mcp.json y la clave servers", () => {
   const root = tempDir("inst-vscode-");
-  const { target } = writeClientConfig(CLIENTS.vscode, root, ["--yes", "x"]);
+  const { target } = writeClientConfig(CLIENTS.vscode, root, { command: "npx", args: ["--yes", "x"] });
   assert.equal(target, path.join(root, ".vscode", "mcp.json"));
   const doc = JSON.parse(fs.readFileSync(target, "utf8"));
   assert.deepEqual(Object.keys(doc), ["servers"]);
@@ -149,7 +149,7 @@ test("writeClientConfig conserva los otros servidores MCP del fichero", () => {
     }),
     "utf8"
   );
-  const { replaced, others } = writeClientConfig(CLIENTS.claude, root, ["--yes"]);
+  const { replaced, others } = writeClientConfig(CLIENTS.claude, root, { command: "npx", args: ["--yes"] });
   assert.equal(replaced, false);
   assert.deepEqual(others, ["otro"]);
   const doc = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8"));
@@ -165,7 +165,7 @@ test("writeClientConfig informa de que reemplaza un ahora-sql anterior", () => {
     JSON.stringify({ mcpServers: { "ahora-sql": { command: "viejo" } } }),
     "utf8"
   );
-  const { replaced } = writeClientConfig(CLIENTS.claude, root, ["--yes"]);
+  const { replaced } = writeClientConfig(CLIENTS.claude, root, { command: "npx", args: ["--yes"] });
   assert.equal(replaced, true);
   const doc = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8"));
   assert.equal(doc.mcpServers["ahora-sql"].command, "npx");
@@ -184,7 +184,7 @@ test("writeClientConfig retira el servidor 'mssql' anterior si era nuestro", () 
     }),
     "utf8"
   );
-  const { migrated, replaced } = writeClientConfig(CLIENTS.claude, root, ["--yes"]);
+  const { migrated, replaced } = writeClientConfig(CLIENTS.claude, root, { command: "npx", args: ["--yes"] });
   assert.equal(migrated, true);
   assert.equal(replaced, false, "no reemplaza: la clave nueva no existia");
   const servers = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8")).mcpServers;
@@ -198,7 +198,7 @@ test("writeClientConfig NO toca un 'mssql' que no es nuestro", () => {
     JSON.stringify({ mcpServers: { mssql: { command: "node", args: ["otra-cosa.js"] } } }),
     "utf8"
   );
-  const { migrated, others } = writeClientConfig(CLIENTS.claude, root, ["--yes"]);
+  const { migrated, others } = writeClientConfig(CLIENTS.claude, root, { command: "npx", args: ["--yes"] });
   assert.equal(migrated, false);
   assert.deepEqual(others, ["mssql"], "el servidor ajeno se conserva y se reporta");
   const servers = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8")).mcpServers;
@@ -214,7 +214,7 @@ test("writeClientConfig migra tambien en el fichero de VS Code", () => {
     JSON.stringify({ servers: { mssql: { command: "npx", args: ["start-mssql-mcp"] } } }),
     "utf8"
   );
-  const { migrated } = writeClientConfig(CLIENTS.vscode, root, ["--yes"]);
+  const { migrated } = writeClientConfig(CLIENTS.vscode, root, { command: "npx", args: ["--yes"] });
   assert.equal(migrated, true);
   const servers = JSON.parse(
     fs.readFileSync(path.join(root, ".vscode", "mcp.json"), "utf8")
@@ -226,7 +226,7 @@ test("writeClientConfig hace copia de seguridad si el JSON previo estaba roto", 
   const root = tempDir("inst-roto-");
   const file = path.join(root, ".mcp.json");
   fs.writeFileSync(file, "{ esto no es json", "utf8");
-  writeClientConfig(CLIENTS.claude, root, ["--yes"]);
+  writeClientConfig(CLIENTS.claude, root, { command: "npx", args: ["--yes"] });
   assert.ok(fs.existsSync(`${file}.bak`), "el fichero ilegible debe respaldarse");
   assert.ok(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["ahora-sql"]);
 });
@@ -281,7 +281,7 @@ test("aliasError rechaza lo que no cabe en un nombre de variable de entorno", ()
   assert.ok(aliasError("mi-bd"), "el guion no vale en una variable de entorno");
   assert.ok(aliasError("mi bd"));
   assert.ok(aliasError("2bd"), "no puede empezar por digito");
-  assert.ok(aliasError("almacén"));
+  assert.ok(aliasError("almacÃ©n"));
   assert.ok(aliasError("DATA", ["data"]), "duplicado, sin distinguir mayusculas");
   assert.equal(aliasError("data_2", ["data"]), null);
 });

@@ -84,8 +84,14 @@ npx skills add AHORAFLX/AHORA-SCO-SKILLS/skills/General
 
 ## 2. MCP de SQL
 
-Crea un fichero `.mcp.json` en la **raíz del proyecto** y pega el bloque que te corresponda.
-Lo único que tienes que cambiar es la ruta del fichero de configuración.
+Instala el servidor una vez:
+
+```bash
+npm install --omit=dev github:AHORAFLX/AHORA-SQL-MCP#v1.8.0 --prefix "%LOCALAPPDATA%\AHORA-SQL-MCP"
+```
+
+Después crea un fichero `.mcp.json` en la **raíz del proyecto** y pega el bloque que te
+corresponda. Lo único que tienes que cambiar es la ruta del fichero de configuración.
 
 > El servidor **tiene que llamarse `ahora-sql`**. Ese nombre es lo que hace que las skills lo
 > encuentren. Si lo llamas de otra forma no da error: simplemente las skills dejan de ver la base
@@ -95,6 +101,12 @@ Lo único que tienes que cambiar es la ruta del fichero de configuración.
 > sus propias herramientas `mssql_list_databases`, `mssql_list_tables`, `mssql_list_views`… y
 > acababan mezcladas con las nuestras. Si vuelves a lanzar el instalador, la entrada vieja se
 > retira sola; si tu `.mcp.json` está escrito a mano, renombra la clave.
+>
+> **No pongas `"command": "npx"` con `--package=github:…`**, que es lo que se documentaba antes.
+> Eso resuelve el paquete contra GitHub en **cada arranque** del MCP: unos 7 segundos cada vez, y
+> unos 48 la primera vez con una versión nueva. El cliente espera 30 segundos y al agotarse
+> descarta el servidor entero, así que el agente se queda sin herramientas y te dice que "las
+> conexiones MCP están inestables". Instalado una vez, el arranque baja a menos de un segundo.
 
 ### Flexygo en .NET Framework (tiene `Web.config`)
 
@@ -102,9 +114,9 @@ Lo único que tienes que cambiar es la ruta del fichero de configuración.
 {
   "mcpServers": {
     "ahora-sql": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.8.0", "start-mssql-mcp",
+        "C:/Users/TU_USUARIO/AppData/Local/AHORA-SQL-MCP/node_modules/@ahoraflx/sql-mcp/bin/start-mssql-mcp.js",
         "--config-file", "C:/ruta/al/proyecto/Web.config",
         "--connection-name", "ConfConnectionString:config",
         "--connection-name", "DataConnectionString:data"
@@ -122,9 +134,9 @@ Igual, pero apuntando a la carpeta que contiene el `appsettings.json` (normalmen
 {
   "mcpServers": {
     "ahora-sql": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.8.0", "start-mssql-mcp",
+        "C:/Users/TU_USUARIO/AppData/Local/AHORA-SQL-MCP/node_modules/@ahoraflx/sql-mcp/bin/start-mssql-mcp.js",
         "--config-file", "C:/ruta/al/proyecto/Backend/conf",
         "--connection-name", "ConfConnectionString:config",
         "--connection-name", "DataConnectionString:data"
@@ -156,9 +168,9 @@ Los datos van en `env`, nunca en los argumentos: `.mcp.json` se commitea.
 {
   "mcpServers": {
     "ahora-sql": {
-      "command": "npx",
+      "command": "node",
       "args": [
-        "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.8.0", "start-mssql-mcp",
+        "C:/Users/TU_USUARIO/AppData/Local/AHORA-SQL-MCP/node_modules/@ahoraflx/sql-mcp/bin/start-mssql-mcp.js",
         "--from-env"
       ],
       "env": {

@@ -36,6 +36,7 @@ const { writeCredentialsFile } = require("./credentials");
 const { probeConnection } = require("./probe");
 const { allowMcpTools } = require("./permissions");
 const { SERVER_NAME, LEGACY_SERVER_NAME, isOurServerEntry } = require("./server-name");
+const { installRuntime } = require("./runtime");
 
 const PKG_VERSION = require("../package.json").version;
 const PKG_SPEC = `github:AHORAFLX/AHORA-SQL-MCP#v${PKG_VERSION}`;
@@ -354,7 +355,8 @@ const PROFILES = [
   { key: "produccion", label: "PRODUCCION", canWrite: false, production: true },
 ];
 
-function buildArgs({
+/** Los argumentos del servidor, sin la parte de como se lanza. */
+function buildFlags({
   configFile,
   credentialsFile,
   connections,
@@ -363,23 +365,69 @@ function buildArgs({
   production,
   sqlDirs,
 }) {
-  const args = ["--yes", `--package=${PKG_SPEC}`, "start-mssql-mcp"];
+  const flags = [];
   if (credentialsFile) {
-    args.push("--credentials-file", credentialsFile.replace(/\\/g, "/"));
+    flags.push("--credentials-file", credentialsFile.replace(/\\/g, "/"));
   } else {
-    args.push("--config-file", configFile.replace(/\\/g, "/"));
+    flags.push("--config-file", configFile.replace(/\\/g, "/"));
     for (const { name, alias } of connections) {
-      args.push("--connection-name", alias ? `${name}:${alias}` : name);
+      flags.push("--connection-name", alias ? `${name}:${alias}` : name);
     }
-    if (environment) args.push("--environment", environment);
+    if (environment) flags.push("--environment", environment);
   }
-  for (const dir of sqlDirs) args.push("--allow-sql-dir", dir.replace(/\\/g, "/"));
-  if (production) args.push("--production");
-  if (allowWrites) args.push("--allow-writes");
-  return args;
+  for (const dir of sqlDirs) flags.push("--allow-sql-dir", dir.replace(/\\/g, "/"));
+  if (production) flags.push("--production");
+  if (allowWrites) flags.push("--allow-writes");
+  return flags;
 }
 
-function writeClientConfig(client, root, args) {
+/**
+ * Forma instalada: `node` contra la ruta fija de la instalacion. Es la que se escribe,
+ * y arranca en ~0,2 segundos.
+ */
+function nodeCommand(entry, flags) {
+  return { command: "node", args: [entry.replace(/\\/g, "/"), ...flags] };
+}
+
+/**
+ * Forma npx, de reserva.
+ *
+ * Resuelve el paquete contra GitHub en CADA arranque: ~7 segundos en caliente y ~48 con
+ * un pin de version nuevo, contra los 30 que espera el cliente MCP antes de descartar
+ * el servidor. Solo se escribe si la instalacion no ha podido hacerse, porque un
+ * arranque lento es mejor que ningun servidor.
+ */
+function npxCommand(flags) {
+  return {
+    command: "npx",
+    args: ["--yes", `--package=${PKG_SPEC}`, "start-mssql-mcp", ...flags],
+  };
+}
+
+/** La forma npx completa, que es lo que escribia el instalador antes. */
+function buildArgs(options) {
+  return npxCommand(buildFlags(options)).args;
+}
+
+/**
+ * Como se lanzara el servidor: instalado si se puede, npx si no.
+ *
+ * La reserva no es decorativa. Si el equipo no puede alcanzar GitHub para instalar,
+ * escribir la forma npx deja una configuracion que al menos funcionara cuando la red
+ * vuelva, en lugar de no dejar nada.
+ */
+function resolveServerEntry(flags, { install = installRuntime, log = () => {} } = {}) {
+  try {
+    const installed = install({ spec: PKG_SPEC, version: PKG_VERSION });
+    log({ ok: true, ...installed });
+    return nodeCommand(installed.entry, flags);
+  } catch (err) {
+    log({ ok: false, error: err });
+    return npxCommand(flags);
+  }
+}
+
+function writeClientConfig(client, root, { command, args }) {
   const target = client.file(root);
   fs.mkdirSync(path.dirname(target), { recursive: true });
 
@@ -405,7 +453,7 @@ function writeClientConfig(client, root, args) {
   if (migrated) delete servers[LEGACY_SERVER_NAME];
 
   const replaced = Boolean(servers[SERVER_NAME]);
-  servers[SERVER_NAME] = { command: "npx", args };
+  servers[SERVER_NAME] = { command, args };
 
   fs.writeFileSync(target, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
   return {
@@ -414,6 +462,32 @@ function writeClientConfig(client, root, args) {
     migrated,
     others: Object.keys(servers).filter((k) => k !== SERVER_NAME),
   };
+}
+
+/**
+ * Retira la entrada `mssql` nuestra de un fichero de cliente que NO se esta
+ * configurando.
+ *
+ * Hace falta porque la migracion vivia dentro de `writeClientConfig`, y esa solo corre
+ * para los clientes que se marcan. Quien tenia el MCP en Claude Code y en Copilot y
+ * reinstalaba marcando uno solo se quedaba la entrada vieja en el otro: seguia
+ * registrada, con lo que el choque de nombres que el renombrado viene a quitar
+ * continuaba, y podian acabar corriendo dos servidores identicos a la vez.
+ *
+ * No crea ficheros ni escribe si no hay nada que retirar.
+ */
+function pruneLegacyServer(client, root) {
+  const target = client.file(root);
+  const doc = readJsonIfExists(target);
+  if (!doc || typeof doc !== "object") return null;
+
+  const servers = doc[client.key];
+  if (!servers || typeof servers !== "object") return null;
+  if (!servers[LEGACY_SERVER_NAME] || !isOurServerEntry(servers[LEGACY_SERVER_NAME])) return null;
+
+  delete servers[LEGACY_SERVER_NAME];
+  fs.writeFileSync(target, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
+  return target;
 }
 
 /**
@@ -697,7 +771,7 @@ async function main() {
       say(`✓ Credenciales, fuera del repositorio: ${credentialsFile}`);
     }
 
-    const args = buildArgs({
+    const flags = buildFlags({
       configFile: resolved,
       credentialsFile,
       connections,
@@ -707,14 +781,47 @@ async function main() {
       sqlDirs,
     });
 
+    // El servidor se instala UNA vez en una carpeta del usuario, y la configuracion
+    // apunta ahi. La alternativa —`npx --package=github:...` en la propia
+    // configuracion— resolvia el paquete contra GitHub en cada arranque: ~7 segundos
+    // cada vez, ~48 la primera con un pin nuevo, contra los 30 que espera el cliente
+    // MCP antes de descartar el servidor y dejar al agente sin tools.
+    say("Instalando el servidor (una sola vez, no en cada arranque)…");
+    const serverEntry = resolveServerEntry(flags, {
+      log: (r) => {
+        if (r.ok) {
+          say(`✓ ${r.dir}${r.reused ? "   (ya estaba esta version)" : ""}`);
+        } else {
+          say(`⚠ No se ha podido instalar: ${r.error.message.split("\n")[0]}`);
+          say("   Se escribe la forma con npx, que funciona pero resuelve el paquete en");
+          say("   cada arranque y puede agotar la espera del cliente MCP.");
+        }
+      },
+    });
+
     for (const key of clientKeys) {
-      const { target, replaced, migrated, others } = writeClientConfig(CLIENTS[key], root, args);
+      const { target, replaced, migrated, others } = writeClientConfig(
+        CLIENTS[key],
+        root,
+        serverEntry
+      );
       say(`✓ ${target}${replaced ? `   (servidor '${SERVER_NAME}' actualizado)` : ""}`);
       if (migrated) {
         say(`   Se ha retirado el servidor '${LEGACY_SERVER_NAME}' anterior: ese nombre`);
         say("   chocaba con la extension nativa de SQL Server de VS Code.");
       }
       if (others.length > 0) say(`   Se han conservado: ${others.join(", ")}`);
+    }
+
+    // Y en los ficheros del cliente que NO se ha configurado, la entrada vieja tambien
+    // hay que retirarla: dejarla registrada mantiene el choque de nombres y puede
+    // acabar levantando dos servidores identicos.
+    for (const key of Object.keys(CLIENTS)) {
+      if (clientKeys.includes(key)) continue;
+      const pruned = pruneLegacyServer(CLIENTS[key], root);
+      if (pruned) {
+        say(`✓ ${pruned}   (retirado el '${LEGACY_SERVER_NAME}' anterior que quedaba ahi)`);
+      }
     }
 
     // Reglas de permisos. En modo auto, Claude Code puede denegar hasta una
@@ -827,7 +934,12 @@ module.exports = {
   InputClosedError,
   findConfigFiles,
   buildArgs,
+  buildFlags,
+  nodeCommand,
+  npxCommand,
+  resolveServerEntry,
   writeClientConfig,
+  pruneLegacyServer,
   pickManyFromList,
   aliasFromName,
   suggestAliases,

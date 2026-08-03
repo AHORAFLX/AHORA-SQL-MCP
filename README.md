@@ -63,6 +63,14 @@ Framework o `appsettings.json` de Core), `--connection-string`, los datos suelto
 (`--server/--database/--user/--password`), `--from-env` o `--credentials-file`. Mezclarlas es un
 error de arranque, no hay precedencia que adivinar.
 
+> **De dónde sale `<RUTA>`.** De un clon del repositorio, o de la instalación que hace el
+> instalador guiado, que en Windows deja el servidor en
+> `%LOCALAPPDATA%\AHORA-SQL-MCP\node_modules\@ahoraflx\sql-mcp`. Lo que **no** hay que poner es
+> `"command": "npx"` con `--package=github:…`: eso resuelve el paquete contra GitHub en cada
+> arranque —~7 segundos, ~48 la primera vez con una versión nueva— y el cliente MCP descarta el
+> servidor a los 30, dejando al agente sin herramientas. Ver
+> [por qué esto no puede tardar](#por-qué-esto-no-puede-tardar).
+
 ### Una sola base de datos (solo lectura)
 
 ```json

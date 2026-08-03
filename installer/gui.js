@@ -34,8 +34,10 @@ const {
 
 const {
   findConfigFiles,
-  buildArgs,
+  buildFlags,
+  resolveServerEntry,
   writeClientConfig,
+  pruneLegacyServer,
   suggestAliases,
   aliasError,
   CLIENTS,
@@ -125,7 +127,11 @@ async function validate({ configFile, environment, names = [], manual }) {
   return results;
 }
 
-function write(payload) {
+/**
+ * `install` es inyectable para poder probar el formulario sin instalar nada de la red:
+ * en produccion es la instalacion de verdad, que ocurre una sola vez.
+ */
+function write(payload, { install } = {}) {
   const {
     projectDir,
     configFile,
@@ -167,7 +173,7 @@ function write(payload) {
     throw new Error("Falta el fichero de configuracion o los datos de conexion.");
   }
 
-  const args = buildArgs({
+  const flags = buildFlags({
     configFile: configFile ? resolveConfigFile(configFile) : undefined,
     credentialsFile,
     connections,
@@ -177,14 +183,30 @@ function write(payload) {
     sqlDirs,
   });
 
+  // El servidor se instala una vez y la configuracion apunta ahi. Resolverlo con npx
+  // en cada arranque costaba ~7 segundos, y ~48 la primera vez con un pin de version
+  // nuevo, contra los 30 que espera el cliente MCP antes de descartar el servidor.
+  const serverEntry = resolveServerEntry(flags, install ? { install } : {});
+  const args = serverEntry.args;
+
   const written = [];
   for (const key of clients) {
     const client = CLIENTS[key];
     if (!client) continue;
-    const result = writeClientConfig(client, root, args);
+    const result = writeClientConfig(client, root, serverEntry);
     written.push({ ...result, client: key });
   }
   if (written.length === 0) throw new Error("No se ha indicado ningun cliente MCP.");
+
+  // En el fichero del cliente que NO se ha marcado, la entrada `mssql` vieja tambien
+  // hay que retirarla: dejarla registrada mantiene el choque de nombres con la
+  // extension nativa de VS Code y puede acabar levantando dos servidores identicos.
+  const pruned = [];
+  for (const key of Object.keys(CLIENTS)) {
+    if (clients.includes(key)) continue;
+    const target = pruneLegacyServer(CLIENTS[key], root);
+    if (target) pruned.push(target);
+  }
 
   // Reglas de permisos: sin ellas, el modo auto puede denegar hasta una lectura y
   // el mensaje no menciona el MCP.
@@ -198,7 +220,9 @@ function write(payload) {
 
   return {
     written,
+    pruned,
     args,
+    command: serverEntry.command,
     credentialsFile,
     permissions,
     production: profile.production,
@@ -265,7 +289,14 @@ function readBody(req) {
  * `onReady` recibe { url, port, token } en cuanto escucha: es lo que permite
  * probar los endpoints sin tener que rascar la URL de la salida por consola.
  */
-function startGui({ open = true, host = "127.0.0.1", onReady, quiet = false, cwd = process.cwd() } = {}) {
+function startGui({
+  open = true,
+  host = "127.0.0.1",
+  onReady,
+  quiet = false,
+  cwd = process.cwd(),
+  install,
+} = {}) {
   const token = crypto.randomBytes(24).toString("hex");
   const html = renderPage(token, cwd);
 
@@ -316,7 +347,7 @@ function startGui({ open = true, host = "127.0.0.1", onReady, quiet = false, cwd
           case "/api/validate":
             return sendJson(res, 200, { results: await validate(body) });
           case "/api/write":
-            return sendJson(res, 200, write(body));
+            return sendJson(res, 200, write(body, { install }));
           case "/api/quit":
             sendJson(res, 200, { ok: true });
             finished = true;
