@@ -36,8 +36,11 @@ const {
   findConfigFiles,
   buildArgs,
   writeClientConfig,
+  suggestAliases,
+  aliasError,
   CLIENTS,
   PROFILES,
+  SERVER_NAME,
 } = require("./setup");
 const { credentialsPathFor, writeCredentialsFile } = require("./credentials");
 const { probeConnection } = require("./probe");
@@ -64,6 +67,10 @@ function detect(projectDir) {
       rel: path.relative(root, file) || path.basename(file),
       type: path.extname(file).toLowerCase() === ".json" ? "core" : "framework",
       names,
+      // Los alias se sugieren aqui y no en el navegador para no tener dos
+      // implementaciones de la misma regla: es la que usa tambien el asistente de
+      // terminal.
+      aliases: suggestAliases(names),
       error,
     };
   });
@@ -136,6 +143,21 @@ function write(payload) {
 
   for (const dir of sqlDirs) {
     if (!fs.existsSync(dir)) throw new Error(`La carpeta de .sql no existe: ${dir}`);
+  }
+
+  // Con varias conexiones el alias no es decorativo: se convierte en
+  // `MSSQL_<ALIAS>_DATABASE`, y el servidor descubre las bases de datos escaneando
+  // ese patron. Un alias invalido o repetido hace desaparecer una conexion sin
+  // ningun error, asi que se rechaza aqui.
+  if (connections.length > 1) {
+    const seen = [];
+    for (const c of connections) {
+      const problem = aliasError(c.alias, seen);
+      if (problem) {
+        throw new Error(`Alias de '${c.name}': ${problem}.`);
+      }
+      seen.push(c.alias);
+    }
   }
 
   let credentialsFile;
@@ -559,18 +581,28 @@ function onFileChange() {
   const items = chosenFile.names.map((n, i) =>
     '<li><input type="checkbox" class="nm" id="nm' + i + '" value="' + esc(n) + '">' +
     '<label for="nm' + i + '" style="margin:0;font-weight:400;flex:1">' + esc(n) + "</label>" +
-    '<input type="text" class="al" placeholder="alias (config / data)" style="width:190px">' +
+    '<input type="text" class="al" placeholder="alias" style="width:190px" value="' +
+    esc(chosenFile.aliases[i] || "") + '">' +
     "</li>").join("");
   $("names").innerHTML = chosenFile.names.length
     ? "<label>Cadenas a exponer</label><ul class=\\"list\\">" + items + "</ul>" +
-      '<p class="hint">Flexygo necesita dos: alias <code>config</code> y <code>data</code>. ' +
-      "Con una sola conexion el alias se ignora y la clave es <code>maindb</code>.</p>"
+      '<p class="hint">Marca <strong>todas</strong> las que quieras: no hay limite de dos. ' +
+      "Cada una sera una base de datos distinta para el agente, y el alias es la clave " +
+      "con la que la pedira. Flexygo usa <code>config</code> y <code>data</code>, que es " +
+      "lo que esperan las skills de SC0. Con una sola conexion el alias se ignora y la " +
+      "clave es <code>maindb</code>.</p>" +
+      '<p class="hint">El alias acaba dentro de un nombre de variable de entorno: solo ' +
+      "letras, digitos y guion bajo, empezando por letra.</p>"
     : '<div class="banner warn">Ese fichero no declara cadenas de conexion.</div>';
-  if (chosenFile.names.length === 2) {
-    $("nm0").checked = $("nm1").checked = true;
-    const al = document.querySelectorAll(".al");
-    al[0].value = "config"; al[1].value = "data";
-  } else if (chosenFile.names.length === 1) { $("nm0").checked = true; }
+
+  // Se premarca el caso habitual de Flexygo (configuracion + datos) si esta, y si no
+  // la primera. Las demas quedan a un clic, con el alias ya sugerido.
+  const conf = chosenFile.aliases.indexOf("config");
+  const data = chosenFile.aliases.indexOf("data");
+  if (chosenFile.names.length === 1) $("nm0").checked = true;
+  else if (conf !== -1 && data !== -1) {
+    $("nm" + conf).checked = true; $("nm" + data).checked = true;
+  } else if (chosenFile.names.length > 1) $("nm0").checked = true;
 }
 
 function selectedNames() {
@@ -579,6 +611,9 @@ function selectedNames() {
     const cb = li.querySelector(".nm");
     if (cb && cb.checked) out.push({ name: cb.value, alias: li.querySelector(".al").value.trim() || undefined });
   });
+  // Con una sola conexion la clave es siempre maindb: mandar un alias solo consigue
+  // que el wrapper avise de que lo ignora.
+  if (out.length === 1) out[0].alias = undefined;
   return out;
 }
 function manualConnection() {
@@ -693,7 +728,9 @@ $("btnWrite").onclick = async () => {
 
     let html = "<p>Ficheros escritos:</p><ul class=\\"list\\">" +
       res.written.map((w) => "<li>" + esc(w.target) +
-        (w.replaced ? ' <span class="hint">(servidor mssql actualizado)</span>' : "") +
+        (w.replaced ? ' <span class="hint">(servidor ' + ${JSON.stringify(SERVER_NAME)} + " actualizado)</span>" : "") +
+        (w.migrated ? '<br><span class="hint">Retirado el servidor <code>mssql</code> anterior: ' +
+          "ese nombre chocaba con la extension nativa de SQL Server de VS Code.</span>" : "") +
         (w.others.length ? ' <span class="hint">· conservados: ' + esc(w.others.join(", ")) + "</span>" : "") +
         "</li>").join("") + "</ul>";
     if (res.credentialsFile) {
@@ -703,7 +740,11 @@ $("btnWrite").onclick = async () => {
       html += "<p>Reglas de permisos en <code>" + esc(res.permissions.target) + "</code>:</p>" +
         (res.permissions.alreadyHadAll
           ? '<p class="hint">Ya estaban todas.</p>'
-          : "<pre>" + esc(res.permissions.added.join("\\n")) + "</pre>");
+          : "<pre>" + esc(res.permissions.added.join("\\n")) + "</pre>") +
+        (res.permissions.removed.length
+          ? '<p class="hint">Retiradas, del nombre anterior: ' +
+            res.permissions.removed.map((r) => "<code>" + esc(r) + "</code>").join(", ") + "</p>"
+          : "");
     }
     if (res.production) html += '<div class="banner warn">Marcada como PRODUCCION, solo lectura.</div>';
     else if (res.allowWrites) html += '<div class="banner warn">Escritura habilitada. Solo local o pruebas.</div>';

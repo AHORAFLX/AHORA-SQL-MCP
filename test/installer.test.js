@@ -10,6 +10,10 @@ const {
   findConfigFiles,
   buildArgs,
   writeClientConfig,
+  pickManyFromList,
+  aliasFromName,
+  suggestAliases,
+  aliasError,
   CLIENTS,
   PKG_SPEC,
 } = require("../installer/setup");
@@ -124,7 +128,7 @@ test("writeClientConfig: Claude Code usa .mcp.json y la clave mcpServers", () =>
   assert.equal(target, path.join(root, ".mcp.json"));
   const doc = JSON.parse(fs.readFileSync(target, "utf8"));
   assert.deepEqual(Object.keys(doc), ["mcpServers"]);
-  assert.equal(doc.mcpServers.mssql.command, "npx");
+  assert.equal(doc.mcpServers["ahora-sql"].command, "npx");
 });
 
 test("writeClientConfig: VS Code usa .vscode/mcp.json y la clave servers", () => {
@@ -151,20 +155,71 @@ test("writeClientConfig conserva los otros servidores MCP del fichero", () => {
   const doc = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8"));
   assert.equal(doc.mcpServers.otro.command, "node", "no se puede perder el otro servidor");
   assert.equal(doc.algoMio, true, "ni las claves ajenas del fichero");
-  assert.ok(doc.mcpServers.mssql);
+  assert.ok(doc.mcpServers["ahora-sql"]);
 });
 
-test("writeClientConfig informa de que reemplaza un mssql anterior", () => {
+test("writeClientConfig informa de que reemplaza un ahora-sql anterior", () => {
   const root = tempDir("inst-replace-");
   fs.writeFileSync(
     path.join(root, ".mcp.json"),
-    JSON.stringify({ mcpServers: { mssql: { command: "viejo" } } }),
+    JSON.stringify({ mcpServers: { "ahora-sql": { command: "viejo" } } }),
     "utf8"
   );
   const { replaced } = writeClientConfig(CLIENTS.claude, root, ["--yes"]);
   assert.equal(replaced, true);
   const doc = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8"));
-  assert.equal(doc.mcpServers.mssql.command, "npx");
+  assert.equal(doc.mcpServers["ahora-sql"].command, "npx");
+});
+
+test("writeClientConfig retira el servidor 'mssql' anterior si era nuestro", () => {
+  // Dejarlo mantiene el choque con la extension nativa de SQL Server de VS Code,
+  // que es justo lo que el renombrado viene a quitar.
+  const root = tempDir("inst-migra-");
+  fs.writeFileSync(
+    path.join(root, ".mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        mssql: { command: "npx", args: ["--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.7.0", "start-mssql-mcp"] },
+      },
+    }),
+    "utf8"
+  );
+  const { migrated, replaced } = writeClientConfig(CLIENTS.claude, root, ["--yes"]);
+  assert.equal(migrated, true);
+  assert.equal(replaced, false, "no reemplaza: la clave nueva no existia");
+  const servers = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8")).mcpServers;
+  assert.deepEqual(Object.keys(servers), ["ahora-sql"]);
+});
+
+test("writeClientConfig NO toca un 'mssql' que no es nuestro", () => {
+  const root = tempDir("inst-ajeno-");
+  fs.writeFileSync(
+    path.join(root, ".mcp.json"),
+    JSON.stringify({ mcpServers: { mssql: { command: "node", args: ["otra-cosa.js"] } } }),
+    "utf8"
+  );
+  const { migrated, others } = writeClientConfig(CLIENTS.claude, root, ["--yes"]);
+  assert.equal(migrated, false);
+  assert.deepEqual(others, ["mssql"], "el servidor ajeno se conserva y se reporta");
+  const servers = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8")).mcpServers;
+  assert.equal(servers.mssql.args[0], "otra-cosa.js");
+});
+
+test("writeClientConfig migra tambien en el fichero de VS Code", () => {
+  // Es donde mas duele: la extension nativa vive en el mismo editor.
+  const root = tempDir("inst-migra-vs-");
+  fs.mkdirSync(path.join(root, ".vscode"), { recursive: true });
+  fs.writeFileSync(
+    path.join(root, ".vscode", "mcp.json"),
+    JSON.stringify({ servers: { mssql: { command: "npx", args: ["start-mssql-mcp"] } } }),
+    "utf8"
+  );
+  const { migrated } = writeClientConfig(CLIENTS.vscode, root, ["--yes"]);
+  assert.equal(migrated, true);
+  const servers = JSON.parse(
+    fs.readFileSync(path.join(root, ".vscode", "mcp.json"), "utf8")
+  ).servers;
+  assert.deepEqual(Object.keys(servers), ["ahora-sql"]);
 });
 
 test("writeClientConfig hace copia de seguridad si el JSON previo estaba roto", () => {
@@ -173,7 +228,62 @@ test("writeClientConfig hace copia de seguridad si el JSON previo estaba roto", 
   fs.writeFileSync(file, "{ esto no es json", "utf8");
   writeClientConfig(CLIENTS.claude, root, ["--yes"]);
   assert.ok(fs.existsSync(`${file}.bak`), "el fichero ilegible debe respaldarse");
-  assert.ok(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers.mssql);
+  assert.ok(JSON.parse(fs.readFileSync(file, "utf8")).mcpServers["ahora-sql"]);
+});
+
+test("pickManyFromList coge tantas cadenas como se le pidan, no dos", async () => {
+  // Regresion: el asistente solo sabia coger la de configuracion y la de datos de
+  // Flexygo, y a partir de la tercera las descartaba en silencio.
+  const names = ["Conf", "Data", "Historico", "Almacen"];
+  const log = console.log;
+  console.log = () => {};
+  try {
+    const cases = [
+      ["1,2,3,4\n", names],
+      ["todas\n", names],
+      ["3 4\n", ["Historico", "Almacen"]],
+      ["\n", ["Conf", "Data"]], // el valor por defecto que se le pasa
+      ["2,2,2\n", ["Data"]], // repetidos, una sola vez
+      ["9\nx\n1,3\n", ["Conf", "Historico"]], // reintenta hasta que sea valido
+    ];
+    for (const [input, expected] of cases) {
+      const rl = new Prompter(Readable.from([input]), sink);
+      assert.deepEqual(await pickManyFromList(rl, names, "Cuales", "1,2"), expected, input);
+      rl.close();
+    }
+  } finally {
+    console.log = log;
+  }
+});
+
+test("aliasFromName mantiene config y data, y deriva el resto del nombre", () => {
+  assert.equal(aliasFromName("ConfConnectionString"), "config");
+  assert.equal(aliasFromName("DataConnectionString"), "data");
+  assert.equal(aliasFromName("DatosConnectionString"), "data");
+  assert.equal(aliasFromName("DefaultConnection"), "default");
+  assert.equal(aliasFromName("Almacen Central"), "almacen_central");
+});
+
+test("suggestAliases desambigua cuando dos nombres sugieren lo mismo", () => {
+  // Sin esto, la segunda pisaria a la primera: las dos exportarian
+  // MSSQL_DATA_DATABASE y una de las dos bases de datos desapareceria.
+  assert.deepEqual(
+    suggestAliases(["ConfConnectionString", "DataConnectionString", "DatosHistoricos"]),
+    ["config", "data", "data_2"]
+  );
+});
+
+test("aliasError rechaza lo que no cabe en un nombre de variable de entorno", () => {
+  // El alias se convierte en MSSQL_<ALIAS>_DATABASE y el servidor descubre las bases
+  // de datos escaneando ese patron: un alias invalido las hace desaparecer sin error.
+  assert.equal(aliasError("config"), null);
+  assert.ok(aliasError(""));
+  assert.ok(aliasError("mi-bd"), "el guion no vale en una variable de entorno");
+  assert.ok(aliasError("mi bd"));
+  assert.ok(aliasError("2bd"), "no puede empezar por digito");
+  assert.ok(aliasError("almacén"));
+  assert.ok(aliasError("DATA", ["data"]), "duplicado, sin distinguir mayusculas");
+  assert.equal(aliasError("data_2", ["data"]), null);
 });
 
 test("findConfigFiles encuentra los dos formatos y salta las carpetas de ruido", () => {

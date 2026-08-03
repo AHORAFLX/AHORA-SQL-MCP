@@ -270,9 +270,96 @@ test("write conserva los otros servidores y usa la clave correcta por cliente", 
     });
     const mcp = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8"));
     assert.ok(mcp.mcpServers.otro, "no puede perderse el servidor que ya existia");
-    assert.ok(mcp.mcpServers.mssql);
+    assert.ok(mcp.mcpServers["ahora-sql"]);
     const vs = JSON.parse(fs.readFileSync(path.join(root, ".vscode", "mcp.json"), "utf8"));
-    assert.ok(vs.servers.mssql, "VS Code usa la clave servers");
+    assert.ok(vs.servers["ahora-sql"], "VS Code usa la clave servers");
+  });
+});
+
+test("write acepta mas de dos cadenas, cada una con su alias", async () => {
+  // Regresion: config + data no es el tope. El wrapper acepta las que hagan falta
+  // con --connection-name NOMBRE:alias, y el instalador tiene que dejarlas pasar.
+  const root = coreProject();
+  await withGui(async ({ call, origin }) => {
+    const det = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+    const core = det.files.find((f) => f.type === "core");
+    const r = await call("/api/write", {
+      origin,
+      body: {
+        projectDir: root,
+        configFile: core.path,
+        environment: det.defaultEnvironment,
+        connections: [
+          { name: "ConfConnectionString", alias: "config" },
+          { name: "DataConnectionString", alias: "data" },
+          { name: "OtraConnectionString", alias: "historico" },
+        ],
+        profileKey: "local",
+        clients: ["claude"],
+      },
+    });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json.dbKeys, ["config", "data", "historico"]);
+    const args = r.json.args.join(" ");
+    for (const expected of [
+      "ConfConnectionString:config",
+      "DataConnectionString:data",
+      "OtraConnectionString:historico",
+    ]) {
+      assert.ok(args.includes(expected), `falta ${expected} en ${args}`);
+    }
+  });
+});
+
+test("write rechaza un alias que no cabe en un nombre de variable de entorno", async () => {
+  // Sin esto la conexion desaparece sin ningun error: el servidor descubre las bases
+  // de datos escaneando MSSQL_<ALIAS>_DATABASE.
+  const root = coreProject();
+  await withGui(async ({ call, origin }) => {
+    const det = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+    const core = det.files.find((f) => f.type === "core");
+    const base = {
+      projectDir: root,
+      configFile: core.path,
+      environment: det.defaultEnvironment,
+      profileKey: "local",
+      clients: ["claude"],
+    };
+    const malo = await call("/api/write", {
+      origin,
+      body: {
+        ...base,
+        connections: [
+          { name: "ConfConnectionString", alias: "config" },
+          { name: "DataConnectionString", alias: "mi-bd" },
+        ],
+      },
+    });
+    assert.equal(malo.status, 400);
+    assert.match(malo.json.error, /DataConnectionString/);
+
+    const repetido = await call("/api/write", {
+      origin,
+      body: {
+        ...base,
+        connections: [
+          { name: "ConfConnectionString", alias: "data" },
+          { name: "DataConnectionString", alias: "data" },
+        ],
+      },
+    });
+    assert.equal(repetido.status, 400);
+    assert.match(repetido.json.error, /ya esta usado/);
+  });
+});
+
+test("detect sugiere un alias por cadena, ya desambiguado", async () => {
+  const root = coreProject();
+  await withGui(async ({ call, origin }) => {
+    const det = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+    const core = det.files.find((f) => f.type === "core");
+    assert.deepEqual(core.names, ["ConfConnectionString", "DataConnectionString"]);
+    assert.deepEqual(core.aliases, ["config", "data"]);
   });
 });
 
@@ -300,7 +387,7 @@ test("las credenciales manuales NO acaban en el .mcp.json", async () => {
     );
 
     const args = JSON.stringify(
-      JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8")).mcpServers.mssql.args
+      JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8")).mcpServers["ahora-sql"].args
     );
     assert.ok(!args.includes("contrasena-secreta"), "la contrasena no puede estar en el .mcp.json");
     assert.ok(args.includes("--credentials-file"));
@@ -332,7 +419,7 @@ test("write anade las reglas de lectura y NO las de escritura", async () => {
     });
     assert.ok(r.json.permissions, "debe reportar las reglas escritas");
     const allow = JSON.parse(fs.readFileSync(r.json.permissions.target, "utf8")).permissions.allow;
-    assert.ok(allow.includes("mcp__mssql__execute_read_query"));
+    assert.ok(allow.includes("mcp__ahora-sql__execute_read_query"));
     assert.ok(
       !allow.some((x) => x.includes("execute_write_query") || x.includes("execute_sql_file")),
       `sin reglas de escritura: ${allow.join(", ")}`

@@ -87,15 +87,21 @@ npx skills add AHORAFLX/AHORA-SCO-SKILLS/skills/General
 Crea un fichero `.mcp.json` en la **raíz del proyecto** y pega el bloque que te corresponda.
 Lo único que tienes que cambiar es la ruta del fichero de configuración.
 
-> El servidor **tiene que llamarse `mssql`**. Ese nombre es lo que hace que las skills lo encuentren.
-> Si lo llamas de otra forma no da error: simplemente las skills dejan de ver la base de datos.
+> El servidor **tiene que llamarse `ahora-sql`**. Ese nombre es lo que hace que las skills lo
+> encuentren. Si lo llamas de otra forma no da error: simplemente las skills dejan de ver la base
+> de datos.
+>
+> **Se llamaba `mssql`.** Chocaba con la extensión nativa de SQL Server de VS Code, que registra
+> sus propias herramientas `mssql_list_databases`, `mssql_list_tables`, `mssql_list_views`… y
+> acababan mezcladas con las nuestras. Si vuelves a lanzar el instalador, la entrada vieja se
+> retira sola; si tu `.mcp.json` está escrito a mano, renombra la clave.
 
 ### Flexygo en .NET Framework (tiene `Web.config`)
 
 ```json
 {
   "mcpServers": {
-    "mssql": {
+    "ahora-sql": {
       "command": "npx",
       "args": [
         "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.7.0", "start-mssql-mcp",
@@ -115,7 +121,7 @@ Igual, pero apuntando a la carpeta que contiene el `appsettings.json` (normalmen
 ```json
 {
   "mcpServers": {
-    "mssql": {
+    "ahora-sql": {
       "command": "npx",
       "args": [
         "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.7.0", "start-mssql-mcp",
@@ -143,7 +149,7 @@ Los datos van en `env`, nunca en los argumentos: `.mcp.json` se commitea.
 ```json
 {
   "mcpServers": {
-    "mssql": {
+    "ahora-sql": {
       "command": "npx",
       "args": [
         "--yes", "--package=github:AHORAFLX/AHORA-SQL-MCP#v1.7.0", "start-mssql-mcp",
@@ -205,7 +211,8 @@ Los datos van en `env`, nunca en los argumentos: `.mcp.json` se commitea.
 | No aparece ninguna herramienta de SQL | No has abierto una sesión nueva, o la has abierto sobre otra carpeta |
 | `⏸ Pending approval` al mirar con `claude mcp list` | Falta aprobar el servidor: abre una sesión sobre la carpeta y acepta. Si lo rechazaste, `claude mcp reset-project-choices` |
 | Elegí "VS Code" pero uso la extensión de Claude Code | Son agentes distintos. La extensión **es** Claude Code y lee `.mcp.json`; la opción de VS Code es para GitHub Copilot |
-| `Permission denied ... Blocked by classifier` al usar una herramienta | Es la capa de permisos de Claude Code en modo auto, no el MCP. El instalador puede añadir las reglas; o añádelas a mano en `permissions.allow` de `.claude/settings.local.json`: `mcp__mssql__list_*`, `mcp__mssql__describe_*`, `mcp__mssql__execute_read_query` |
+| En VS Code salen herramientas de SQL duplicadas o el agente usa las que no son | Tienes un `.mcp.json` viejo con el servidor llamado `mssql`, que choca con la extensión nativa `ms-mssql.mssql`. Vuelve a lanzar el instalador: renombra el servidor a `ahora-sql` y retira la entrada anterior |
+| `Permission denied ... Blocked by classifier` al usar una herramienta | Es la capa de permisos de Claude Code en modo auto, no el MCP. El instalador puede añadir las reglas; o añádelas a mano en `permissions.allow` de `.claude/settings.local.json`: `mcp__ahora-sql__list_*`, `mcp__ahora-sql__describe_*`, `mcp__ahora-sql__execute_read_query` |
 | `No se encontro la cadena de conexion`, con el nombre correcto | .NET Core: la cadena está vacía en `appsettings.json` y tu entorno no es `Development`. Añade `"--environment", "<nombre>"`. El error te dice en qué ficheros ha buscado |
 | El error lista nombres de conexión distintos a los que pusiste | Los nombres varían entre proyectos. Usa los que te lista |
 | Timeout al conectar, con instancia nombrada **local** | El wrapper intenta averiguar el puerto solo. Si aun así falla, esa instancia no tiene **TCP/IP a la escucha**: habilítalo en SQL Server Configuration Manager (Protocolos de `<INSTANCIA>` → TCP/IP) y reinicia el servicio. **Que SSMS conecte no lo descarta**: en local SSMS usa memoria compartida y este driver es solo TCP |

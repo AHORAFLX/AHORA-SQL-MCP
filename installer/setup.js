@@ -35,6 +35,7 @@ const {
 const { writeCredentialsFile } = require("./credentials");
 const { probeConnection } = require("./probe");
 const { allowMcpTools } = require("./permissions");
+const { SERVER_NAME, LEGACY_SERVER_NAME, isOurServerEntry } = require("./server-name");
 
 const PKG_VERSION = require("../package.json").version;
 const PKG_SPEC = `github:AHORAFLX/AHORA-SQL-MCP#v${PKG_VERSION}`;
@@ -220,6 +221,94 @@ async function pickFromList(rl, items, label) {
   }
 }
 
+/**
+ * Seleccion multiple: "1,3" o "todas".
+ *
+ * Existe porque el asistente solo sabia coger DOS cadenas (la de configuracion y la
+ * de datos de Flexygo) y las descartaba en silencio a partir de la tercera, aunque
+ * el wrapper acepta las que hagan falta con `--connection-name NOMBRE:alias`.
+ */
+async function pickManyFromList(rl, items, label, fallback = "1") {
+  items.forEach((item, i) => say(`   ${i + 1}) ${item}`));
+  while (true) {
+    const raw = await ask(rl, `${label} (numeros separados por comas, o 'todas')`, fallback);
+    if (/^tod[ao]s$/i.test(raw.trim())) return [...items];
+
+    const picked = [];
+    let bad = null;
+    for (const piece of raw.split(/[,\s]+/).filter(Boolean)) {
+      const idx = Number.parseInt(piece, 10);
+      if (!Number.isInteger(idx) || idx < 1 || idx > items.length) {
+        bad = piece;
+        break;
+      }
+      if (!picked.includes(items[idx - 1])) picked.push(items[idx - 1]);
+    }
+    if (bad !== null) {
+      say(`   '${bad}' no es un numero de la lista.`);
+      continue;
+    }
+    if (picked.length === 0) {
+      say("   Elige al menos una.");
+      continue;
+    }
+    return picked;
+  }
+}
+
+/**
+ * El alias acaba dentro de un nombre de variable de entorno.
+ *
+ * El wrapper exporta `MSSQL_<ALIAS>_DATABASE` y el servidor descubre las bases de
+ * datos escaneando justo ese patron, asi que un alias con guiones, espacios o
+ * acentos produce una variable que no se puede definir en Windows y la conexion
+ * desaparece sin error. Con `config` y `data` fijos nunca se noto; en cuanto el
+ * alias lo escribe una persona, hay que validarlo.
+ */
+const ALIAS_RE = /^[A-Za-z][A-Za-z0-9_]*$/;
+
+function aliasError(alias, taken = []) {
+  if (!alias) return "el alias no puede estar vacio";
+  if (!ALIAS_RE.test(alias)) {
+    return "solo letras, digitos y guion bajo, empezando por letra (acaba en un nombre de variable de entorno)";
+  }
+  if (taken.some((t) => t.toLowerCase() === alias.toLowerCase())) {
+    return `'${alias}' ya esta usado por otra conexion`;
+  }
+  return null;
+}
+
+/**
+ * Alias razonable a partir del nombre de la cadena.
+ *
+ * Se mantienen `config` y `data` para los nombres de Flexygo, que es lo que esperan
+ * las skills de SC0; el resto se deriva del nombre para no obligar a inventarlo.
+ */
+function aliasFromName(name) {
+  const stripped = String(name)
+    .replace(/connection\s*string$/i, "")
+    .replace(/connection$/i, "")
+    .trim();
+  if (/^conf/i.test(stripped)) return "config";
+  if (/^dat/i.test(stripped)) return "data";
+  const slug = stripped.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+  return ALIAS_RE.test(slug) ? slug : `db_${slug}`.replace(/_+$/, "") || "db";
+}
+
+/** Alias sugeridos para un conjunto de nombres, ya desambiguados entre si. */
+function suggestAliases(names) {
+  const taken = [];
+  return names.map((name) => {
+    let alias = aliasFromName(name);
+    let n = 2;
+    while (taken.some((t) => t.toLowerCase() === alias.toLowerCase())) {
+      alias = `${aliasFromName(name)}_${n++}`;
+    }
+    taken.push(alias);
+    return alias;
+  });
+}
+
 /** Lee un JSON existente sin reventar por un BOM ni por comentarios sueltos. */
 function readJsonIfExists(file) {
   if (!fs.existsSync(file)) return null;
@@ -304,11 +393,27 @@ function writeClientConfig(client, root, args) {
   // Se conservan los demas servidores MCP del fichero: sobrescribir el fichero
   // entero es la forma facil de romperle a alguien una configuracion que ya tenia.
   doc[client.key] = doc[client.key] && typeof doc[client.key] === "object" ? doc[client.key] : {};
-  const replaced = Boolean(doc[client.key].mssql);
-  doc[client.key].mssql = { command: "npx", args };
+  const servers = doc[client.key];
+
+  // Migracion del nombre anterior. Si la entrada `mssql` es nuestra hay que
+  // BORRARLA, no solo anadir la nueva: dejarla mantiene el choque con la extension
+  // nativa de VS Code, que es justo lo que el renombrado viene a quitar. Si es de
+  // otra herramienta se deja donde esta.
+  const migrated = Boolean(
+    servers[LEGACY_SERVER_NAME] && isOurServerEntry(servers[LEGACY_SERVER_NAME])
+  );
+  if (migrated) delete servers[LEGACY_SERVER_NAME];
+
+  const replaced = Boolean(servers[SERVER_NAME]);
+  servers[SERVER_NAME] = { command: "npx", args };
 
   fs.writeFileSync(target, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
-  return { target, replaced, others: Object.keys(doc[client.key]).filter((k) => k !== "mssql") };
+  return {
+    target,
+    replaced,
+    migrated,
+    others: Object.keys(servers).filter((k) => k !== SERVER_NAME),
+  };
 }
 
 /**
@@ -477,46 +582,59 @@ async function main() {
         return true;
       };
 
-      const flexygo =
-        names.length >= 2 &&
-        (await askYesNo(
-          rl,
-          "¿Es Flexygo (necesita la BD de configuracion y la de datos)?",
-          true
-        ));
-
-      if (flexygo) {
-        say("Elige la de CONFIGURACION:");
-        const confName = await pickFromList(rl, names, "Configuracion");
-        say("Elige la de DATOS:");
-        const dataName = await pickFromList(
-          rl,
-          names.filter((n) => n !== confName),
-          "Datos"
-        );
-        say();
-        say("Validando contra el fichero real:");
-        const okConf = await validate(confName, "config");
-        const okData = await validate(dataName, "data");
-        if (!okConf || !okData) {
-          say();
-          say("✗ Alguna cadena no se ha podido resolver. Nada escrito.");
-          if (isCore) {
-            say("  En .NET Core la causa habitual es el entorno: prueba otro nombre");
-            say("  (el error de arriba dice en que ficheros ha buscado).");
-          }
-          process.exit(1);
-        }
+      // Cuantas se exponen lo decide quien instala, sin tope. Antes solo cabian dos
+      // (la de configuracion y la de datos de Flexygo) y la tercera se perdia en
+      // silencio, aunque el resto de la cadena la soporta perfectamente.
+      let chosen;
+      if (names.length === 1) {
+        chosen = names;
       } else {
-        const only =
-          names.length === 1 ? names[0] : await pickFromList(rl, names, "Cual expongo");
         say();
-        say("Validando contra el fichero real:");
-        if (!(await validate(only, undefined))) {
-          say();
-          say("✗ La cadena no se ha podido resolver. Nada escrito.");
-          process.exit(1);
+        say("Cada cadena que elijas sera una base de datos distinta para el agente.");
+        // El caso de Flexygo (configuracion + datos) sigue siendo el habitual, asi
+        // que se ofrece hecho como valor por defecto en vez de como una pregunta.
+        const flexygoIdx = ["conf", "dat"]
+          .map((p) => names.findIndex((n) => new RegExp(`^${p}`, "i").test(n)) + 1)
+          .filter((i) => i > 0);
+        const fallback = flexygoIdx.length === 2 ? flexygoIdx.join(",") : "1";
+        chosen = await pickManyFromList(rl, names, "Cuales expongo", fallback);
+      }
+
+      // Con una sola conexion la clave es siempre `maindb` y el alias se ignora, asi
+      // que no se pregunta.
+      const aliases = [];
+      if (chosen.length > 1) {
+        say();
+        say("Alias de cada una. Es la clave con la que el agente pedira la base de");
+        say("datos ('dbKey'); en Flexygo las skills de SC0 esperan config y data.");
+        const suggested = suggestAliases(chosen);
+        for (const [i, name] of chosen.entries()) {
+          while (true) {
+            const alias = await ask(rl, `   Alias de ${name}`, suggested[i]);
+            const problem = aliasError(alias, aliases);
+            if (!problem) {
+              aliases.push(alias);
+              break;
+            }
+            say(`   ✗ ${problem}.`);
+          }
         }
+      }
+
+      say();
+      say("Validando contra el fichero real:");
+      let allOk = true;
+      for (const [i, name] of chosen.entries()) {
+        if (!(await validate(name, aliases[i]))) allOk = false;
+      }
+      if (!allOk) {
+        say();
+        say("✗ Alguna cadena no se ha podido resolver. Nada escrito.");
+        if (isCore) {
+          say("  En .NET Core la causa habitual es el entorno: prueba otro nombre");
+          say("  (el error de arriba dice en que ficheros ha buscado).");
+        }
+        process.exit(1);
       }
     }
 
@@ -590,8 +708,12 @@ async function main() {
     });
 
     for (const key of clientKeys) {
-      const { target, replaced, others } = writeClientConfig(CLIENTS[key], root, args);
-      say(`✓ ${target}${replaced ? "   (servidor 'mssql' actualizado)" : ""}`);
+      const { target, replaced, migrated, others } = writeClientConfig(CLIENTS[key], root, args);
+      say(`✓ ${target}${replaced ? `   (servidor '${SERVER_NAME}' actualizado)` : ""}`);
+      if (migrated) {
+        say(`   Se ha retirado el servidor '${LEGACY_SERVER_NAME}' anterior: ese nombre`);
+        say("   chocaba con la extension nativa de SQL Server de VS Code.");
+      }
       if (others.length > 0) say(`   Se han conservado: ${others.join(", ")}`);
     }
 
@@ -618,6 +740,9 @@ async function main() {
         say(`✓ ${perms.target}`);
         if (perms.alreadyHadAll) say("   (ya estaban todas)");
         else say(`   Anadidas: ${perms.added.join(", ")}`);
+        if (perms.removed.length > 0) {
+          say(`   Retiradas, del nombre anterior: ${perms.removed.join(", ")}`);
+        }
         if (!includeWrites) {
           say("   Las escrituras seguiran pidiendote permiso.");
         }
@@ -703,7 +828,13 @@ module.exports = {
   findConfigFiles,
   buildArgs,
   writeClientConfig,
+  pickManyFromList,
+  aliasFromName,
+  suggestAliases,
+  aliasError,
   CLIENTS,
   PROFILES,
   PKG_SPEC,
+  SERVER_NAME,
+  LEGACY_SERVER_NAME,
 };

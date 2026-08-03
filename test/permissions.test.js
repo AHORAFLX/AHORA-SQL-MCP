@@ -23,20 +23,20 @@ function read(target) {
 test("las reglas de lectura llevan el prefijo del servidor y comodines anclados", () => {
   // Un comodin sin el prefijo `mcp__<servidor>__` se ignora con un aviso y no
   // autoriza nada, asi que el anclaje no es cosmetico.
-  for (const rule of readRules("mssql")) {
-    assert.match(rule, /^mcp__mssql__/);
+  for (const rule of readRules("ahora-sql")) {
+    assert.match(rule, /^mcp__ahora-sql__/);
   }
-  assert.deepEqual(readRules("mssql"), [
-    "mcp__mssql__list_*",
-    "mcp__mssql__describe_*",
-    "mcp__mssql__execute_read_query",
+  assert.deepEqual(readRules("ahora-sql"), [
+    "mcp__ahora-sql__list_*",
+    "mcp__ahora-sql__describe_*",
+    "mcp__ahora-sql__execute_read_query",
   ]);
 });
 
 test("las reglas de escritura son exactamente las dos que modifican la BD", () => {
-  assert.deepEqual(writeRules("mssql"), [
-    "mcp__mssql__execute_write_query",
-    "mcp__mssql__execute_sql_file",
+  assert.deepEqual(writeRules("ahora-sql"), [
+    "mcp__ahora-sql__execute_write_query",
+    "mcp__ahora-sql__execute_sql_file",
   ]);
 });
 
@@ -44,7 +44,7 @@ test("por defecto NO se permiten las escrituras", () => {
   const root = tempDir();
   const { target } = allowMcpTools(root);
   const allow = read(target).permissions.allow;
-  assert.ok(allow.includes("mcp__mssql__execute_read_query"));
+  assert.ok(allow.includes("mcp__ahora-sql__execute_read_query"));
   assert.ok(
     !allow.some((r) => r.includes("execute_write_query") || r.includes("execute_sql_file")),
     `no puede colarse una escritura: ${allow.join(", ")}`
@@ -55,8 +55,43 @@ test("con includeWrites se anaden tambien las de escritura", () => {
   const root = tempDir();
   const { target } = allowMcpTools(root, { includeWrites: true });
   const allow = read(target).permissions.allow;
-  assert.ok(allow.includes("mcp__mssql__execute_write_query"));
-  assert.ok(allow.includes("mcp__mssql__execute_sql_file"));
+  assert.ok(allow.includes("mcp__ahora-sql__execute_write_query"));
+  assert.ok(allow.includes("mcp__ahora-sql__execute_sql_file"));
+});
+
+test("las reglas del nombre anterior se retiran, y solo las nuestras", () => {
+  // Quedarian autorizando un servidor que ya no existe. Pero un `mcp__mssql__*`
+  // cualquiera puede ser de otra herramienta del equipo, y ese no se toca.
+  const root = tempDir();
+  const target = permissionsPath(root);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(
+    target,
+    JSON.stringify({
+      permissions: {
+        allow: [
+          "mcp__mssql__list_*",
+          "mcp__mssql__describe_*",
+          "mcp__mssql__execute_read_query",
+          "mcp__mssql__algo_de_otra_herramienta",
+          "Bash(npm test)",
+        ],
+      },
+    }),
+    "utf8"
+  );
+
+  const { removed } = allowMcpTools(root);
+  const allow = read(target).permissions.allow;
+  assert.deepEqual(removed, [
+    "mcp__mssql__list_*",
+    "mcp__mssql__describe_*",
+    "mcp__mssql__execute_read_query",
+  ]);
+  assert.ok(!allow.some((r) => r.startsWith("mcp__mssql__e") || r === "mcp__mssql__list_*"));
+  assert.ok(allow.includes("mcp__mssql__algo_de_otra_herramienta"), "lo ajeno se conserva");
+  assert.ok(allow.includes("Bash(npm test)"));
+  assert.ok(allow.includes("mcp__ahora-sql__execute_read_query"));
 });
 
 test("se fusiona sin perder los permisos que ya habia", () => {
@@ -77,7 +112,7 @@ test("se fusiona sin perder los permisos que ya habia", () => {
   assert.ok(doc.permissions.allow.includes("Bash(npm test)"), "no se pierde lo que habia");
   assert.deepEqual(doc.permissions.deny, ["Bash(rm *)"], "ni las reglas de deny");
   assert.equal(doc.otraCosa, 1, "ni otras claves del fichero");
-  assert.ok(doc.permissions.allow.includes("mcp__mssql__execute_read_query"));
+  assert.ok(doc.permissions.allow.includes("mcp__ahora-sql__execute_read_query"));
 });
 
 test("es idempotente: no duplica reglas", () => {

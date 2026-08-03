@@ -50,9 +50,9 @@ so nobody connects the two. The installer offers to pre-authorize the read surfa
 `permissions.allow`:
 
 ```
-mcp__mssql__list_*
-mcp__mssql__describe_*
-mcp__mssql__execute_read_query
+mcp__ahora-sql__list_*
+mcp__ahora-sql__describe_*
+mcp__ahora-sql__execute_read_query
 ```
 
 `execute_write_query` and `execute_sql_file` are **deliberately left out** and only added on an
@@ -340,7 +340,7 @@ the variables in `env`:
 ```json
 {
   "mcpServers": {
-    "mssql": {
+    "ahora-sql": {
       "command": "node",
       "args": ["<PATH>/AHORA-SQL-MCP/src/index.js"],
       "env": {

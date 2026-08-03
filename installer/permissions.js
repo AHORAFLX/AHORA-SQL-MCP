@@ -14,9 +14,10 @@
  */
 const fs = require("fs");
 const path = require("path");
+const { SERVER_NAME, LEGACY_SERVER_NAME } = require("./server-name");
 
 /** Solo introspeccion y consulta. Las escrituras se dejan preguntando a proposito. */
-function readRules(serverName = "mssql") {
+function readRules(serverName = SERVER_NAME) {
   return [
     `mcp__${serverName}__list_*`,
     `mcp__${serverName}__describe_*`,
@@ -25,7 +26,7 @@ function readRules(serverName = "mssql") {
 }
 
 /** Lo que modifica la base de datos. Nunca se anade sin pedirlo expresamente. */
-function writeRules(serverName = "mssql") {
+function writeRules(serverName = SERVER_NAME) {
   return [
     `mcp__${serverName}__execute_write_query`,
     `mcp__${serverName}__execute_sql_file`,
@@ -59,12 +60,19 @@ function permissionsPath(projectDir) {
  * Un `settings.local.json` puede tener permisos de Bash y otros ajustes que no se
  * pueden perder, asi que nunca se sobrescribe: se lee, se fusiona y se deduplica.
  */
-function allowMcpTools(projectDir, { includeWrites = false, serverName = "mssql" } = {}) {
+function allowMcpTools(projectDir, { includeWrites = false, serverName = SERVER_NAME } = {}) {
   const target = permissionsPath(projectDir);
   const wanted = [
     ...readRules(serverName),
     ...(includeWrites ? writeRules(serverName) : []),
   ];
+  // Reglas del nombre anterior. Se retiran SOLO las que escribimos nosotros, nunca
+  // un `mcp__mssql__*` cualquiera: puede ser de otra herramienta del equipo. Si no
+  // se retiran, quedan autorizando un servidor que ya no existe.
+  const stale =
+    serverName === SERVER_NAME
+      ? new Set([...readRules(LEGACY_SERVER_NAME), ...writeRules(LEGACY_SERVER_NAME)])
+      : new Set();
 
   let doc = {};
   let backup;
@@ -81,7 +89,9 @@ function allowMcpTools(projectDir, { includeWrites = false, serverName = "mssql"
 
   const permissions =
     doc.permissions && typeof doc.permissions === "object" ? doc.permissions : {};
-  const allow = Array.isArray(permissions.allow) ? permissions.allow : [];
+  const previous = Array.isArray(permissions.allow) ? permissions.allow : [];
+  const removed = previous.filter((rule) => stale.has(rule));
+  const allow = previous.filter((rule) => !stale.has(rule));
   const added = wanted.filter((rule) => !allow.includes(rule));
 
   doc.permissions = { ...permissions, allow: [...allow, ...added] };
@@ -89,7 +99,7 @@ function allowMcpTools(projectDir, { includeWrites = false, serverName = "mssql"
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
 
-  return { target, added, backup, alreadyHadAll: added.length === 0 };
+  return { target, added, removed, backup, alreadyHadAll: added.length === 0 };
 }
 
 module.exports = {
@@ -98,4 +108,6 @@ module.exports = {
   gitRootOf,
   readRules,
   writeRules,
+  SERVER_NAME,
+  LEGACY_SERVER_NAME,
 };

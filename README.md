@@ -41,10 +41,22 @@ lo que garantiza hashes de integridad y el mismo árbol de dependencias en las 6
 
 ## Configuración: el `.mcp.json` del proyecto
 
-El servidor **debe llamarse exactamente `mssql`**. Ese nombre determina que las herramientas se
-expongan como `mcp__mssql__*`, y las skills de SC0 dependen de esos nombres. Renombrarlo no
-produce ningún error: simplemente las skills dejan de encontrar la base de datos y vuelven a
-generar SQL sin verificar, que es el peor modo de fallo posible.
+El servidor **debe llamarse exactamente `ahora-sql`**. Ese nombre determina que las herramientas
+se expongan como `mcp__ahora-sql__*`; ponerle otro no produce ningún error, simplemente deja de
+coincidir con las reglas de permisos que escribe el instalador y con lo que documentan las skills
+de SC0.
+
+> **Antes se llamaba `mssql`.** Ese nombre chocaba con la extensión nativa de SQL Server
+> de VS Code (`ms-mssql.mssql`), que registra sus propias herramientas de Copilot llamadas
+> `mssql_list_databases`, `mssql_list_tables`, `mssql_list_views`, `mssql_run_query`… VS Code
+> cualifica las herramientas de un servidor MCP con el nombre del servidor, así que nuestras
+> `list_databases` / `list_tables` / `list_views` producían **exactamente los mismos
+> identificadores** que las suyas, y el resto quedaba mezclado en un grupo «mssql»
+> indistinguible en el selector de herramientas.
+>
+> El instalador migra solo: al reinstalar retira la entrada `mssql` **si es nuestra** (deja
+> intacta cualquier otra) y reescribe las reglas `mcp__mssql__*` de `settings.local.json` con el
+> nombre nuevo. Si tienes un `.mcp.json` escrito a mano, renombra la clave.
 
 Hay que elegir **una** fuente de conexión de las cinco: `--config-file` (Web.config de
 Framework o `appsettings.json` de Core), `--connection-string`, los datos sueltos
@@ -56,7 +68,7 @@ error de arranque, no hay precedencia que adivinar.
 ```json
 {
   "mcpServers": {
-    "mssql": {
+    "ahora-sql": {
       "command": "node",
       "args": [
         "<RUTA>/AHORA-SQL-MCP/bin/start-mssql-mcp.js",
@@ -77,7 +89,7 @@ herramientas aceptan un parámetro `dbKey` para elegir (`config` o `data`).
 ```json
 {
   "mcpServers": {
-    "mssql": {
+    "ahora-sql": {
       "command": "node",
       "args": [
         "<RUTA>/AHORA-SQL-MCP/bin/start-mssql-mcp.js",
@@ -92,6 +104,12 @@ herramientas aceptan un parámetro `dbKey` para elegir (`config` o `data`).
 
 Con una sola conexión la clave es siempre `maindb`, aunque pases alias; el wrapper lo avisa al
 arrancar en vez de ignorarlo en silencio.
+
+**No hay límite de dos.** `--connection-name` es repetible tantas veces como haga falta, y el
+instalador (formulario y terminal) deja marcar todas las cadenas del fichero, cada una con su
+alias. `config` y `data` son solo los alias que esperan las skills de SC0 en un Flexygo típico.
+El alias acaba dentro de un nombre de variable de entorno (`MSSQL_<ALIAS>_DATABASE`), así que
+solo admite letras, dígitos y guion bajo, empezando por letra.
 
 ### Flexygo migrado a .NET Core: `appsettings.json`
 
@@ -139,7 +157,7 @@ saca de ahí:
 ```json
 {
   "mcpServers": {
-    "mssql": {
+    "ahora-sql": {
       "command": "node",
       "args": ["<RUTA>/AHORA-SQL-MCP/bin/start-mssql-mcp.js", "--from-env"],
       "env": {
