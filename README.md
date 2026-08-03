@@ -237,6 +237,23 @@ El banner lo dice cuando ocurre:
 Queda sin resolver solo si esa instancia **no tiene TCP/IP a la escucha en absoluto** (protocolo
 desactivado), porque entonces no hay ningún puerto que descubrir.
 
+#### Por qué esto no puede tardar
+
+Preguntar al sistema cuesta un arranque de PowerShell más dos consultas CIM, unos 2 segundos, y se
+hace **antes** de levantar el servidor MCP: ese tiempo se lo come el cliente esperando el saludo
+`initialize`. Su límite son 30 segundos por defecto (`MCP_TIMEOUT`), y al agotarse **descarta el
+servidor entero**, así que sus tools no llegan a aparecer. Con varios MCP arrancando a la vez, y
+varias conexiones cada uno, ese presupuesto se agota antes de lo que parece.
+
+De ahí tres precauciones:
+
+- **Una sola consulta para todas las conexiones.** El coste es el mismo con una conexión que con
+  cinco, porque las consultas caras se hacen una vez y se reparten entre las instancias.
+- **Una caché de 60 segundos** en el directorio temporal, compartida por todos los MCP del usuario.
+  Evita que varios servidores que arrancan seguidos repitan el mismo sondeo. Es corta a propósito:
+  un reinicio del servicio SQL con puerto dinámico se nota en el arranque siguiente.
+- **Con `--port` no se pregunta**, porque el puerto ya lo has dicho tú.
+
 **Para un servidor remoto** no se puede preguntar al sistema, así que ahí resolver una instancia por
 nombre sí **exige que el servicio SQL Browser esté arrancado**. Si está parado, la conexión agota el
 tiempo de espera y el wrapper te lo avisa al arrancar.
@@ -271,7 +288,12 @@ La salida es indicar el puerto:
 Con una sola conexión el alias es `maindb`, así que `--port maindb:1433` también vale.
 
 `--port` y la instancia nombrada son **excluyentes** — tedious no admite las dos a la vez, así
-que al fijar puerto se descarta la instancia. Para saber en qué puerto escucha una instancia:
+que al fijar puerto se descarta la instancia. Y como el puerto ya lo has dicho tú, con `--port`
+**no se pregunta al sistema**: el arranque se ahorra los ~2 segundos del sondeo. Lo que se pierde a
+cambio es detectar que la instancia solo escucha en la loopback, así que si la conexión falla con el
+puerto correcto, pon `127.0.0.1` como servidor en lugar del nombre del equipo. El banner lo recuerda.
+
+Para saber en qué puerto escucha una instancia:
 
 ```powershell
 Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL16.<INSTANCIA>\MSSQLServer\SuperSocketNetLib\Tcp\IPAll' | Select-Object TcpPort, TcpDynamicPorts

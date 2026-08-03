@@ -46,7 +46,12 @@
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
-const { withDiscoveredPort } = require("./discover-instance");
+const {
+  DEFAULT_CACHE_FILE,
+  discoverLocalInstances,
+  instanceToDiscover,
+  withDiscoveredPort,
+} = require("./discover-instance");
 
 const USAGE =
   "Uso — elige UNA fuente de conexion:\n" +
@@ -790,6 +795,11 @@ function main() {
       const configFile =
         source.kind === "configFile" ? resolveConfigFile(args.configFile) : null;
 
+      // Primera pasada: interpretar cada conexion, sin preguntar todavia al sistema.
+      // El sondeo de puertos se hace despues, de una sola vez para todas, porque su
+      // coste es un arranque de PowerShell y hacerlo por conexion es lo que retrasaba
+      // el arranque hasta agotar el MCP_TIMEOUT del cliente.
+      const prepared = [];
       source.entries.forEach((entry, i) => {
         let connString;
         let alias;
@@ -838,23 +848,43 @@ function main() {
               ? partsFromFlags(args)
               : parseAdoConnectionString(connString);
 
-        // Si la cadena nombra una instancia local y no trae puerto, se averigua el
-        // puerto real preguntando al sistema. Se hace en cada arranque y no se
-        // escribe en ningun sitio, asi que aguanta los puertos dinamicos y no exige
-        // ni SQL Browser ni permisos de administrador en la maquina del companero.
-        const { parts, discovered } = withDiscoveredPort(rawParts, parseDataSource);
-        if (discovered) discoveries.push({ label, ...discovered });
         // En modo simple la clave es `maindb`, asi que `--port maindb:1433` tambien
         // funciona para una sola conexion.
-        const info = applyConnection(
-          env,
-          prefix,
-          parts,
+        prepared.push({
+          key: multi ? alias.toLowerCase() : "maindb",
           label,
-          portFor(args.ports, alias || "maindb")
-        );
-        resolved.push({ key: multi ? alias.toLowerCase() : "maindb", ...info });
+          prefix,
+          rawParts,
+          portOverride: portFor(args.ports, alias || "maindb"),
+        });
       });
+
+      // Si la cadena nombra una instancia local y no trae puerto, se averigua el
+      // puerto real preguntando al sistema. Se hace en cada arranque y no se escribe
+      // en la configuracion, asi que aguanta los puertos dinamicos y no exige ni SQL
+      // Browser ni permisos de administrador en la maquina del companero.
+      //
+      // Con --port no hace falta preguntar: el puerto ya lo ha dicho quien arranca. Lo
+      // que se pierde en ese caso es detectar que la instancia solo escucha en la
+      // loopback, y por eso se avisa mas abajo.
+      const wanted = [];
+      for (const p of prepared) {
+        const natural = instanceToDiscover(p.rawParts, parseDataSource);
+        p.skippedByPort = Boolean(natural && p.portOverride);
+        if (natural && !p.portOverride) wanted.push(natural.instanceName);
+      }
+      const byInstance = discoverLocalInstances(wanted, { cacheFile: DEFAULT_CACHE_FILE });
+
+      // Segunda pasada: aplicar lo averiguado y montar el entorno del servidor.
+      for (const p of prepared) {
+        const { parts, discovered } = withDiscoveredPort(p.rawParts, parseDataSource, {
+          portOverride: p.portOverride,
+          discover: (instanceName) => byInstance[instanceName] || null,
+        });
+        if (discovered) discoveries.push({ label: p.label, ...discovered });
+        const info = applyConnection(env, p.prefix, parts, p.label, p.portOverride);
+        resolved.push({ key: p.key, ...info, skippedByPort: p.skippedByPort });
+      }
     }
   } catch (err) {
     console.error(err.message);
@@ -905,6 +935,13 @@ function main() {
     console.error(
       `  [${d.label}] instancia ${d.instanceName} resuelta sola: ${d.host},${d.port}` +
         (d.onlyLoopback ? "  (solo escucha en loopback)" : "")
+    );
+  }
+  if (resolved.some((r) => r.skippedByPort)) {
+    console.error(
+      "  Con --port no se pregunta al sistema por la instancia, asi que tampoco se\n" +
+        "  detecta si solo escucha en la loopback. Si la conexion falla con el puerto\n" +
+        "  correcto, pon 127.0.0.1 como servidor en lugar del nombre del equipo."
     );
   }
   if (resolved.some((r) => r.viaInstance)) {
