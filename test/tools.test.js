@@ -84,6 +84,42 @@ test("execute_sql_file allows dryRun when writes are disabled", async () => {
   }
 });
 
+test("execute_write_query: a per-dbKey MSSQL_<DBKEY>_ENABLE_WRITES enables just that database", async () => {
+  const prevGlobal = process.env.MSSQL_ENABLE_WRITES;
+  const prevPerDb = process.env.MSSQL_DATA_ENABLE_WRITES;
+  delete process.env.MSSQL_ENABLE_WRITES;
+  process.env.MSSQL_DATA_ENABLE_WRITES = "true";
+  try {
+    const { handler } = require("../src/tools/execute-write-query");
+    // The 'config' dbKey has no override and the global flag is off: rejected
+    // before ever resolving the connection, same as the global-off case.
+    await assert.rejects(
+      () => handler({ query: "INSERT INTO x VALUES (1)", dbKey: "config" }, {}),
+      /writes are disabled for 'config'/i
+    );
+  } finally {
+    if (prevGlobal !== undefined) process.env.MSSQL_ENABLE_WRITES = prevGlobal;
+    else delete process.env.MSSQL_ENABLE_WRITES;
+    if (prevPerDb !== undefined) process.env.MSSQL_DATA_ENABLE_WRITES = prevPerDb;
+    else delete process.env.MSSQL_DATA_ENABLE_WRITES;
+  }
+});
+
+test("execute_sql_file: a per-dbKey override is reported in the rejection message", async () => {
+  const prevGlobal = process.env.MSSQL_ENABLE_WRITES;
+  delete process.env.MSSQL_ENABLE_WRITES;
+  try {
+    const { handler } = require("../src/tools/execute-sql-file");
+    await assert.rejects(
+      () => handler({ path: "does-not-exist.sql", dryRun: false, dbKey: "config" }, {}),
+      /needs writes enabled for 'config'/i
+    );
+  } finally {
+    if (prevGlobal !== undefined) process.env.MSSQL_ENABLE_WRITES = prevGlobal;
+    else delete process.env.MSSQL_ENABLE_WRITES;
+  }
+});
+
 test("every tool module exports { name, config, handler }", () => {
   for (const mod of tools.modules) {
     assert.equal(typeof mod.name, "string");

@@ -22,7 +22,16 @@ function quoteTable(identifier) {
     : escapeIdentifier(table);
 }
 
-function writesEnabled(env = process.env) {
+/**
+ * Si se pasa `dbKey`, una `MSSQL_<DBKEY>_ENABLE_WRITES` explicita gana sobre el
+ * flag global `MSSQL_ENABLE_WRITES` - es lo que permite que una base de datos
+ * concreta tenga escritura y el resto se quede en solo lectura.
+ */
+function writesEnabled(env = process.env, dbKey) {
+  if (dbKey) {
+    const perDb = env[`MSSQL_${String(dbKey).toUpperCase()}_ENABLE_WRITES`];
+    if (perDb !== undefined) return String(perDb).toLowerCase() === "true";
+  }
   return String(env.MSSQL_ENABLE_WRITES || "").toLowerCase() === "true";
 }
 

@@ -42,6 +42,20 @@ test("writesEnabled reads MSSQL_ENABLE_WRITES", () => {
   assert.equal(writesEnabled({}), false);
 });
 
+test("writesEnabled: an explicit MSSQL_<DBKEY>_ENABLE_WRITES wins over the global flag", () => {
+  const env = { MSSQL_ENABLE_WRITES: "false", MSSQL_DATA_ENABLE_WRITES: "true" };
+  assert.equal(writesEnabled(env, "data"), true, "per-db override enables it");
+  assert.equal(writesEnabled(env, "DATA"), true, "the dbKey lookup is case-insensitive");
+  assert.equal(writesEnabled(env, "config"), false, "an alias without an override falls back to global");
+  assert.equal(writesEnabled(env), false, "no dbKey at all falls back to global");
+});
+
+test("writesEnabled: a per-db override can also lock a database to read-only under a global true", () => {
+  const env = { MSSQL_ENABLE_WRITES: "true", MSSQL_CONFIG_ENABLE_WRITES: "false" };
+  assert.equal(writesEnabled(env, "config"), false);
+  assert.equal(writesEnabled(env, "data"), true);
+});
+
 function fakeMssqlFactory(events) {
   return {
     ISOLATION_LEVEL: { READ_COMMITTED: 4 },

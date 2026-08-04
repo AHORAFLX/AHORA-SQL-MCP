@@ -19,9 +19,12 @@ const outputShape = {
 };
 
 async function handler({ query, dbKey }, extra) {
-  if (!writesEnabled()) {
+  if (!writesEnabled(process.env, dbKey)) {
     throw new Error(
-      "writes are disabled. Set MSSQL_ENABLE_WRITES=true to enable execute_write_query."
+      dbKey
+        ? `writes are disabled for '${dbKey}'. Set MSSQL_${String(dbKey).toUpperCase()}_ENABLE_WRITES=true ` +
+          "to enable them for this database, or MSSQL_ENABLE_WRITES=true for every database."
+        : "writes are disabled. Set MSSQL_ENABLE_WRITES=true to enable execute_write_query."
     );
   }
   const { dbKey: actualKey, config } = getConfig(dbKey);
@@ -47,7 +50,8 @@ module.exports = {
   config: {
     title: "Execute Write Query",
     description:
-      "Run a mutating SQL statement. DISABLED unless MSSQL_ENABLE_WRITES=true. " +
+      "Run a mutating SQL statement. DISABLED unless MSSQL_ENABLE_WRITES=true (all databases) or " +
+      "MSSQL_<DBKEY>_ENABLE_WRITES=true (just that `dbKey`). " +
       "There is no keyword denylist - the database user's grants are the source of truth. " +
       "Use a least-privilege account for the relevant `dbKey`.",
     inputSchema: inputShape,

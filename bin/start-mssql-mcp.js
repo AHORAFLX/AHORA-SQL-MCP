@@ -33,7 +33,8 @@
  *   --connection-string "<cadena conf>" --alias config --connection-string "<cadena datos>" --alias data
  *
  * Escritura (solo local o pruebas):
- *   ... --allow-writes
+ *   ... --allow-writes                    todas las conexiones
+ *   ... --allow-writes-for data           solo el alias 'data' (repetible)
  *
  * Ficheros .sql fuera del proyecto (execute_sql_file):
  *   ... --allow-sql-dir "C:\Codigo GIT\skills"
@@ -42,6 +43,11 @@
  * MSSQL_ENABLE_WRITES se exporta SIEMPRE de forma explicita (true o false), nunca
  * se deja sin definir, para que nada del entorno pueda activarla por accidente.
  * Lo mismo con MSSQL_SQL_DIRS: se exporta siempre, aunque este vacia.
+ *
+ * Con varias conexiones, --allow-writes-for <alias> (repetible) habilita la
+ * escritura SOLO para ese alias via MSSQL_<ALIAS>_ENABLE_WRITES, dejando el resto
+ * en solo lectura aunque no se pase --allow-writes. Estas variables por alias son
+ * politica igual que MSSQL_ENABLE_WRITES: tampoco puede aportarlas el entorno.
  */
 const fs = require("fs");
 const path = require("path");
@@ -71,7 +77,8 @@ const USAGE =
   "  --encrypt <true|false>       solo con la fuente (c)\n" +
   "  --trust-server-certificate <true|false>   solo con la fuente (c)\n" +
   "  --production                 marca la conexion como produccion; incompatible con --allow-writes\n" +
-  "  --allow-writes               solo local o pruebas\n" +
+  "  --allow-writes               solo local o pruebas; habilita escritura en TODAS las conexiones\n" +
+  "  --allow-writes-for <alias>  repetible; habilita escritura solo en esa conexion (multi-BD)\n" +
   "  --allow-sql-dir <carpeta>    repetible; carpetas extra para execute_sql_file";
 
 function parseArgs(argv) {
@@ -80,6 +87,7 @@ function parseArgs(argv) {
     connectionStrings: [],
     aliases: [],
     allowWrites: false,
+    allowWritesFor: [],
     fromEnv: false,
     production: false,
     ports: [],
@@ -103,6 +111,7 @@ function parseArgs(argv) {
     else if (argv[i] === "--credentials-file") out.credentialsFile = argv[++i];
     else if (argv[i] === "--production") out.production = true;
     else if (argv[i] === "--allow-writes") out.allowWrites = true;
+    else if (argv[i] === "--allow-writes-for") out.allowWritesFor.push(argv[++i]);
     else if (argv[i] === "--allow-sql-dir") out.sqlDirs.push(argv[++i]);
     else if (argv[i] === "--port") {
       const value = argv[++i];
@@ -372,7 +381,14 @@ function resolveConfigFile(configFile) {
 }
 
 /** Variables que fija el wrapper y que el entorno nunca puede aportar. */
-const POLICY_VARS = new Set(["MSSQL_ENABLE_WRITES", "MSSQL_SQL_DIRS"]);
+const POLICY_VARS = new Set(["MSSQL_SQL_DIRS"]);
+// MSSQL_ENABLE_WRITES (global) y MSSQL_<ALIAS>_ENABLE_WRITES (por conexion) son
+// la misma politica: ninguna de las dos formas puede venir del entorno heredado.
+const ENABLE_WRITES_RE = /^MSSQL_(.+_)?ENABLE_WRITES$/i;
+
+function isPolicyVar(upper) {
+  return POLICY_VARS.has(upper) || ENABLE_WRITES_RE.test(upper);
+}
 
 /**
  * Entorno limpio: se eliminan TODAS las MSSQL_* heredadas de la maquina.
@@ -383,9 +399,10 @@ const POLICY_VARS = new Set(["MSSQL_ENABLE_WRITES", "MSSQL_SQL_DIRS"]);
  * cambiar el modo o inyectar una conexion que nadie ha pedido.
  *
  * `--from-env` es la excepcion explicita: deja pasar las MSSQL_* de conexion
- * porque son justo lo que el cliente MCP quiere aportar. Las dos variables de
- * politica (MSSQL_ENABLE_WRITES y MSSQL_SQL_DIRS) se sobrescriben despues en los
- * dos casos, asi que ni con --from-env puede el entorno habilitar escrituras.
+ * porque son justo lo que el cliente MCP quiere aportar. Las variables de
+ * politica (MSSQL_ENABLE_WRITES, MSSQL_<ALIAS>_ENABLE_WRITES y MSSQL_SQL_DIRS)
+ * se sobrescriben despues en los dos casos, asi que ni con --from-env puede el
+ * entorno habilitar escrituras.
  */
 function cleanEnv(keepConnectionVars = false, source = process.env) {
   const env = {};
@@ -395,7 +412,7 @@ function cleanEnv(keepConnectionVars = false, source = process.env) {
       env[k] = v;
       continue;
     }
-    if (keepConnectionVars && !POLICY_VARS.has(upper)) env[k] = v;
+    if (keepConnectionVars && !isPolicyVar(upper)) env[k] = v;
   }
   return env;
 }
@@ -761,9 +778,9 @@ function main() {
   // La decision de "esto es produccion" se toma una vez, al configurar, y queda
   // escrita en el .mcp.json. Aqui se hace cumplir: anadir --allow-writes a mano
   // mas tarde falla al arrancar en lugar de limitarse a avisar.
-  if (args.production && args.allowWrites) {
+  if (args.production && (args.allowWrites || args.allowWritesFor.length > 0)) {
     console.error(
-      "--production y --allow-writes son incompatibles.\n" +
+      "--production y --allow-writes/--allow-writes-for son incompatibles.\n" +
         "Esta configuracion esta marcada como PRODUCCION. Si de verdad necesitas\n" +
         "escribir, quita --production a conciencia y asume lo que implica."
     );
@@ -894,6 +911,23 @@ function main() {
   // Explicito siempre, en los dos sentidos. Nunca sin definir.
   env.MSSQL_ENABLE_WRITES = args.allowWrites ? "true" : "false";
 
+  // Por-alias: solo se fija cuando se pide (positivo), y solo si coincide con una
+  // conexion de verdad - un alias con una errata pasaria desapercibido si no.
+  const writeOverrides = [];
+  for (const raw of args.allowWritesFor) {
+    const alias = String(raw ?? "").trim();
+    const match = resolved.find((r) => r.key.toLowerCase() === alias.toLowerCase());
+    if (!match) {
+      console.error(
+        `--allow-writes-for '${alias}' no coincide con ninguna conexion. ` +
+          `Disponibles: ${resolved.map((r) => r.key).join(", ")}.`
+      );
+      process.exit(1);
+    }
+    env[`MSSQL_${match.key.toUpperCase()}_ENABLE_WRITES`] = "true";
+    writeOverrides.push(match.key);
+  }
+
   // Carpetas extra para execute_sql_file. La carpeta del proyecto (el cwd) va
   // permitida siempre y la resuelve el servidor; aqui solo se anaden las extras.
   // Se exporta siempre, aunque este vacia, por el mismo motivo que
@@ -908,7 +942,12 @@ function main() {
   }
   env.MSSQL_SQL_DIRS = resolvedSqlDirs.join(path.delimiter);
 
-  const mode = args.allowWrites ? "LECTURA-ESCRITURA" : "SOLO LECTURA";
+  const anyWrites = args.allowWrites || writeOverrides.length > 0;
+  const mode = args.allowWrites
+    ? "LECTURA-ESCRITURA"
+    : writeOverrides.length > 0
+      ? "LECTURA-ESCRITURA PARCIAL"
+      : "SOLO LECTURA";
   const origin = {
     configFile: `${args.configFile} (entorno ${resolveEnvironment(args.environment)})`,
     connectionString: "--connection-string",
@@ -923,7 +962,10 @@ function main() {
   );
   console.error(`  Conexion desde: ${origin}`);
   for (const r of resolved) {
-    console.error(`  [${r.key}] ${r.target} / ${r.database}`);
+    const dbWrites = args.allowWrites || writeOverrides.includes(r.key);
+    console.error(
+      `  [${r.key}] ${r.target} / ${r.database}${dbWrites ? "  (lectura-escritura)" : ""}`
+    );
   }
   // La carpeta del proyecto depende de donde se arranque el servidor, asi que se
   // imprime: es la unica forma de ver de un vistazo que raiz esta en vigor.
@@ -957,8 +999,12 @@ function main() {
         "  .mcp.json y en el listado de procesos. Para evitarlo, usa --from-env."
     );
   }
-  if (args.allowWrites) {
-    console.error("  AVISO: escrituras y DDL habilitados. Solo para local o pruebas.");
+  if (anyWrites) {
+    console.error(
+      `  AVISO: escrituras y DDL habilitados${
+        args.allowWrites ? "" : ` para: ${writeOverrides.join(", ")}`
+      }. Solo para local o pruebas.`
+    );
   }
   console.error("─".repeat(64));
 

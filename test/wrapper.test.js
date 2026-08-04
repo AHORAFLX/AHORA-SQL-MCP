@@ -320,6 +320,22 @@ test("parseArgs: allowWrites es false por defecto", () => {
   assert.strictEqual(a.allowWrites, false);
 });
 
+test("parseArgs: --allow-writes-for se acumula, uno por conexion", () => {
+  const a = parseArgs([
+    "--config-file", "W.config",
+    "--connection-name", "Conf:config",
+    "--connection-name", "Data:data",
+    "--allow-writes-for", "data",
+  ]);
+  assert.deepStrictEqual(a.allowWritesFor, ["data"]);
+  assert.strictEqual(a.allowWrites, false);
+});
+
+test("parseArgs: allowWritesFor es una lista vacia por defecto", () => {
+  const a = parseArgs(["--config-file", "W.config", "--connection-name", "Data"]);
+  assert.deepStrictEqual(a.allowWritesFor, []);
+});
+
 test("parseArgs: acumula varios --allow-sql-dir", () => {
   const a = parseArgs([
     "--config-file", "W.config",
@@ -673,6 +689,20 @@ test("cleanEnv(true) deja pasar las MSSQL_* de conexion pero nunca las de politi
   assert.strictEqual(env.MSSQL_DATABASE, "BD");
   assert.ok(!("MSSQL_ENABLE_WRITES" in env), "la politica no puede venir del entorno");
   assert.ok(!("MSSQL_SQL_DIRS" in env), "la politica no puede venir del entorno");
+});
+
+test("cleanEnv(true) tampoco deja pasar una MSSQL_<ALIAS>_ENABLE_WRITES heredada", () => {
+  const env = cleanEnv(true, {
+    MSSQL_CONFIG_DATABASE: "BD1",
+    MSSQL_DATA_DATABASE: "BD2",
+    MSSQL_DATA_ENABLE_WRITES: "true",
+  });
+  assert.strictEqual(env.MSSQL_CONFIG_DATABASE, "BD1");
+  assert.strictEqual(env.MSSQL_DATA_DATABASE, "BD2");
+  assert.ok(
+    !("MSSQL_DATA_ENABLE_WRITES" in env),
+    "la escritura por alias tampoco puede venir del entorno heredado"
+  );
 });
 
 test("describeEnvConnections: modo simple y modo multi", () => {

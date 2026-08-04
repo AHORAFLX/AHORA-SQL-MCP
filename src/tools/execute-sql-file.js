@@ -169,11 +169,16 @@ async function handler(
 ) {
   // Checked first, before any filesystem or pool access, so a read-only server
   // never even opens the file for a non-dry run.
-  if (!dryRun && !writesEnabled()) {
+  if (!dryRun && !writesEnabled(process.env, dbKey)) {
     throw new Error(
-      "execute_sql_file needs writes enabled. Restart the server with --allow-writes " +
-        "(MSSQL_ENABLE_WRITES=true), or call again with dryRun:true to inspect the script " +
-        "without executing it."
+      dbKey
+        ? `execute_sql_file needs writes enabled for '${dbKey}'. Restart the server with ` +
+          `--allow-writes-for ${dbKey} (MSSQL_${String(dbKey).toUpperCase()}_ENABLE_WRITES=true), or ` +
+          "--allow-writes for every database, or call again with dryRun:true to inspect the script " +
+          "without executing it."
+        : "execute_sql_file needs writes enabled. Restart the server with --allow-writes " +
+          "(MSSQL_ENABLE_WRITES=true), or call again with dryRun:true to inspect the script " +
+          "without executing it."
     );
   }
 
@@ -301,7 +306,8 @@ module.exports = {
       "Use this instead of retyping a script into `execute_write_query`: there is no 10k character limit and " +
       "`GO` separators are handled, so SSMS-style CREATE PROCEDURE scripts work as-is. " +
       "The file must live inside the project folder or a folder passed to --allow-sql-dir. " +
-      "DISABLED unless MSSQL_ENABLE_WRITES=true, except for `dryRun:true`, which parses the file and lists the " +
+      "DISABLED unless MSSQL_ENABLE_WRITES=true (all databases) or MSSQL_<DBKEY>_ENABLE_WRITES=true " +
+      "(just that `dbKey`), except for `dryRun:true`, which parses the file and lists the " +
       "batches without executing anything. " +
       "All batches run in ONE transaction on ONE connection: the deployment is all-or-nothing, and on failure the " +
       "error names the failing line of the file. Statements that cannot run inside a transaction " +

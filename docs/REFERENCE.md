@@ -91,10 +91,11 @@ what the server will actually do at runtime.
 
 ### Production guardrail
 
-`--production` marks the connection and is **incompatible with `--allow-writes`**: passing both aborts
-at startup. The point is that the decision is taken once, when configuring, and then enforced —
-someone adding `--allow-writes` to a production `.mcp.json` later gets a hard failure rather than a
-warning they can ignore. The banner shows `· PRODUCCION`.
+`--production` marks the connection and is **incompatible with `--allow-writes` and
+`--allow-writes-for`**: passing either aborts at startup. The point is that the decision is taken
+once, when configuring, and then enforced — someone adding `--allow-writes` to a production
+`.mcp.json` later gets a hard failure rather than a warning they can ignore. The banner shows
+`· PRODUCCION`.
 
 ADO keywords are normalized by lowercasing **and removing spaces**, so
 `Trust Server Certificate` (the form Core writes) and `TrustServerCertificate` (the form Framework
@@ -147,13 +148,20 @@ credentials fall back to the global `MSSQL_USER` / `MSSQL_PASSWORD` / `MSSQL_SER
 ### Write opt-in
 
 ```ini
-MSSQL_ENABLE_WRITES=true   # enables execute_write_query and execute_sql_file; defaults to false
+MSSQL_ENABLE_WRITES=true          # enables execute_write_query and execute_sql_file for every database
+MSSQL_<NAME>_ENABLE_WRITES=true   # multi-db only: enables them for just that dbKey, overriding the global flag
 ```
 
 When disabled, `execute_write_query` returns an error before any connection attempt, and
 `execute_sql_file` only accepts `dryRun:true`. `execute_read_query` always runs inside a
 transaction that is rolled back regardless of outcome, so accidental writes inside a "read" query
 are non-durable.
+
+In multi-database mode, a `MSSQL_<NAME>_ENABLE_WRITES` wins over `MSSQL_ENABLE_WRITES` for that
+one `dbKey` — it can turn writes on for a single database while the rest stay read-only (global
+`false`), or lock a single database to read-only while the rest are read-write (global `true`,
+override `false`). Set it via `--allow-writes-for <alias>` on the wrapper (see below); there is no
+CLI flag to force a database read-only under a global `--allow-writes` yet.
 
 For real safety, also give the configured DB user only the grants you intend it to have — least
 privilege is the source of truth, not the tool split.
@@ -193,12 +201,13 @@ launched with, and nothing else. See the [README](../README.md) for the reasonin
 | `MSSQL_<NAME>_DATABASE`                 | multi  | yes (per DB) | -             | Presence of any `_DATABASE` switches the server into multi-db mode. Exposed as `dbKey="<name>"` (lowercased). |
 | `MSSQL_<NAME>_ENCRYPT`                  | multi  | no           | `false`       | -                                                                                                             |
 | `MSSQL_<NAME>_TRUST_SERVER_CERTIFICATE` | multi  | no           | `true`        | -                                                                                                             |
+| `MSSQL_<NAME>_ENABLE_WRITES`            | multi  | no           | global        | Overrides `MSSQL_ENABLE_WRITES` for just this `dbKey`, in either direction. Set via `--allow-writes-for <alias>`. |
 
 ### Server behavior
 
 | Variable              | Required | Default | Effect                                                                                                                                            |
 | --------------------- | -------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MSSQL_ENABLE_WRITES` | no       | `false` | When `true`, `execute_write_query` and `execute_sql_file` are allowed to run. With it unset/false, both error out before any connection attempt.   |
+| `MSSQL_ENABLE_WRITES` | no       | `false` | When `true`, `execute_write_query` and `execute_sql_file` are allowed to run for every `dbKey`. With it unset/false, both error out before any connection attempt. In multi-db mode, `MSSQL_<NAME>_ENABLE_WRITES` overrides it per `dbKey` (see above). |
 | `MSSQL_SQL_DIRS`      | no       | -       | Extra roots `execute_sql_file` may read from, separated by `path.delimiter`. The project folder (the server's cwd) is always allowed on top of it. |
 
 ### Integration script (`scripts/integration.js`, never read by the server)
@@ -228,8 +237,8 @@ same payload as a typed object).
 | Tool                  | Annotations          | Notes                                                                                                                                                                          |
 | --------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `execute_read_query`  | readOnly, idempotent | Streamed, rollback-only. Server cancels after `offset + limit` rows. Inputs: `query`, optional `dbKey`, `limit` (≤1000, default 100), `offset`.                                |
-| `execute_write_query` | destructive          | Requires `MSSQL_ENABLE_WRITES=true`. Inputs: `query`, optional `dbKey`.                                                                                                        |
-| `execute_sql_file`    | destructive          | `sqlcmd -i` equivalent: splits a .sql file on `GO` and runs it. Requires `MSSQL_ENABLE_WRITES=true` unless `dryRun:true`. Inputs: `path`, optional `dbKey`, `dryRun`, `maxRowsPerBatch`. |
+| `execute_write_query` | destructive          | Requires `MSSQL_ENABLE_WRITES=true` (or `MSSQL_<DBKEY>_ENABLE_WRITES=true` for just this `dbKey`). Inputs: `query`, optional `dbKey`.                                          |
+| `execute_sql_file`    | destructive          | `sqlcmd -i` equivalent: splits a .sql file on `GO` and runs it. Requires `MSSQL_ENABLE_WRITES=true` (or `MSSQL_<DBKEY>_ENABLE_WRITES=true`) unless `dryRun:true`. Inputs: `path`, optional `dbKey`, `dryRun`, `maxRowsPerBatch`. |
 
 #### `execute_sql_file`
 
@@ -413,10 +422,12 @@ src/
   adversarial query: an explicit `COMMIT TRANSACTION` inside the user's SQL ends the outer
   transaction, and following statements run in autocommit mode. Use a least-privilege SQL login if
   you need real isolation against intentional misuse.
-- **Write opt-in** — `execute_write_query` is gated by `MSSQL_ENABLE_WRITES=true`. When disabled it
-  errors out _before_ a connection is acquired, so no resources are spent and no probing is
-  possible. `execute_sql_file` checks the same gate before it even opens the file, so on a read-only
-  server it cannot be used to probe the filesystem either.
+- **Write opt-in, per database** — `execute_write_query` is gated by `MSSQL_ENABLE_WRITES=true`
+  (all databases) or `MSSQL_<DBKEY>_ENABLE_WRITES=true` (just that `dbKey`, overriding the global
+  flag in either direction). The gate is checked against the `dbKey` the call actually names, before
+  a connection is acquired, so no resources are spent and no probing is possible. `execute_sql_file`
+  checks the same gate before it even opens the file, so on a read-only database it cannot be used
+  to probe the filesystem either.
 - **File access is scoped** — `execute_sql_file` is the only tool that touches the filesystem, and it
   only reads `.sql` files under the project folder or under a root explicitly passed to
   `--allow-sql-dir`. Containment is checked after `realpath` on both sides, with `path.relative`, so
@@ -428,9 +439,10 @@ src/
   with, so a stray `.env` in the working directory cannot set `MSSQL_ENABLE_WRITES`.
 - **Env sanitizing, with one explicit exception** — the wrapper strips every inherited `MSSQL_*`
   variable so a leftover from another tool cannot inject a connection or flip the single/multi-db
-  mode. `--from-env` opts into passing the connection variables through, but `MSSQL_ENABLE_WRITES`
-  and `MSSQL_SQL_DIRS` are overwritten unconditionally in both paths, so the environment can never
-  enable writes or authorize a folder.
+  mode. `--from-env` opts into passing the connection variables through, but `MSSQL_ENABLE_WRITES`,
+  every `MSSQL_<NAME>_ENABLE_WRITES` and `MSSQL_SQL_DIRS` are overwritten unconditionally in both
+  paths, so the environment can never enable writes — globally or for a single database — or
+  authorize a folder.
 - **Parameterized introspection** — every `list_*`/`describe_*` SQL uses `@param` placeholders
   rather than string concatenation; table identifiers are restricted by Zod to
   `/^[a-zA-Z0-9_#$@]+(?:\.[a-zA-Z0-9_#$@]+)?$/` (bare `Users` or two-part `dbo.Users` — no spaces,

@@ -180,10 +180,10 @@ saca de ahí:
 ```
 
 `--from-env` es la única excepción al saneado del entorno: deja pasar las `MSSQL_*` de conexión
-porque son justo lo que el cliente aporta. Las dos variables de política —
-`MSSQL_ENABLE_WRITES` y `MSSQL_SQL_DIRS` — se sobrescriben igualmente, así que ni con
-`--from-env` puede el entorno habilitar escrituras. Para multi-BD, usa las
-`MSSQL_<ALIAS>_DATABASE` de siempre.
+porque son justo lo que el cliente aporta. Las variables de política —
+`MSSQL_ENABLE_WRITES`, cada `MSSQL_<ALIAS>_ENABLE_WRITES` y `MSSQL_SQL_DIRS` — se sobrescriben
+igualmente, así que ni con `--from-env` puede el entorno habilitar escrituras, ni globales ni de
+una base de datos concreta. Para multi-BD, usa las `MSSQL_<ALIAS>_DATABASE` de siempre.
 
 Con varias `--connection-string` cada una necesita su `--alias` en el mismo orden:
 
@@ -314,8 +314,25 @@ la única opción estable es arrancar SQL Browser.
 
 Añade `--allow-writes` como último argumento. Sin ese flag el servidor arranca en solo lectura.
 
-El wrapper escribe en stderr, al arrancar, el modo activo y las bases de datos resueltas. Si en
-el log del MCP no ves ese bloque, no está arrancando el wrapper.
+Con varias bases de datos (`--connection-name X:alias` repetido), `--allow-writes` habilita
+escritura en **todas** a la vez. Para dar escritura solo a una conexión concreta y dejar el resto
+en solo lectura, usa `--allow-writes-for <alias>` (repetible) en su lugar:
+
+```json
+"args": [
+  "...",
+  "--connection-name", "ConfConnectionString:config",
+  "--connection-name", "DataConnectionString:data",
+  "--allow-writes-for", "data"
+]
+```
+
+En el ejemplo, `config` queda en solo lectura y `data` en lectura-escritura. `--allow-writes` y
+`--allow-writes-for` son incompatibles con `--production`.
+
+El wrapper escribe en stderr, al arrancar, el modo activo y las bases de datos resueltas — cada
+conexión se marca con `(lectura-escritura)` si le corresponde. Si en el log del MCP no ves ese
+bloque, no está arrancando el wrapper.
 
 El `.mcp.json` solo contiene rutas, nunca credenciales: por eso se puede commitear en el
 repositorio del proyecto. Las credenciales se leen del `Web.config` en tiempo de arranque.
@@ -345,9 +362,10 @@ autorizar la carpeta de forma explícita:
 `--allow-sql-dir` es repetible. El wrapper imprime al arrancar la carpeta del proyecto y las
 carpetas extra, porque la raíz por defecto depende de dónde se arranque el servidor.
 
-Ejecutar de verdad exige `--allow-writes`. Sin ese flag el tool sigue disponible con
-`dryRun: true`, que lee el fichero, lo trocea por `GO` y devuelve los batches con su línea de
-inicio sin ejecutar nada — útil para revisar un script antes de lanzarlo.
+Ejecutar de verdad exige `--allow-writes` (o `--allow-writes-for <alias>` para el `dbKey` que se
+use). Sin eso el tool sigue disponible con `dryRun: true`, que lee el fichero, lo trocea por `GO`
+y devuelve los batches con su línea de inicio sin ejecutar nada — útil para revisar un script antes
+de lanzarlo.
 
 ---
 
