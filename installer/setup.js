@@ -922,10 +922,6 @@ function runCli() {
   });
 }
 
-// En el .exe empaquetado no hay un `module` de entrada con el que comparar, asi que
-// esta comprobacion no se cumple: alli el arranque lo fuerza installer/exe-entry.js.
-if (require.main === module) run();
-
 module.exports = {
   main,
   run,
@@ -950,3 +946,13 @@ module.exports = {
   SERVER_NAME,
   LEGACY_SERVER_NAME,
 };
+
+// DESPUES de module.exports, y no antes, porque el ciclo con gui.js es real: run()
+// hace require("./gui") y gui.js importa de este modulo en su cabecera. Arrancando
+// aqui arriba, gui.js recibia el module.exports todavia vacio y reventaba al leer
+// PROFILES. Requerir gui.js dentro de run() evita el ciclo al cargar, pero no este,
+// que es de orden de evaluacion.
+//
+// En el .exe empaquetado no hay un `module` de entrada con el que comparar, asi que
+// esta comprobacion no se cumple: alli el arranque lo fuerza installer/exe-entry.js.
+if (require.main === module) run();

@@ -122,6 +122,44 @@ test("el instalador comprueba el Node DE LA MAQUINA, no el que lo ejecuta", () =
   assert.ok(!/âœ“ Node/.test(out), "no puede dar por bueno el runtime embebido");
 });
 
+test("el formulario arranca lanzando setup.js como entrada", async () => {
+  // Regresion: `if (require.main === module) run()` estaba ANTES de
+  // module.exports, asi que gui.js --que importa de este modulo en su cabecera--
+  // recibia los exports vacios y reventaba con "Cannot read properties of
+  // undefined (reading 'map')" al renderizar PROFILES. Solo se manifiesta con
+  // setup.js DE ENTRADA, que es justo como lo lanza el bin `ahora-setup`:
+  // requerirlo desde el test no reproduce el ciclo.
+  const { spawn } = require("node:child_process");
+  const entry = path.join(__dirname, "..", "installer", "setup.js");
+  const child = spawn(process.execPath, [entry, "--no-open"], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  let out = "";
+  try {
+    await new Promise((resolve, reject) => {
+      const done = setTimeout(() => reject(new Error(`sin URL en 15s:\n${out}`)), 15000);
+      const onData = (d) => {
+        out += d.toString();
+        if (/http:\/\/127\.0\.0\.1:\d+\/\?t=/.test(out)) {
+          clearTimeout(done);
+          resolve();
+        }
+      };
+      child.stdout.on("data", onData);
+      child.stderr.on("data", onData);
+      child.on("exit", (code) => {
+        clearTimeout(done);
+        reject(new Error(`el instalador ha muerto con codigo ${code}:\n${out}`));
+      });
+    });
+  } finally {
+    child.kill();
+  }
+
+  assert.doesNotMatch(out, /TypeError/);
+});
+
 test("writeClientConfig: Claude Code usa .mcp.json y la clave mcpServers", () => {
   const root = tempDir("inst-claude-");
   const { target } = writeClientConfig(CLIENTS.claude, root, { command: "npx", args: ["--yes", "x"] });
