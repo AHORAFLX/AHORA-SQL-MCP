@@ -21,6 +21,8 @@ const outputShape = {
         .object({
           name: z.string(),
           code: z.string().nullable(),
+          // Derived from `code` alone, so it carries no connection-string fragments.
+          hint: z.string().optional(),
         })
         .nullable()
         .optional(),

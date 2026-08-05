@@ -307,8 +307,17 @@ Para saber en qué puerto escucha una instancia:
 Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\MSSQL16.<INSTANCIA>\MSSQLServer\SuperSocketNetLib\Tcp\IPAll' | Select-Object TcpPort, TcpDynamicPorts
 ```
 
-Si `TcpDynamicPorts` tiene valor y `TcpPort` está vacío, el puerto cambia en cada reinicio: ahí
-la única opción estable es arrancar SQL Browser.
+Si `TcpDynamicPorts` tiene valor y `TcpPort` está vacío, el puerto cambia en cada reinicio del
+servicio. No hace falta hacer nada: el arranque lo vuelve a averiguar cada vez, así que ni SQL
+Browser ni un puerto estático son necesarios.
+
+Al averiguarlo no basta con mirar qué puertos tiene abiertos el proceso de la instancia. Se han
+visto instancias con **más de uno**, y alguno que acepta la conexión y la corta en el saludo, así
+que a cada candidato se le manda un saludo TDS y solo se tiene en cuenta el que contesta. Entre los
+que contestan gana el puerto del registro, después el que anotó el servicio al arrancar, después
+el 1433, y por último el que escucha en todas las IP antes que el que solo escucha en loopback.
+
+Si aun así falla, `--port <alias>:<puerto>` manda sobre todo lo anterior.
 
 ### Escritura: solo local o pruebas
 

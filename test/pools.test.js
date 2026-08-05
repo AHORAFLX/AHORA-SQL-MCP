@@ -95,3 +95,40 @@ test("getPool stores sanitized error (no raw message)", async () => {
   assert.equal(/password=/.test(serialized), false);
   assert.equal(/secret/.test(serialized), false);
 });
+
+test("getPool adds an actionable hint for connection codes, from the code alone", async () => {
+  // A bare ECONNRESET tells the caller nothing, and the port it was handed is frozen for
+  // the life of the process - so the hint has to point at the endpoint itself.
+  function PoolThatResets() {
+    this.connect = async () => {
+      const err = new Error("Failed to connect to ::1:64357 - read ECONNRESET");
+      err.name = "ConnectionError";
+      err.code = "ECONNRESET";
+      throw err;
+    };
+    this.close = async () => {};
+    this.on = () => {};
+  }
+  await assert.rejects(() =>
+    getPool("reset", {}, { ConnectionPool: PoolThatResets })
+  );
+  const { reset } = getConnectionStatus();
+  assert.equal(reset.lastError.code, "ECONNRESET");
+  assert.match(reset.lastError.hint, /--port/);
+  // Still derived from the code, never from the message.
+  assert.equal(/64357/.test(JSON.stringify(reset.lastError)), false);
+});
+
+test("getPool leaves no hint for a code it does not know", async () => {
+  function PoolOddError() {
+    this.connect = async () => {
+      const err = new Error("boom");
+      err.code = "EWHATEVER";
+      throw err;
+    };
+    this.close = async () => {};
+    this.on = () => {};
+  }
+  await assert.rejects(() => getPool("odd", {}, { ConnectionPool: PoolOddError }));
+  assert.equal(getConnectionStatus().odd.lastError.hint, undefined);
+});

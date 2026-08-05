@@ -6,9 +6,13 @@ const path = require("node:path");
 
 const { parseDataSource } = require("../bin/start-mssql-mcp");
 const {
+  CACHE_VERSION,
   isLocalHost,
   isSafeInstanceName,
   pickAddress,
+  chooseEndpoint,
+  tdsVerdict,
+  buildScript,
   discoverLocalInstance,
   discoverLocalInstances,
   queryWindowsInstance,
@@ -131,6 +135,149 @@ test("queryWindowsInstances no pregunta por un nombre que no es una instancia", 
   assert.deepEqual(r, {});
 });
 
+// ── chooseEndpoint: elegir entre varios puertos abiertos ──
+
+/** Los dos puertos que tenia abiertos la instancia que motivo todo esto. */
+const PC_141 = {
+  muerto: [
+    { port: 64357, address: "::1", tds: false },
+    { port: 64357, address: "127.0.0.1", tds: false },
+  ],
+  bueno: [
+    { port: 49242, address: "0.0.0.0", tds: true },
+    { port: 49242, address: "::", tds: true },
+  ],
+};
+
+test("chooseEndpoint: descarta el puerto que acepta la conexion pero no habla TDS", () => {
+  // El caso real: el proceso de la instancia tenia DOS puertos abiertos, y el que
+  // aparecia primero aceptaba la conexion y la cortaba en el saludo. Se elegia ese y
+  // todas las tools fallaban con ECONNRESET durante toda la vida del proceso.
+  const found = chooseEndpoint({
+    staticPort: undefined,
+    dynamicPort: undefined,
+    listening: [...PC_141.muerto, ...PC_141.bueno],
+  });
+  assert.deepEqual(found, { port: "49242", address: undefined });
+});
+
+test("chooseEndpoint: no depende del orden en que el sistema liste los puertos", () => {
+  // Get-NetTCPConnection no promete ningun orden, asi que la eleccion no puede depender
+  // de el: era justo lo que convertia el fallo en una moneda al aire.
+  const alReves = chooseEndpoint({
+    listening: [...PC_141.bueno, ...PC_141.muerto],
+  });
+  assert.equal(alReves.port, "49242");
+});
+
+test("chooseEndpoint: prefiere el que escucha en todas las IP al que solo escucha en loopback", () => {
+  // Sin sondeo que los distinga, la pista que queda es donde escucha cada uno.
+  const found = chooseEndpoint({
+    listening: [
+      { port: 64357, address: "::1", tds: true },
+      { port: 49242, address: "0.0.0.0", tds: true },
+    ],
+  });
+  assert.deepEqual(found, { port: "49242", address: undefined });
+});
+
+test("chooseEndpoint: usa TcpDynamicPorts cuando TcpPort esta vacio", () => {
+  // Con puerto dinamico el registro no trae TcpPort, pero si el que anoto el servicio al
+  // arrancar. Antes no se leia, y el puerto bueno no llegaba a ser candidato.
+  const found = chooseEndpoint({
+    staticPort: undefined,
+    dynamicPort: 49242,
+    listening: [
+      { port: 64357, address: "127.0.0.1" },
+      { port: 49242, address: "0.0.0.0" },
+    ],
+  });
+  assert.equal(found.port, "49242");
+});
+
+test("chooseEndpoint: descarta el puerto estatico del registro si no contesta", () => {
+  // El registro dice 1433 pero ahi no hay un SQL Server: mandaba el registro a ciegas.
+  const found = chooseEndpoint({
+    staticPort: 1433,
+    listening: [
+      { port: 1433, address: "0.0.0.0", tds: false },
+      { port: 49242, address: "0.0.0.0", tds: true },
+    ],
+  });
+  assert.equal(found.port, "49242");
+});
+
+test("chooseEndpoint: si ningun puerto contesta, no ofrece ninguno", () => {
+  // Mejor intentar la conexion por nombre de instancia que darle un puerto ya muerto.
+  assert.equal(chooseEndpoint({ listening: PC_141.muerto }), null);
+});
+
+test("chooseEndpoint: sin dato de sondeo se comporta como antes", () => {
+  // Lo que hay en la cache escrita por una version anterior no trae `tds`, y ahi el
+  // resultado tiene que seguir siendo el de entonces.
+  const found = chooseEndpoint({
+    staticPort: 1433,
+    listening: [
+      { port: 1433, address: "0.0.0.0" },
+      { port: 56894, address: "127.0.0.1" },
+    ],
+  });
+  assert.deepEqual(found, { port: "1433", address: undefined });
+});
+
+test("chooseEndpoint: si no se ha visto ningun puerto, recurre al registro", () => {
+  // La consulta de puertos puede haber fallado; el puerto fijado sigue siendo una pista.
+  const found = chooseEndpoint({ staticPort: 1433, listening: [] });
+  assert.deepEqual(found, { port: "1433", address: undefined });
+});
+
+test("chooseEndpoint: mantiene la direccion cuando el unico puerto bueno es de loopback", () => {
+  // Una instancia que de verdad solo escucha en loopback sigue siendo un caso valido:
+  // se elige su puerto y se fija la direccion, que es lo que avisa el banner.
+  const found = chooseEndpoint({ listening: [{ port: 59212, address: "::1", tds: true }] });
+  assert.deepEqual(found, { port: "59212", address: "::1" });
+});
+
+// ── tdsVerdict ──
+
+test("tdsVerdict: basta que conteste una direccion, y hacen falta todas para descartar", () => {
+  // Una IPv6 de enlace local no se deja sondear, y eso no puede tumbar un puerto bueno.
+  assert.equal(tdsVerdict([{ tds: false }, { tds: true }]), "ok");
+  assert.equal(tdsVerdict([{ tds: false }, { tds: false }]), "dead");
+  assert.equal(tdsVerdict([{ tds: true }]), "ok");
+  assert.equal(tdsVerdict([{}]), "unknown", "sin dato no se descarta");
+  assert.equal(tdsVerdict([]), "unknown");
+});
+
+// ── buildScript ──
+
+test("buildScript: pide TcpDynamicPorts ademas de TcpPort", () => {
+  const script = buildScript(["SQL2022"]);
+  assert.match(script, /\$tcp\.TcpPort/);
+  assert.match(script, /\$tcp\.TcpDynamicPorts/);
+});
+
+test("buildScript: sondea el saludo TDS de cada puerto que ve", () => {
+  const script = buildScript(["SQL2022"]);
+  // La cabecera de un PRELOGIN: tipo 0x12, EOM, y 20 bytes de longitud.
+  assert.match(script, /0x12,0x01,0x00,0x14/);
+  assert.match(script, /tds = \(Test-Tds/);
+});
+
+test("buildScript: escapa el '$' del nombre del servicio", () => {
+  // El filtro viaja dentro de una cadena entrecomillada de PowerShell. Sin escapar,
+  // 'MSSQL$SQL2022' se expandia como si `$SQL2022` fuera una variable: quedaba en blanco,
+  // el filtro se volvia Name='MSSQL' y no se encontraba NINGUNA instancia nombrada.
+  assert.match(buildScript(["SQL2022"]), /Name='MSSQL`\$SQL2022'/);
+  assert.match(buildScript(["A", "B"]), /Name='MSSQL`\$A' OR Name='MSSQL`\$B'/);
+});
+
+test("buildScript: sondea IPv6 con un socket IPv6", () => {
+  // Un TcpClient sin familia es IPv4 y falla al conectar a '::1' sin llegar a preguntar,
+  // asi que una instancia que solo escucha en IPv6 se daria por muerta.
+  assert.match(buildScript(["X"]), /InterNetworkV6/);
+});
+
 // ── discoverLocalInstance ──
 
 test("discoverLocalInstance: prefiere el puerto estatico del registro", () => {
@@ -184,6 +331,21 @@ test("discoverLocalInstance: sin nada a la escucha devuelve null", () => {
     exec: fakeExec({ SQL2025: { staticPort: null, listening: [] } }),
   });
   assert.equal(found, null);
+});
+
+test("discoverLocalInstance: de punta a punta, ignora el puerto que no habla TDS", () => {
+  // La misma instancia que motivo el arreglo, tal y como la cuenta el sistema.
+  const found = discoverLocalInstance("SQL2022", {
+    ...WIN,
+    exec: fakeExec({
+      SQL2022: {
+        staticPort: null,
+        dynamicPort: 49242,
+        listening: [...PC_141.muerto, ...PC_141.bueno],
+      },
+    }),
+  });
+  assert.deepEqual(found, { port: "49242", address: undefined });
 });
 
 test("discoverLocalInstance: si falla la consulta, no revienta", () => {
@@ -295,6 +457,38 @@ test("una cache corrupta no rompe el arranque, se vuelve a sondear", (t) => {
     exec: fakeExec({ SQL2022: { staticPort: 1433, listening: [] } }),
   });
   assert.equal(found.SQL2022.port, "1433");
+});
+
+test("una entrada de cache de un formato anterior se ignora", (t) => {
+  // Sin esto, actualizar el MCP no arreglaba nada durante el primer minuto: la entrada
+  // con el puerto equivocado seguia en el fichero y el arranque la reutilizaba.
+  const cacheFile = tempCacheFile(t);
+  fs.writeFileSync(
+    cacheFile,
+    JSON.stringify({ sql2022: { at: 1000, found: { port: "64357", address: "::1" } } })
+  );
+
+  const found = discoverLocalInstances(["SQL2022"], {
+    ...WIN,
+    cacheFile,
+    now: 1000,
+    exec: fakeExec({
+      SQL2022: { listening: [{ port: 49242, address: "0.0.0.0", tds: true }] },
+    }),
+  });
+  assert.deepEqual(found.SQL2022, { port: "49242", address: undefined });
+});
+
+test("la cache nueva se escribe con su numero de formato", (t) => {
+  const cacheFile = tempCacheFile(t);
+  discoverLocalInstances(["SQL2022"], {
+    ...WIN,
+    cacheFile,
+    now: 1000,
+    exec: fakeExec({ SQL2022: { staticPort: 1433, listening: [] } }),
+  });
+  const raw = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+  assert.equal(raw.sql2022.v, CACHE_VERSION);
 });
 
 test("sin cacheFile no se toca ningun fichero", () => {
