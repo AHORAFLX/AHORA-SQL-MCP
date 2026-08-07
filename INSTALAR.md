@@ -174,7 +174,8 @@ Los datos van en `env`, nunca en los argumentos: `.mcp.json` se commitea.
         "--from-env"
       ],
       "env": {
-        "MSSQL_SERVER": "PC_158\\SQL2022",
+        "MSSQL_SERVER": "PC_158",
+        "MSSQL_INSTANCE_NAME": "SQL2022",
         "MSSQL_DATABASE": "MiBD",
         "MSSQL_USER": "usuario",
         "MSSQL_PASSWORD": "clave"
@@ -183,6 +184,13 @@ Los datos van en `env`, nunca en los argumentos: `.mcp.json` se commitea.
   }
 }
 ```
+
+⚠️ **La instancia va en `MSSQL_INSTANCE_NAME`, nunca dentro de `MSSQL_SERVER`.** Por esta vía las
+variables se pasan tal cual, sin interpretar: un `"MSSQL_SERVER": "PC_158\\SQL2022"` llega al
+driver como nombre de máquina y no conecta. Tampoco se averigua solo el puerto de la instancia,
+así que hace falta el servicio **SQL Browser** arrancado (o TCP/IP habilitado); si no, pon
+`MSSQL_PORT` en lugar de `MSSQL_INSTANCE_NAME` — nunca los dos. Si tienes instancia nombrada y no
+sabes el puerto, deja que lo haga el instalador guiado.
 
 ### Cosas que quizá necesites añadir
 

@@ -26,7 +26,7 @@ precedence order anyone could guess from reading a `.mcp.json`:
 | `appsettings.json` (.NET Core) | `--config-file` + `--connection-name` | ASP.NET Core overlay: `appsettings.<env>.json` wins over `appsettings.json`. **An empty string counts as absent**, which is exactly how Flexygo Core declares them. Env from `--environment`, else `ASPNETCORE_ENVIRONMENT`, else `Development`. Section and connection names are matched case-insensitively; a BOM is tolerated. `--config-file` also accepts the containing folder. |
 | Loose ADO string | `--connection-string` (repeatable, `--alias` each when >1) | No config file needed. Password ends up in argv. |
 | Loose values | `--server --database --user --password` (+ `--encrypt`, `--trust-server-certificate`) | Same caveat. |
-| Client environment | `--from-env` | Takes the inherited `MSSQL_*` connection variables instead of argv, so credentials live in the client's `env` block. The only exception to env sanitizing — and `MSSQL_ENABLE_WRITES` / `MSSQL_SQL_DIRS` are still overwritten, so the environment can never enable writes. |
+| Client environment | `--from-env` | Takes the inherited `MSSQL_*` connection variables instead of argv, so credentials live in the client's `env` block. The only exception to env sanitizing — and `MSSQL_ENABLE_WRITES` / `MSSQL_SQL_DIRS` are still overwritten, so the environment can never enable writes. **The only source that does not run the `Data Source` parser**: variables are passed through verbatim, so a named instance goes in `MSSQL_INSTANCE_NAME` (never as `HOST\INSTANCE` inside `MSSQL_SERVER`) and its port is **not** auto-discovered — SQL Browser / TCP-IP, or `MSSQL_PORT`. |
 | Credentials file | `--credentials-file <ruta>` | A JSON **outside the repository** (the installer writes it under `%APPDATA%\ahora-sql-mcp\`). For projects with no config file: `.mcp.json` gets committed, so credentials must not live there — only the path does. Flat shape for one DB, or `{"connections": {"<dbKey>": {...}}}` for several. |
 
 ### The installer's connection probe
@@ -188,7 +188,8 @@ launched with, and nothing else. See the [README](../README.md) for the reasonin
 | Variable                                | Mode   | Required     | Default       | Notes                                                                                                         |
 | --------------------------------------- | ------ | ------------ | ------------- | ------------------------------------------------------------------------------------------------------------- |
 | `MSSQL_SERVER`                          | single | yes          | `localhost`   | Hostname or IP.                                                                                               |
-| `MSSQL_PORT`                            | single | no           | mssql default | Coerced to integer.                                                                                           |
+| `MSSQL_PORT`                            | single | no           | mssql default | Coerced to integer. Mutually exclusive with `MSSQL_INSTANCE_NAME` — setting both throws at startup.            |
+| `MSSQL_INSTANCE_NAME`                   | single | no           | -             | Named instance, resolved through the SQL Browser service. The instance belongs here, **never** inside `MSSQL_SERVER`: nothing parses `HOST\INSTANCE` at this level. Only relevant with `--from-env`; every other source derives it from the `Data Source`. |
 | `MSSQL_USER`                            | single | yes          | -             | Login name.                                                                                                   |
 | `MSSQL_PASSWORD`                        | single | yes          | -             | -                                                                                                             |
 | `MSSQL_DATABASE`                        | single | yes          | -             | Exposed as `dbKey="maindb"`.                                                                                  |
@@ -196,6 +197,7 @@ launched with, and nothing else. See the [README](../README.md) for the reasonin
 | `MSSQL_TRUST_SERVER_CERTIFICATE`        | single | no           | `true`        | Set `false` to enforce certificate validation.                                                                |
 | `MSSQL_<NAME>_SERVER`                   | multi  | no           | global        | Falls back to `MSSQL_SERVER` if omitted.                                                                      |
 | `MSSQL_<NAME>_PORT`                     | multi  | no           | mssql default | -                                                                                                             |
+| `MSSQL_<NAME>_INSTANCE_NAME`            | multi  | no           | global        | Falls back to `MSSQL_INSTANCE_NAME`. Same exclusivity with `_PORT`, same caveat about not embedding it in `_SERVER`. |
 | `MSSQL_<NAME>_USER`                     | multi  | no           | global        | Falls back to `MSSQL_USER`.                                                                                   |
 | `MSSQL_<NAME>_PASSWORD`                 | multi  | no           | global        | Falls back to `MSSQL_PASSWORD`.                                                                               |
 | `MSSQL_<NAME>_DATABASE`                 | multi  | yes (per DB) | -             | Presence of any `_DATABASE` switches the server into multi-db mode. Exposed as `dbKey="<name>"` (lowercased). |
@@ -315,7 +317,7 @@ Result `structuredContent`:
   "db": "your_database",
   "dbKey": "maindb",
   "rowCount": 5,
-  "totalRowsReturnedByQuery": 5,
+  "totalRowsSeen": 5,
   "truncated": false,
   "recordset": [{ "id": 1, "name": "Item1", "created_at": "2025-01-01" }]
 }

@@ -169,7 +169,8 @@ saca de ahí:
       "command": "node",
       "args": ["<RUTA>/AHORA-SQL-MCP/bin/start-mssql-mcp.js", "--from-env"],
       "env": {
-        "MSSQL_SERVER": "PC_158\\SQL2022",
+        "MSSQL_SERVER": "PC_158",
+        "MSSQL_INSTANCE_NAME": "SQL2022",
         "MSSQL_DATABASE": "MiBD",
         "MSSQL_USER": "sa",
         "MSSQL_PASSWORD": "x"
@@ -178,6 +179,15 @@ saca de ahí:
   }
 }
 ```
+
+⚠️ **Con `--from-env` la instancia va en `MSSQL_INSTANCE_NAME`, nunca dentro de `MSSQL_SERVER`.**
+Es la única fuente que **no pasa por el parser del `Data Source`**: las `MSSQL_*` se copian tal cual
+al servidor, así que un `"MSSQL_SERVER": "PC_158\\SQL2022"` llega al driver como nombre de host
+literal y falla con un `ESOCKET` que no dice nada de la barra invertida. Por lo mismo **tampoco se
+averigua solo el puerto** de una instancia local: `MSSQL_INSTANCE_NAME` requiere SQL Browser
+arrancado o TCP/IP habilitado en esa instancia, y si no lo hay hace falta `MSSQL_PORT` — pero no
+los dos a la vez, que es un error de arranque. Con instancia nombrada y puerto desconocido, la
+forma buena es `--credentials-file`, que sí parsea y sí descubre.
 
 `--from-env` es la única excepción al saneado del entorno: deja pasar las `MSSQL_*` de conexión
 porque son justo lo que el cliente aporta. Las variables de política —
