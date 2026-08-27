@@ -27,7 +27,27 @@ precedence order anyone could guess from reading a `.mcp.json`:
 | Loose ADO string | `--connection-string` (repeatable, `--alias` each when >1) | No config file needed. Password ends up in argv. |
 | Loose values | `--server --database --user --password` (+ `--encrypt`, `--trust-server-certificate`) | Same caveat. |
 | Client environment | `--from-env` | Takes the inherited `MSSQL_*` connection variables instead of argv, so credentials live in the client's `env` block. The only exception to env sanitizing — and `MSSQL_ENABLE_WRITES` / `MSSQL_SQL_DIRS` are still overwritten, so the environment can never enable writes. **The only source that does not run the `Data Source` parser**: variables are passed through verbatim, so a named instance goes in `MSSQL_INSTANCE_NAME` (never as `HOST\INSTANCE` inside `MSSQL_SERVER`) and its port is **not** auto-discovered — SQL Browser / TCP-IP, or `MSSQL_PORT`. |
-| Credentials file | `--credentials-file <ruta>` | A JSON **outside the repository** (the installer writes it under `%APPDATA%\ahora-sql-mcp\`). For projects with no config file: `.mcp.json` gets committed, so credentials must not live there — only the path does. Flat shape for one DB, or `{"connections": {"<dbKey>": {...}}}` for several. |
+| Credentials file | `--credentials-file <ruta>` | A JSON **outside the repository** (the installer writes it under `%APPDATA%\ahora-sql-mcp\`). For projects with no config file: `.mcp.json` gets committed, so credentials must not live there — only the path does. Flat shape for one DB, or `{"connections": {"<dbKey>": {...}}}` for several. The password is stored **encrypted** under `passwordEnc` (see below); a legacy plaintext `password` is still accepted so upgrading doesn't break existing installs. |
+
+### Password at rest — `src/secrets.js`
+
+The credentials file is the only place this project writes a password to disk, and it no longer
+writes it in the clear. `installer/credentials.js` encrypts it; `bin/start-mssql-mcp.js` decrypts it
+at startup, in memory, and hands it to the server through the child process environment.
+
+| Platform | Scheme |
+|---|---|
+| Windows | **DPAPI**, `CurrentUser` scope, through PowerShell (`[Security.Cryptography.ProtectedData]`). The key derives from the Windows account and is managed by the OS — there is nothing to store. The ciphertext only opens for the same account on the same machine. Token: `dpapi:v1:<base64>`. |
+| Elsewhere, and if DPAPI is unavailable | **AES-256-GCM** with a random key in `secret.key` beside the JSON, mode `0600`. Be honest about what that buys: whoever can read the key file can decrypt. On POSIX `0600` is enforced, so it matches the protection the JSON already had, and the password stops being readable at a glance. Token: `aes-256-gcm:v1:<base64>`. The installer warns when it falls back. |
+
+Secrets are encrypted and decrypted **in one batch**: each DPAPI call costs a PowerShell start
+(~0.3 s), and decryption happens on every server start, while the MCP client is counting towards its
+`MCP_TIMEOUT`. Values with no scheme tag pass through untouched — that is the legacy plaintext path.
+Plaintext and ciphertext travel over stdin as base64, never in argv, which is world-readable in the
+process list.
+
+The alternative to encrypting is not writing at all: `--from-env` keeps the `MSSQL_*` in the client's
+`env` block and no credentials file is ever created.
 
 ### The installer's connection probe
 
@@ -381,7 +401,7 @@ installer/
 ├── setup.js              # guided installer (MCP config only): terminal wizard + entry point
 ├── gui.js                # same logic behind a local self-contained HTML form
 ├── probe.js              # real connection test, through the server's own pipeline
-├── credentials.js        # credentials file outside the repo (%APPDATA%)
+├── credentials.js        # credentials file outside the repo (%APPDATA%), password encrypted
 ├── permissions.js        # permissions.allow rules so auto mode doesn't deny reads
 ├── exe-entry.js          # entry for the packaged exe (no require.main there)
 ├── build-exe.js          # Node SEA build -> dist/ahora-setup.exe
@@ -391,6 +411,7 @@ src/
 ├── server.js             # McpServer factory
 ├── config.js             # env -> validated connection configs
 ├── validation.js         # shared Zod shapes
+├── secrets.js            # password at rest: DPAPI on Windows, AES-256-GCM fallback
 ├── resources.js          # ResourceTemplate registration
 ├── prompts.js            # MCP prompts
 ├── db/

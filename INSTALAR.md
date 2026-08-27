@@ -42,6 +42,11 @@ prueba la conexión, y guarda las credenciales en `%APPDATA%\ahora-sql-mcp\` par
 el `.mcp.json`**, que es un fichero que se commitea. En la carpeta solo queda el `.mcp.json` con la
 ruta. Abres esa carpeta con tu cliente y ya tienes acceso a la BD.
 
+La contraseña **no se guarda en claro**: va cifrada con DPAPI de Windows, con una clave que deriva de
+tu cuenta y gestiona el sistema. Solo tu cuenta y en este equipo puede descifrarla, así que copiar
+ese JSON a otra máquina no sirve de nada. Si te cambian de equipo o de usuario, vuelve a ejecutar el
+instalador.
+
 Si el servidor no responde te lo dice y te deja seguir marcando una casilla, porque puede ser la VPN
 o el SQL Browser parado y no una errata.
 
@@ -161,8 +166,9 @@ letras, dígitos y guion bajo, empezando por letra.
 Los datos van en `env`, nunca en los argumentos: `.mcp.json` se commitea.
 
 > La alternativa, y lo que hace el instalador guiado, es `--credentials-file`: las credenciales se
-> guardan en un JSON en `%APPDATA%\ahora-sql-mcp\` y en el `.mcp.json` solo queda su ruta. Así ni
-> siquiera están en el fichero del proyecto.
+> guardan en un JSON en `%APPDATA%\ahora-sql-mcp\` —con la contraseña cifrada bajo tu cuenta de
+> Windows, en la clave `passwordEnc`— y en el `.mcp.json` solo queda su ruta. Así ni siquiera están
+> en el fichero del proyecto.
 
 ```json
 {

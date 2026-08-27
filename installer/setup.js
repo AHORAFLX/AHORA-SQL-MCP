@@ -764,11 +764,12 @@ async function main() {
     title("5/5  Escribiendo configuracion");
 
     // Sin fichero de configuracion, las credenciales van a %APPDATA%: el .mcp.json
-    // se commitea y no puede llevarlas dentro.
+    // se commitea y no puede llevarlas dentro. La contrasena se cifra ademas con la
+    // cuenta de Windows, para que ese JSON no la lleve legible.
     let credentialsFile;
     if (manualConnections.length > 0) {
-      credentialsFile = writeCredentialsFile(root, manualConnections);
-      say(`✓ Credenciales, fuera del repositorio: ${credentialsFile}`);
+      credentialsFile = writeCredentialsFile(root, manualConnections, { warn: say });
+      say(`✓ Credenciales cifradas, fuera del repositorio: ${credentialsFile}`);
     }
 
     const flags = buildFlags({

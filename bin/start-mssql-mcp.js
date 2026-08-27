@@ -58,6 +58,7 @@ const {
   instanceToDiscover,
   withDiscoveredPort,
 } = require("./discover-instance");
+const { revealAll } = require("../src/secrets");
 
 const USAGE =
   "Uso — elige UNA fuente de conexion:\n" +
@@ -66,7 +67,7 @@ const USAGE =
   "  b) --connection-string <cadena ADO.NET>         (repetible; con varias, cada una necesita --alias)\n" +
   "  c) --server <host[\\instancia]> --database <BD> --user <usuario> --password <clave>\n" +
   "  d) --from-env                                   (toma las MSSQL_* del entorno del cliente MCP)\n" +
-  "  e) --credentials-file <ruta a un JSON>          (credenciales fuera del repositorio)\n" +
+  "  e) --credentials-file <ruta a un JSON>          (credenciales cifradas, fuera del repositorio)\n" +
   "\n" +
   "Opcionales:\n" +
   "  --environment <nombre>        entorno de appsettings.<entorno>.json (def.: ASPNETCORE_ENVIRONMENT o Development)\n" +
@@ -608,9 +609,14 @@ function applyConnection(env, prefix, parts, label, portOverride) {
  * que se guardan en %APPDATA% y aqui solo viaja la ruta.
  *
  * Forma simple:
- *   { "server": "PC\\INST", "database": "BD", "user": "sa", "password": "x" }
+ *   { "server": "PC\\INST", "database": "BD", "user": "sa", "passwordEnc": "dpapi:v1:..." }
  * Multi-BD (la clave es el dbKey):
  *   { "connections": { "config": { ... }, "data": { ... } } }
+ *
+ * La contrasena viene cifrada en `passwordEnc` y se descifra aqui, en memoria, para
+ * pasarla al servidor por el entorno del proceso hijo. Los ficheros de versiones
+ * anteriores traen `password` en claro y se siguen aceptando: si no, actualizar
+ * dejaria sin arrancar a quien ya lo tenia instalado.
  */
 function readCredentialsFile(filePath) {
   if (!fs.existsSync(filePath)) {
@@ -623,36 +629,45 @@ function readCredentialsFile(filePath) {
     throw new Error(`No se pudo interpretar ${filePath} como JSON: ${err.message}`);
   }
 
-  const toEntry = (alias, raw) => {
-    const label = alias || "credenciales";
+  const check = (alias, raw) => {
     if (!raw || typeof raw !== "object") {
-      throw new Error(`[${label}] entrada no valida en ${filePath}`);
+      throw new Error(`[${alias || "credenciales"}] entrada no valida en ${filePath}`);
     }
-    const server = raw.port ? `${raw.server},${raw.port}` : raw.server;
-    return {
-      alias,
-      parts: partsFromFlags({
-        server,
-        database: raw.database,
-        user: raw.user,
-        password: raw.password,
-        encrypt: raw.encrypt === undefined ? undefined : String(raw.encrypt),
-        trustServerCertificate:
-          raw.trustServerCertificate === undefined
-            ? undefined
-            : String(raw.trustServerCertificate),
-      }),
-    };
+    return raw;
   };
 
-  if (json.connections && typeof json.connections === "object") {
-    const aliases = Object.keys(json.connections);
-    if (aliases.length === 0) {
-      throw new Error(`${filePath} no declara ninguna conexion dentro de "connections".`);
-    }
-    return aliases.map((alias) => toEntry(alias, json.connections[alias]));
+  const raws =
+    json.connections && typeof json.connections === "object"
+      ? Object.keys(json.connections).map((alias) => ({
+          alias,
+          raw: check(alias, json.connections[alias]),
+        }))
+      : [{ alias: undefined, raw: check(undefined, json) }];
+
+  if (json.connections && raws.length === 0) {
+    throw new Error(`${filePath} no declara ninguna conexion dentro de "connections".`);
   }
-  return [toEntry(undefined, json)];
+
+  // Todas de una vez: descifrar cuesta un arranque de PowerShell, y hacerlo por
+  // conexion es justo lo que agota el MCP_TIMEOUT del cliente.
+  const passwords = revealAll(
+    raws.map(({ raw }) => (raw.passwordEnc === undefined ? raw.password : raw.passwordEnc))
+  );
+
+  return raws.map(({ alias, raw }, i) => ({
+    alias,
+    parts: partsFromFlags({
+      server: raw.port ? `${raw.server},${raw.port}` : raw.server,
+      database: raw.database,
+      user: raw.user,
+      password: passwords[i],
+      encrypt: raw.encrypt === undefined ? undefined : String(raw.encrypt),
+      trustServerCertificate:
+        raw.trustServerCertificate === undefined
+          ? undefined
+          : String(raw.trustServerCertificate),
+    }),
+  }));
 }
 
 function partsFromFlags({
@@ -953,7 +968,7 @@ function main() {
     connectionString: "--connection-string",
     flags: "--server/--database/--user/--password",
     env: "MSSQL_* del entorno del cliente MCP (--from-env)",
-    credentialsFile: `${args.credentialsFile} (credenciales fuera del repositorio)`,
+    credentialsFile: `${args.credentialsFile} (credenciales cifradas, fuera del repositorio)`,
   }[source.kind];
 
   console.error("─".repeat(64));

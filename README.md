@@ -356,6 +356,12 @@ bloque, no está arrancando el wrapper.
 El `.mcp.json` solo contiene rutas, nunca credenciales: por eso se puede commitear en el
 repositorio del proyecto. Las credenciales se leen del `Web.config` en tiempo de arranque.
 
+Cuando no hay `Web.config` ni `appsettings.json`, el instalador las guarda en
+`%APPDATA%\ahora-sql-mcp\<proyecto>.json`, y **la contraseña va cifrada**: DPAPI de Windows, ámbito
+`CurrentUser`, así que solo tu cuenta y en ese equipo puede descifrarla y no hay ninguna clave que
+custodiar. El wrapper la descifra en memoria al arrancar. Detalles en
+[docs/REFERENCE.md](docs/REFERENCE.md#password-at-rest--srcsecretsjs).
+
 ### Ejecutar ficheros `.sql`
 
 `execute_sql_file` recibe una **ruta** y ejecuta el script, el equivalente a `sqlcmd -i fichero.sql`.

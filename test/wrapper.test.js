@@ -731,6 +731,42 @@ function writeCreds(doc) {
   return file;
 }
 
+test("readCredentialsFile: la contrasena cifrada se descifra al arrancar", () => {
+  const { protect } = require("../src/secrets");
+  const file = writeCreds({
+    server: "PC",
+    database: "BD",
+    user: "sa",
+    passwordEnc: protect("contrasena-secreta"),
+  });
+  assert.ok(
+    !fs.readFileSync(file, "utf8").includes("contrasena-secreta"),
+    "el fichero no puede tener la contrasena en claro"
+  );
+  const env = {};
+  applyConnection(env, "MSSQL_", readCredentialsFile(file)[0].parts, "creds");
+  assert.equal(env.MSSQL_PASSWORD, "contrasena-secreta");
+});
+
+test("readCredentialsFile: multi-BD cifrado, cada clave con su conexion", () => {
+  // Descifrar va en bloque; si el orden se cruzara, cada BD arrancaria con la
+  // contrasena de la otra y el error no diria por que.
+  const { protectAll } = require("../src/secrets");
+  const [conf, data] = protectAll(["clave-conf", "clave-data"]);
+  const file = writeCreds({
+    connections: {
+      config: { server: "PC", database: "Conf", user: "sa", passwordEnc: conf },
+      data: { server: "PC", database: "Datos", user: "sa", passwordEnc: data },
+    },
+  });
+  const entries = readCredentialsFile(file);
+  const env = {};
+  applyConnection(env, "MSSQL_CONFIG_", entries[0].parts, "config");
+  applyConnection(env, "MSSQL_DATA_", entries[1].parts, "data");
+  assert.equal(env.MSSQL_CONFIG_PASSWORD, "clave-conf");
+  assert.equal(env.MSSQL_DATA_PASSWORD, "clave-data");
+});
+
 test("readCredentialsFile: forma simple", () => {
   const file = writeCreds({
     server: "PC_158\\SQL2022",

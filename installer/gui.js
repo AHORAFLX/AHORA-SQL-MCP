@@ -765,7 +765,8 @@ $("btnWrite").onclick = async () => {
         (w.others.length ? ' <span class="hint">· conservados: ' + esc(w.others.join(", ")) + "</span>" : "") +
         "</li>").join("") + "</ul>";
     if (res.credentialsFile) {
-      html += '<p>Credenciales, fuera del repositorio:</p><pre>' + esc(res.credentialsFile) + "</pre>";
+      html += "<p>Credenciales cifradas con tu cuenta de Windows, fuera del repositorio:</p><pre>" +
+        esc(res.credentialsFile) + "</pre>";
     }
     if (res.permissions) {
       html += "<p>Reglas de permisos en <code>" + esc(res.permissions.target) + "</code>:</p>" +

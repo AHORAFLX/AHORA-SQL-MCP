@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const gui = require("../installer/gui");
+const { isProtected, reveal } = require("../src/secrets");
 
 const HOST = "PC_158\\SQL2022";
 
@@ -402,8 +403,14 @@ test("las credenciales manuales NO acaban en el .mcp.json", async () => {
     assert.ok(!args.includes("contrasena-secreta"), "la contrasena no puede estar en el .mcp.json");
     assert.ok(args.includes("--credentials-file"));
 
-    const creds = JSON.parse(fs.readFileSync(r.json.credentialsFile, "utf8"));
-    assert.equal(creds.password, "contrasena-secreta");
+    // Tampoco en claro en el fichero de credenciales: ese JSON acaba en copias de
+    // seguridad y en adjuntos de tickets de soporte.
+    const raw = fs.readFileSync(r.json.credentialsFile, "utf8");
+    assert.ok(!raw.includes("contrasena-secreta"), "la contrasena no puede estar en claro");
+    const creds = JSON.parse(raw);
+    assert.equal(creds.password, undefined);
+    assert.ok(isProtected(creds.passwordEnc), `sin cifrar: ${creds.passwordEnc}`);
+    assert.equal(reveal(creds.passwordEnc), "contrasena-secreta");
     fs.rmSync(r.json.credentialsFile, { force: true });
   });
 });
