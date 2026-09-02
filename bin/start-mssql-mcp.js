@@ -5,10 +5,10 @@
  * Resuelve la conexion sin duplicar credenciales en la configuracion de cada MCP.
  * Hay cuatro fuentes posibles, y hay que elegir UNA:
  *
- * 1) Web.config (.NET Framework) — Flexygo no migrado
+ * 1) Web.config (.NET Framework) â€” Flexygo no migrado
  *      --config-file C:\repo\Web.config --connection-name DataConnectionString
  *
- * 2) appsettings.json (.NET Core) — Flexygo migrado
+ * 2) appsettings.json (.NET Core) â€” Flexygo migrado
  *      --config-file C:\repo\conf\appsettings.json --connection-name DataConnectionString
  *
  *    En Core las cadenas suelen estar VACIAS en appsettings.json y rellenas en
@@ -52,16 +52,11 @@
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
-const {
-  DEFAULT_CACHE_FILE,
-  discoverLocalInstances,
-  instanceToDiscover,
-  withDiscoveredPort,
-} = require("./discover-instance");
+const { instanceToDiscover } = require("./discover-instance");
 const { revealAll } = require("../src/secrets");
 
 const USAGE =
-  "Uso — elige UNA fuente de conexion:\n" +
+  "Uso â€” elige UNA fuente de conexion:\n" +
   "  a) --config-file <Web.config | appsettings.json | carpeta>\n" +
   "     --connection-name <NombreConexion[:alias]>   (repetible para multi-BD)\n" +
   "  b) --connection-string <cadena ADO.NET>         (repetible; con varias, cada una necesita --alias)\n" +
@@ -514,7 +509,7 @@ function parseDataSource(raw) {
  *
  * `--port 1433` vale para todas. `--port <alias>:<puerto>` vale solo para esa, y es
  * lo que hace falta cuando cada base de datos vive en una instancia distinta con su
- * propio puerto — el caso tipico de un Flexygo en una maquina con varias instancias,
+ * propio puerto â€” el caso tipico de un Flexygo en una maquina con varias instancias,
  * donde un unico puerto para todas no sirve de nada.
  */
 function portFor(ports, alias) {
@@ -816,7 +811,7 @@ function main() {
 
   const env = cleanEnv(source.kind === "env");
   const resolved = [];
-  const discoveries = [];
+  const pendingInstances = [];
   let credentialsInArgv = false;
 
   try {
@@ -827,10 +822,8 @@ function main() {
       const configFile =
         source.kind === "configFile" ? resolveConfigFile(args.configFile) : null;
 
-      // Primera pasada: interpretar cada conexion, sin preguntar todavia al sistema.
-      // El sondeo de puertos se hace despues, de una sola vez para todas, porque su
-      // coste es un arranque de PowerShell y hacerlo por conexion es lo que retrasaba
-      // el arranque hasta agotar el MCP_TIMEOUT del cliente.
+      // Interpretar cada conexion, sin preguntar nada al sistema: el arranque del wrapper
+      // no habla ni con el registro ni con PowerShell (salvo descifrar credenciales).
       const prepared = [];
       source.entries.forEach((entry, i) => {
         let connString;
@@ -891,31 +884,33 @@ function main() {
         });
       });
 
-      // Si la cadena nombra una instancia local y no trae puerto, se averigua el
-      // puerto real preguntando al sistema. Se hace en cada arranque y no se escribe
-      // en la configuracion, asi que aguanta los puertos dinamicos y no exige ni SQL
-      // Browser ni permisos de administrador en la maquina del companero.
+      // Si la cadena nombra una instancia local y no trae puerto, hay que averiguar el
+      // puerto real preguntando al sistema. Eso se hacia AQUI, y era el problema: cuesta
+      // ~4 segundos de PowerShell y el servidor todavia no estaba levantado, asi que ese
+      // tiempo se lo comia el cliente esperando el saludo `initialize`. Con 30 segundos de
+      // MCP_TIMEOUT por defecto y el servidor entero descartado al agotarse, las tools no
+      // llegaban a aparecer; al reiniciar caia dentro del minuto de cache del sondeo y
+      // entonces si. De ahi el "a veces hay que reiniciar el MCP".
       //
-      // Con --port no hace falta preguntar: el puerto ya lo ha dicho quien arranca. Lo
+      // Ahora aqui solo se ANOTA cual habra que resolver, para poder decirlo en el
+      // resumen. Lo resuelve el servidor en el primer uso de esa conexion
+      // (src/db/endpoint.js), donde ya no hay ningun reloj corriendo, y ademas puede
+      // repetirlo si el puerto cambia -antes eso exigia reiniciar el proceso.
+      //
+      // Con --port no hay nada que averiguar: el puerto ya lo ha dicho quien arranca. Lo
       // que se pierde en ese caso es detectar que la instancia solo escucha en la
       // loopback, y por eso se avisa mas abajo.
-      const wanted = [];
       for (const p of prepared) {
         const natural = instanceToDiscover(p.rawParts, parseDataSource);
-        p.skippedByPort = Boolean(natural && p.portOverride);
-        if (natural && !p.portOverride) wanted.push(natural.instanceName);
-      }
-      const byInstance = discoverLocalInstances(wanted, { cacheFile: DEFAULT_CACHE_FILE });
+        const skippedByPort = Boolean(natural && p.portOverride);
+        const pendingInstance =
+          natural && !p.portOverride ? natural.instanceName : null;
 
-      // Segunda pasada: aplicar lo averiguado y montar el entorno del servidor.
-      for (const p of prepared) {
-        const { parts, discovered } = withDiscoveredPort(p.rawParts, parseDataSource, {
-          portOverride: p.portOverride,
-          discover: (instanceName) => byInstance[instanceName] || null,
-        });
-        if (discovered) discoveries.push({ label: p.label, ...discovered });
-        const info = applyConnection(env, p.prefix, parts, p.label, p.portOverride);
-        resolved.push({ key: p.key, ...info, skippedByPort: p.skippedByPort });
+        const info = applyConnection(env, p.prefix, p.rawParts, p.label, p.portOverride);
+        if (pendingInstance) {
+          pendingInstances.push({ label: p.label, instanceName: pendingInstance });
+        }
+        resolved.push({ key: p.key, ...info, skippedByPort, pendingInstance });
       }
     }
   } catch (err) {
@@ -971,9 +966,9 @@ function main() {
     credentialsFile: `${args.credentialsFile} (credenciales cifradas, fuera del repositorio)`,
   }[source.kind];
 
-  console.error("─".repeat(64));
+  console.error("â”€".repeat(64));
   console.error(
-    `AHORA-SQL-MCP — modo ${mode}${args.production ? "  ·  PRODUCCION" : ""}`
+    `AHORA-SQL-MCP â€” modo ${mode}${args.production ? "  Â·  PRODUCCION" : ""}`
   );
   console.error(`  Conexion desde: ${origin}`);
   for (const r of resolved) {
@@ -988,10 +983,10 @@ function main() {
   for (const dir of resolvedSqlDirs) {
     console.error(`             ${dir} (--allow-sql-dir)`);
   }
-  for (const d of discoveries) {
+  for (const d of pendingInstances) {
     console.error(
-      `  [${d.label}] instancia ${d.instanceName} resuelta sola: ${d.host},${d.port}` +
-        (d.onlyLoopback ? "  (solo escucha en loopback)" : "")
+      `  [${d.label}] instancia local ${d.instanceName}: el puerto se averigua en el ` +
+        "primer uso, no aqui (y se vuelve a averiguar si deja de servir)"
     );
   }
   if (resolved.some((r) => r.skippedByPort)) {
@@ -1001,11 +996,13 @@ function main() {
         "  correcto, pon 127.0.0.1 como servidor en lugar del nombre del equipo."
     );
   }
-  if (resolved.some((r) => r.viaInstance)) {
+  // Solo las REMOTAS: una instancia local la resuelve el servidor sondeando el sistema,
+  // que es justo la via que no necesita SQL Browser.
+  if (resolved.some((r) => r.viaInstance && !r.pendingInstance)) {
     console.error(
-      "  Resolucion por instancia nombrada: requiere el servicio SQL Browser activo,\n" +
-        "  o el protocolo TCP/IP habilitado en esa instancia. Si falla, indica el\n" +
-        "  puerto con --port <alias>:<puerto>."
+      "  Instancia nombrada REMOTA: la resuelve el SQL Browser del otro equipo, que\n" +
+        "  tiene que estar activo, o el TCP/IP habilitado en esa instancia. Si falla,\n" +
+        "  indica el puerto con --port <alias>:<puerto>."
     );
   }
   if (credentialsInArgv) {
@@ -1021,11 +1018,26 @@ function main() {
       }. Solo para local o pruebas.`
     );
   }
-  console.error("─".repeat(64));
+  console.error("â”€".repeat(64));
 
   const entry = path.join(__dirname, "..", "src", "index.js");
   const child = spawn(process.execPath, [entry], { env, stdio: "inherit" });
-  child.on("exit", (code) => process.exit(code ?? 0));
+  // Sin escuchar 'error', un fallo al lanzar node (ruta mala, permisos, antivirus) llega
+  // como evento sin oyente y tumba el wrapper con un volcado que no explica nada.
+  child.on("error", (err) => {
+    console.error(`No se ha podido lanzar el servidor: ${err.message}`);
+    process.exit(1);
+  });
+  // Muerto por senal, `code` es null: el `?? 0` de antes le decia al cliente que todo
+  // habia ido bien, asi que un servidor matado desde fuera desaparecia sin que nada lo
+  // reportara. Un codigo distinto de 0 y una linea en stderr es lo minimo para que se vea.
+  child.on("exit", (code, signal) => {
+    if (signal) {
+      console.error(`El servidor ha terminado por la senal ${signal}.`);
+      process.exit(1);
+    }
+    process.exit(code ?? 1);
+  });
 }
 
 if (require.main === module) main();

@@ -6,6 +6,7 @@ const {
   getConnectionStatus,
   _resetForTests,
 } = require("../src/db/pools");
+const { getResolvedEndpoints } = require("../src/db/endpoint");
 
 test.beforeEach(() => _resetForTests());
 test.afterEach(async () => {
@@ -15,10 +16,13 @@ test.afterEach(async () => {
 
 function makeFakeMssql(opts = {}) {
   const events = { connects: 0, closes: 0 };
+  const created = [];
   function ConnectionPool(cfg) {
     this.cfg = cfg;
+    const handlers = {};
     this.connect = async () => {
       events.connects++;
+      if (opts.gate) await opts.gate;
       if (opts.failConnect) throw new Error("boom");
       this.connected = true;
       return this;
@@ -27,9 +31,23 @@ function makeFakeMssql(opts = {}) {
       events.closes++;
       this.connected = false;
     };
-    this.on = () => {};
+    this.on = (name, fn) => {
+      (handlers[name] = handlers[name] || []).push(fn);
+    };
+    /** Dispara un evento del pool, como haria mssql al perder la conexion. */
+    this.emit = (name, ...args) => {
+      for (const fn of handlers[name] || []) fn(...args);
+    };
+    created.push(this);
   }
-  return { ConnectionPool, events };
+  return { ConnectionPool, events, created };
+}
+
+/** Un error de los que hacen sospechar del endpoint. */
+function endpointError(code) {
+  const err = new Error("se ha caido");
+  err.code = code;
+  return err;
 }
 
 test("getPool returns the same pool for the same dbKey (single connect)", async () => {
@@ -97,8 +115,8 @@ test("getPool stores sanitized error (no raw message)", async () => {
 });
 
 test("getPool adds an actionable hint for connection codes, from the code alone", async () => {
-  // A bare ECONNRESET tells the caller nothing, and the port it was handed is frozen for
-  // the life of the process - so the hint has to point at the endpoint itself.
+  // A bare ECONNRESET tells the caller nothing, so the hint has to point at the endpoint
+  // itself - and at the fact that a retry now re-discovers it.
   function PoolThatResets() {
     this.connect = async () => {
       const err = new Error("Failed to connect to ::1:64357 - read ECONNRESET");
@@ -131,4 +149,92 @@ test("getPool leaves no hint for a code it does not know", async () => {
   }
   await assert.rejects(() => getPool("odd", {}, { ConnectionPool: PoolOddError }));
   assert.equal(getConnectionStatus().odd.lastError.hint, undefined);
+});
+
+// ── un pool roto se reemplaza solo ──────────────────────────────────────────
+
+test("getPool reemplaza un pool que se rompio despues de conectar", async () => {
+  // El caso real: el servicio SQL se reinicia, o el portatil suspende. Antes el pool
+  // roto se quedaba cacheado para siempre y todas las tools fallaban hasta reiniciar
+  // el servidor entero.
+  const { ConnectionPool, events, created } = makeFakeMssql();
+  const primero = await getPool("k", {}, { ConnectionPool });
+  assert.equal(getConnectionStatus().k.status, "connected");
+
+  created[0].emit("error", endpointError("ECONNRESET"));
+  assert.equal(getConnectionStatus().k.status, "error");
+
+  const segundo = await getPool("k", {}, { ConnectionPool });
+  assert.notEqual(segundo, primero, "hace falta un pool nuevo, no el roto");
+  assert.equal(events.connects, 2);
+  assert.equal(getConnectionStatus().k.status, "connected");
+});
+
+test("getPool cierra el pool que descarta, sin esperar a que el cierre acabe", async () => {
+  const { ConnectionPool, events, created } = makeFakeMssql();
+  await getPool("k", {}, { ConnectionPool });
+  created[0].emit("error", endpointError("ESOCKET"));
+  await getPool("k", {}, { ConnectionPool });
+  // El cierre va suelto: se le da un turno al bucle de eventos para verlo.
+  await new Promise((r) => setImmediate(r));
+  assert.equal(events.closes, 1, "el pool viejo no se queda abierto");
+});
+
+test("getPool descarta el endpoint del pool roto, para volver a averiguar el puerto", async () => {
+  // Un pool que conectaba y deja de conectar apunta al puerto: una instancia dinamica
+  // estrena puerto en cada arranque del servicio.
+  const { ConnectionPool, created } = makeFakeMssql();
+  await getPool("k", {}, { ConnectionPool });
+  assert.equal(getResolvedEndpoints().k.stale, false);
+  created[0].emit("error", endpointError("ECONNRESET"));
+  await getPool("k", {}, { ConnectionPool });
+  assert.equal(
+    getResolvedEndpoints().k.stale,
+    false,
+    "resuelto de nuevo, asi que la sospecha ya se ha atendido"
+  );
+});
+
+test("un connect fallido por el endpoint deja la resolucion en sospecha", async () => {
+  function PoolThatResets() {
+    this.connect = async () => {
+      throw endpointError("ECONNRESET");
+    };
+    this.close = async () => {};
+    this.on = () => {};
+  }
+  await assert.rejects(() => getPool("k", {}, { ConnectionPool: PoolThatResets }));
+  assert.equal(getResolvedEndpoints().k.stale, true);
+});
+
+test("un connect fallido por credenciales NO toca la resolucion", async () => {
+  // Sondear otra vez costaria cuatro segundos por intento y el endpoint es correcto.
+  function PoolThatRejectsLogin() {
+    this.connect = async () => {
+      throw endpointError("ELOGIN");
+    };
+    this.close = async () => {};
+    this.on = () => {};
+  }
+  await assert.rejects(() => getPool("k", {}, { ConnectionPool: PoolThatRejectsLogin }));
+  assert.equal(getResolvedEndpoints().k.stale, false);
+});
+
+test("dos llamadas concurrentes no se tiran el pool que la otra esta creando", async () => {
+  // Con la marca de roto en el mapa `status` compartido en vez de en la entrada, este es
+  // el caso que se rompia: `status` sigue diciendo "error" por el intento ANTERIOR
+  // mientras el pool nuevo todavia esta conectando.
+  const { ConnectionPool: Failing } = makeFakeMssql({ failConnect: true });
+  await assert.rejects(() => getPool("k", {}, { ConnectionPool: Failing }));
+  assert.equal(getConnectionStatus().k.status, "error");
+
+  let abrir;
+  const gate = new Promise((r) => (abrir = r));
+  const { ConnectionPool, events } = makeFakeMssql({ gate });
+  const a = getPool("k", {}, { ConnectionPool });
+  const b = getPool("k", {}, { ConnectionPool });
+  abrir();
+  const [p1, p2] = await Promise.all([a, b]);
+  assert.equal(p1, p2);
+  assert.equal(events.connects, 1, "un solo connect, no uno por llamada");
 });
