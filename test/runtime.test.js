@@ -27,9 +27,10 @@ function tempDir(prefix) {
 /** Deja en su sitio el paquete instalado, como lo dejaria npm. */
 function fakeNpmInstall(dir, version = "9.9.9") {
   const pkgDir = path.join(dir, "node_modules", "@ahoraflx", "sql-mcp");
-  fs.mkdirSync(path.join(pkgDir, "bin"), { recursive: true });
+  // bundle/ y no bin/: es lo unico que lleva el paquete publicado.
+  fs.mkdirSync(path.join(pkgDir, "bundle"), { recursive: true });
   fs.writeFileSync(path.join(pkgDir, "package.json"), JSON.stringify({ version }), "utf8");
-  fs.writeFileSync(path.join(pkgDir, "bin", "start-mssql-mcp.js"), "// noop", "utf8");
+  fs.writeFileSync(path.join(pkgDir, "bundle", "start-mssql-mcp.cjs"), "// noop", "utf8");
 }
 
 // ── donde se instala ──
@@ -62,10 +63,20 @@ test("runtimeDir: fuera de Windows sigue el estandar XDG", () => {
   );
 });
 
-test("entryPath apunta al script del wrapper dentro del paquete instalado", () => {
+test("entryPath apunta al wrapper EMPAQUETADO del paquete instalado", () => {
+  // Tiene que ser bundle/: el paquete publicado no lleva bin/ ni src/, porque asi su
+  // instalacion no resuelve dependencias. Apuntar a bin/ escribiria un .mcp.json que
+  // no arranca, y el fallo aparecería en la maquina de quien instala, no aqui.
   assert.equal(
     entryPath("C:\\base"),
-    path.join("C:\\base", "node_modules", "@ahoraflx", "sql-mcp", "bin", "start-mssql-mcp.js")
+    path.join(
+      "C:\\base",
+      "node_modules",
+      "@ahoraflx",
+      "sql-mcp",
+      "bundle",
+      "start-mssql-mcp.cjs"
+    )
   );
 });
 
@@ -185,7 +196,14 @@ test("resolveServerEntry cae a npx si no se ha podido instalar", () => {
     log: (r) => logged.push(r),
   });
   assert.equal(entry.command, "npx");
-  assert.deepEqual(entry.args.slice(0, 3), ["--yes", `--package=${PKG_SPEC}`, "start-mssql-mcp"]);
+  assert.deepEqual(entry.args.slice(0, 4), [
+    "--yes",
+    // Paliativo: en los arranques siguientes npm se queda con lo que ya tiene en cache
+    // en lugar de revalidar la referencia contra GitHub.
+    "--prefer-offline",
+    `--package=${PKG_SPEC}`,
+    "start-mssql-mcp",
+  ]);
   assert.equal(logged[0].ok, false);
   assert.match(logged[0].error.message, /sin red/);
 });

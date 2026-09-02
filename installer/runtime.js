@@ -12,9 +12,10 @@
  * reinstalar para coger el nombre nuevo — reinstalar estrena el pin, y el pin nuevo
  * estrena la cache de npx.
  *
- * Instalado una vez, la configuracion apunta a `node <ruta>/bin/start-mssql-mcp.js` y
- * el arranque baja a ~0,2 segundos. No cambia la promesa de INSTALAR.md: quien instala
- * sigue sin clonar nada, lo hace el instalador por el.
+ * Instalado una vez, la configuracion apunta a `node <ruta>/bundle/start-mssql-mcp.cjs` y
+ * el arranque baja a 254-283 ms medidos, frente a los 95 s del spec `github:` en frio.
+ * No cambia la promesa de INSTALAR.md: quien instala sigue sin clonar nada, lo hace el
+ * instalador por el.
  *
  * La carpeta es por usuario y no necesita permisos de administrador, a diferencia de
  * `npm install --global`, que en muchos equipos del equipo pide elevacion.
@@ -44,9 +45,23 @@ function runtimeDir({ platform = process.platform, env = process.env, home } = {
   return path.join(env.XDG_DATA_HOME || path.join(homeDir, ".local", "share"), "ahora-sql-mcp");
 }
 
-/** El script que arranca el servidor dentro de la instalacion. */
+/**
+ * El script que arranca el servidor dentro de la instalacion.
+ *
+ * Es `bundle/start-mssql-mcp.cjs` y no `bin/start-mssql-mcp.js`: el paquete publicado
+ * solo lleva bundle/ (ver el campo `files` del package.json), porque asi su instalacion
+ * no resuelve ningun arbol de dependencias. `bin/` es la fuente y no viaja, asi que
+ * apuntar ahi escribiria un .mcp.json que no arranca.
+ */
 function entryPath(dir) {
-  return path.join(dir, "node_modules", "@ahoraflx", "sql-mcp", "bin", "start-mssql-mcp.js");
+  return path.join(
+    dir,
+    "node_modules",
+    "@ahoraflx",
+    "sql-mcp",
+    "bundle",
+    "start-mssql-mcp.cjs"
+  );
 }
 
 /**

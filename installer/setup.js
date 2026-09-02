@@ -392,15 +392,27 @@ function nodeCommand(entry, flags) {
 /**
  * Forma npx, de reserva.
  *
- * Resuelve el paquete contra GitHub en CADA arranque: ~7 segundos en caliente y ~48 con
- * un pin de version nuevo, contra los 30 que espera el cliente MCP antes de descartar
- * el servidor. Solo se escribe si la instalacion no ha podido hacerse, porque un
- * arranque lento es mejor que ningun servidor.
+ * Resuelve el paquete contra GitHub en CADA arranque. Medido: 95 s hasta el `initialize`
+ * con la cache de npm vacia, y en caliente tres tomas de 8,5 s, 11 s y 75,8 s -npx
+ * revalida la referencia contra GitHub aunque el paquete ya este descargado-, contra los
+ * 30 s que espera el cliente MCP antes de descartar el servidor.
+ *
+ * Solo se escribe si la instalacion no ha podido hacerse, porque un arranque lento es
+ * mejor que ningun servidor. `--prefer-offline` hace que npm se quede con lo que ya tenga
+ * en cache y solo vaya a la red a por lo que falte: ayuda en los arranques siguientes, no
+ * en el primero de cada maquina. Es un paliativo, no el arreglo; el arreglo es que la
+ * instalacion funcione y se escriba `nodeCommand`.
  */
 function npxCommand(flags) {
   return {
     command: "npx",
-    args: ["--yes", `--package=${PKG_SPEC}`, "start-mssql-mcp", ...flags],
+    args: [
+      "--yes",
+      "--prefer-offline",
+      `--package=${PKG_SPEC}`,
+      "start-mssql-mcp",
+      ...flags,
+    ],
   };
 }
 
