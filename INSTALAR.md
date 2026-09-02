@@ -27,7 +27,7 @@ El paso 1 (skills) se hace con un comando y no tiene más. El paso 2 (el MCP) es
 enjundia, y hay un instalador que lo hace por ti. Ábrelo **desde la carpeta de tu proyecto**:
 
 ```bash
-npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.8.4 ahora-setup
+npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.9.0 ahora-setup
 ```
 
 Se abre un formulario en el navegador: detecta tu `Web.config` o `appsettings.json`, **se conecta de
@@ -92,7 +92,7 @@ npx skills add AHORAFLX/AHORA-SCO-SKILLS/skills/General
 Instala el servidor una vez:
 
 ```bash
-npm install --omit=dev github:AHORAFLX/AHORA-SQL-MCP#v1.8.4 --prefix "%LOCALAPPDATA%\AHORA-SQL-MCP"
+npm install --omit=dev github:AHORAFLX/AHORA-SQL-MCP#v1.9.0 --prefix "%LOCALAPPDATA%\AHORA-SQL-MCP"
 ```
 
 Después crea un fichero `.mcp.json` en la **raíz del proyecto** y pega el bloque que te
@@ -108,10 +108,12 @@ corresponda. Lo único que tienes que cambiar es la ruta del fichero de configur
 > retira sola; si tu `.mcp.json` está escrito a mano, renombra la clave.
 >
 > **No pongas `"command": "npx"` con `--package=github:…`**, que es lo que se documentaba antes.
-> Eso resuelve el paquete contra GitHub en **cada arranque** del MCP: unos 7 segundos cada vez, y
-> unos 48 la primera vez con una versión nueva. El cliente espera 30 segundos y al agotarse
+> Eso resuelve el paquete contra GitHub en **cada arranque** del MCP. Medido: **95 s** hasta que el
+> servidor contesta con la caché de npm vacía, y con la caché ya caliente tres tomas seguidas de
+> 8,5 s, 11 s y **75,8 s** — `npx` revalida la referencia contra GitHub aunque el paquete ya esté
+> descargado, así que ni estando caliente es fiable. El cliente espera 30 segundos y al agotarse
 > descarta el servidor entero, así que el agente se queda sin herramientas y te dice que "las
-> conexiones MCP están inestables". Instalado una vez, el arranque baja a menos de un segundo.
+> conexiones MCP están inestables". Instalado una vez, el arranque baja a **254-283 ms**.
 
 ### Flexygo en .NET Framework (tiene `Web.config`)
 
