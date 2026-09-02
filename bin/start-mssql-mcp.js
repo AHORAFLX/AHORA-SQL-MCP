@@ -77,6 +77,35 @@ const USAGE =
   "  --allow-writes-for <alias>  repetible; habilita escritura solo en esa conexion (multi-BD)\n" +
   "  --allow-sql-dir <carpeta>    repetible; carpetas extra para execute_sql_file";
 
+/**
+ * El fichero del servidor que hay que lanzar.
+ *
+ * Hay dos formas de estar instalado y las dos tienen que funcionar sin configurar nada:
+ *
+ *   - Empaquetado (lo que se publica): este fichero es bundle/start-mssql-mcp.cjs y el
+ *     servidor es su vecino bundle/ahora-sql-mcp.cjs. No hay node_modules, asi que
+ *     src/index.js no arrancaria: sus `require` no encontrarian nada.
+ *   - Desde el repositorio (desarrollo): este fichero es bin/start-mssql-mcp.js y el
+ *     servidor es ../src/index.js, con las dependencias instaladas al lado.
+ *
+ * Se decide mirando el disco y no con una variable de entorno ni un flag: asi no hay
+ * nada que recordar poner, y un paquete a medio construir se nota al arrancar en lugar
+ * de arrastrar un fallo raro hasta la primera consulta.
+ */
+function serverEntry() {
+  const bundled = path.join(__dirname, "ahora-sql-mcp.cjs");
+  if (fs.existsSync(bundled)) return bundled;
+
+  const fromSource = path.join(__dirname, "..", "src", "index.js");
+  if (fs.existsSync(fromSource)) return fromSource;
+
+  throw new Error(
+    "No se encuentra el servidor. Se ha buscado en:\n" +
+      `  ${bundled}\n  ${fromSource}\n` +
+      "Si trabajas desde el repositorio, ejecuta `npm run build`."
+  );
+}
+
 function parseArgs(argv) {
   const out = {
     connections: [],
@@ -1040,8 +1069,7 @@ function main() {
   }
   console.error("â”€".repeat(64));
 
-  const entry = path.join(__dirname, "..", "src", "index.js");
-  const child = spawn(process.execPath, [entry], { env, stdio: "inherit" });
+  const child = spawn(process.execPath, [serverEntry()], { env, stdio: "inherit" });
   // Sin escuchar 'error', un fallo al lanzar node (ruta mala, permisos, antivirus) llega
   // como evento sin oyente y tumba el wrapper con un volcado que no explica nada.
   child.on("error", (err) => {
@@ -1063,6 +1091,7 @@ function main() {
 if (require.main === module) main();
 
 module.exports = {
+  serverEntry,
   parseArgs,
   parseAdoConnectionString,
   normalizeAdoKey,

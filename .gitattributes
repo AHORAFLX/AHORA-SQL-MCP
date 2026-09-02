@@ -1,0 +1,8 @@
+# Ficheros generados por `npm run build`. Se commitean a proposito: son lo que se
+# ejecuta, y lo que permite que instalar el paquete no resuelva ningun arbol de
+# dependencias.
+#
+# -text  no normalizar saltos de linea: los escribe esbuild y no se editan a mano.
+# -diff  tratarlos como binarios al comparar: un diff de 4 MB de codigo generado no
+#        se lee, y ademas sepulta el diff real del resto del cambio en cualquier PR.
+bundle/*.cjs -text -diff linguist-generated=true

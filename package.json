@@ -21,36 +21,40 @@
   "license": "MIT",
   "author": "AHORA SC0",
   "private": true,
-  "main": "src/index.js",
+  "//main": "Apunta al paquete y no a src/index.js: en el paquete publicado no hay node_modules, asi que src/ no podria arrancar. npm incluye SIEMPRE el fichero de `main` en el tarball, y dejarlo en src/ colaba una entrada rota.",
+  "main": "./bundle/ahora-sql-mcp.cjs",
   "bin": {
-    "ahora-sql-mcp": "./src/index.js",
-    "start-mssql-mcp": "./bin/start-mssql-mcp.js",
-    "ahora-setup": "./installer/setup.js"
+    "ahora-sql-mcp": "./bundle/ahora-sql-mcp.cjs",
+    "start-mssql-mcp": "./bundle/start-mssql-mcp.cjs",
+    "ahora-setup": "./bundle/ahora-setup.cjs"
   },
   "files": [
-    "src/",
-    "bin/",
-    "installer/",
+    "bundle/",
     "README.md",
     "INSTALAR.md",
     "LICENSE"
   ],
   "scripts": {
+    "build": "node scripts/build-bundle.js",
+    "build:exe": "node installer/build-exe.js",
     "dev": "nodemon src/index.js",
     "integration": "node scripts/integration.js",
     "start": "node src/index.js",
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test \"test/*.test.js\"",
+    "verify:bundle": "node scripts/verify-bundle.js"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "mssql": "^11.0.1",
-    "zod": "^3.24.2"
-  },
+  "//dependencies": "Vacio a proposito. Todo lo que el servidor necesita en tiempo de ejecucion viaja YA DENTRO de bundle/, generado por `npm run build`. Asi `npm install` de este paquete -que es lo que hace npx al arrancar el MCP- no resuelve ni descarga nada: eran 166 paquetes y 91,8 s medidos con la cache en frio, y el cliente MCP corta a los 30 s. Las dependencias reales estan en devDependencies porque solo hacen falta para construir y para los tests, que corren contra src/.",
+  "dependencies": {},
   "devDependencies": {
     "@eslint/js": "^9.24.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "esbuild": "^0.28.2",
     "eslint": "^9.24.0",
     "globals": "^16.0.0",
+    "mssql": "^11.0.1",
     "nodemon": "^3.1.9",
-    "prettier": "^3.5.3"
+    "postject": "^1.0.0-alpha.6",
+    "prettier": "^3.5.3",
+    "zod": "^3.24.2"
   }
 }
