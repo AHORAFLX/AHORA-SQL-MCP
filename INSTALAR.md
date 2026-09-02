@@ -121,7 +121,7 @@ corresponda. Lo único que tienes que cambiar es la ruta del fichero de configur
     "ahora-sql": {
       "command": "node",
       "args": [
-        "C:/Users/TU_USUARIO/AppData/Local/AHORA-SQL-MCP/node_modules/@ahoraflx/sql-mcp/bin/start-mssql-mcp.js",
+        "C:/Users/TU_USUARIO/AppData/Local/AHORA-SQL-MCP/node_modules/@ahoraflx/sql-mcp/bundle/start-mssql-mcp.cjs",
         "--config-file", "C:/ruta/al/proyecto/Web.config",
         "--connection-name", "ConfConnectionString:config",
         "--connection-name", "DataConnectionString:data"
@@ -141,7 +141,7 @@ Igual, pero apuntando a la carpeta que contiene el `appsettings.json` (normalmen
     "ahora-sql": {
       "command": "node",
       "args": [
-        "C:/Users/TU_USUARIO/AppData/Local/AHORA-SQL-MCP/node_modules/@ahoraflx/sql-mcp/bin/start-mssql-mcp.js",
+        "C:/Users/TU_USUARIO/AppData/Local/AHORA-SQL-MCP/node_modules/@ahoraflx/sql-mcp/bundle/start-mssql-mcp.cjs",
         "--config-file", "C:/ruta/al/proyecto/Backend/conf",
         "--connection-name", "ConfConnectionString:config",
         "--connection-name", "DataConnectionString:data"
@@ -176,7 +176,7 @@ Los datos van en `env`, nunca en los argumentos: `.mcp.json` se commitea.
     "ahora-sql": {
       "command": "node",
       "args": [
-        "C:/Users/TU_USUARIO/AppData/Local/AHORA-SQL-MCP/node_modules/@ahoraflx/sql-mcp/bin/start-mssql-mcp.js",
+        "C:/Users/TU_USUARIO/AppData/Local/AHORA-SQL-MCP/node_modules/@ahoraflx/sql-mcp/bundle/start-mssql-mcp.cjs",
         "--from-env"
       ],
       "env": {
@@ -247,12 +247,32 @@ sabes el puerto, deja que lo haga el instalador guiado.
 | `Permission denied ... Blocked by classifier` al usar una herramienta | Es la capa de permisos de Claude Code en modo auto, no el MCP. El instalador puede añadir las reglas; o añádelas a mano en `permissions.allow` de `.claude/settings.local.json`: `mcp__ahora-sql__list_*`, `mcp__ahora-sql__describe_*`, `mcp__ahora-sql__execute_read_query` |
 | `No se encontro la cadena de conexion`, con el nombre correcto | .NET Core: la cadena está vacía en `appsettings.json` y tu entorno no es `Development`. Añade `"--environment", "<nombre>"`. El error te dice en qué ficheros ha buscado |
 | El error lista nombres de conexión distintos a los que pusiste | Los nombres varían entre proyectos. Usa los que te lista |
-| Timeout al conectar, con instancia nombrada **local** | El wrapper intenta averiguar el puerto solo. Si aun así falla, esa instancia no tiene **TCP/IP a la escucha**: habilítalo en SQL Server Configuration Manager (Protocolos de `<INSTANCIA>` → TCP/IP) y reinicia el servicio. **Que SSMS conecte no lo descarta**: en local SSMS usa memoria compartida y este driver es solo TCP |
+| Timeout al conectar, con instancia nombrada **local** | El servidor intenta averiguar el puerto solo, en la primera consulta. Si aun así falla, esa instancia no tiene **TCP/IP a la escucha**: habilítalo en SQL Server Configuration Manager (Protocolos de `<INSTANCIA>` → TCP/IP) y reinicia el servicio. **Que SSMS conecte no lo descarta**: en local SSMS usa memoria compartida y este driver es solo TCP |
 | Timeout con instancia nombrada **remota** | Ahí no se puede preguntar al sistema: hace falta el servicio **SQL Browser** arrancado en ese servidor, o pasar el puerto con `"--port", "<alias>:<puerto>"` |
 | `Integrated Security=True` | No está soportado: la cadena necesita usuario y contraseña |
+| `CONNECT_TIMEOUT: MCP server ahora-sql connection timed out after 30000ms` | Tu `.mcp.json` arranca el servidor con `npx` y `--package=github:…`, que resuelve el paquete contra GitHub en cada arranque. Medido: 95 s en frío, y en caliente de 8 s a 76 s según la toma. Vuelve a lanzar el instalador: deja el `.mcp.json` apuntando al binario instalado y el arranque baja a ~0,3 s |
 
 Para cualquier otra cosa, pide al agente que use la skill **`setup-mcp-sql`**: te hace las preguntas
 y te genera el `.mcp.json`.
+
+### Si necesitas desatascarlo hoy mismo
+
+Dos paliativos. **Suben el techo en lugar de bajar el coste**, así que sirven para salir del paso
+en una máquina concreta, no como configuración a repartir:
+
+- `MCP_TIMEOUT` amplía el límite de arranque de Claude Code, en milisegundos (por defecto 30.000).
+  Mientras el cliente espera, el agente no tiene estas herramientas: un límite de dos minutos
+  convierte un fallo visible en dos minutos de arranque en silencio.
+
+  ```bash
+  MCP_TIMEOUT=120000 claude
+  ```
+
+- `--prefer-offline` en los argumentos de `npx`, para que npm use lo que ya tenga en la caché y
+  solo vaya a la red a por lo que falte. Ayuda a partir del segundo arranque; en el primero de
+  cada máquina no hay nada en la caché y no cambia nada.
+
+El arreglo de verdad es que el `.mcp.json` no lleve `npx`.
 
 ---
 
