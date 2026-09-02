@@ -1,4 +1,5 @@
 const { z } = require("zod");
+const { revealAll, isProtected } = require("./secrets");
 
 const dbConnectionSchema = z.object({
   server: z.string().min(1),
@@ -58,25 +59,51 @@ function buildConfig({
   return dbConnectionSchema.parse(cfg);
 }
 
-function loadConfigsFromEnv(env = process.env) {
+/**
+ * Las contrasenas, ya en claro, en el mismo orden que se piden.
+ *
+ * El wrapper ya no descifra antes de arrancar el servidor: pasa el token tal cual en
+ * MSSQL_*_PASSWORD y se abre aqui, que es la primera vez que alguien necesita conectar
+ * de verdad. `revealAll` deja intacto lo que no lleva marca de cifrado, asi que una
+ * contrasena en claro (--from-env, o un fichero de credenciales de una version anterior)
+ * pasa por aqui sin coste ninguno.
+ *
+ * En un solo lote y no una por una porque cada descifrado con DPAPI cuesta un arranque de
+ * PowerShell (~0,5 s medidos): con multi-BD, uno por conexion.
+ */
+function revealPasswords(values, reveal) {
+  // Sin nada cifrado no se llama al descifrador: asi el camino habitual no depende de
+  // que PowerShell exista ni de que DPAPI este disponible.
+  if (!values.some((v) => typeof v === "string" && isProtected(v))) return values;
+  return reveal(values);
+}
+
+function loadConfigsFromEnv(env = process.env, { reveal = revealAll } = {}) {
   const multiKeys = Object.keys(env).filter((k) =>
     /^MSSQL_(.+)_DATABASE$/.test(k)
   );
 
   if (multiKeys.length > 0) {
+    const entries = multiKeys.map((key) => {
+      const [, raw] = key.match(/^MSSQL_(.+)_DATABASE$/);
+      return { key, dbKey: raw.toLowerCase(), p: `MSSQL_${raw}_` };
+    });
+
+    const passwords = revealPasswords(
+      entries.map(({ p }) => env[`${p}PASSWORD`] || env.MSSQL_PASSWORD),
+      reveal
+    );
+
     const configs = {};
     const errors = [];
-    for (const key of multiKeys) {
-      const [, raw] = key.match(/^MSSQL_(.+)_DATABASE$/);
-      const dbKey = raw.toLowerCase();
-      const p = `MSSQL_${raw}_`;
+    entries.forEach(({ key, dbKey, p }, i) => {
       try {
         configs[dbKey] = buildConfig({
           server: env[`${p}SERVER`] || env.MSSQL_SERVER,
           port: env[`${p}PORT`],
           instanceName: env[`${p}INSTANCE_NAME`] || env.MSSQL_INSTANCE_NAME,
           user: env[`${p}USER`] || env.MSSQL_USER,
-          password: env[`${p}PASSWORD`] || env.MSSQL_PASSWORD,
+          password: passwords[i],
           database: env[key],
           encrypt: env[`${p}ENCRYPT`] || env.MSSQL_ENCRYPT,
           trustServerCertificate:
@@ -86,7 +113,7 @@ function loadConfigsFromEnv(env = process.env) {
       } catch (err) {
         errors.push(`${dbKey}: ${err.message}`);
       }
-    }
+    });
     if (Object.keys(configs).length === 0) {
       throw new Error(
         `[config] No valid database configuration found. ${errors.join("; ")}`
@@ -107,7 +134,7 @@ function loadConfigsFromEnv(env = process.env) {
           port: env.MSSQL_PORT,
           instanceName: env.MSSQL_INSTANCE_NAME,
           user: env.MSSQL_USER,
-          password: env.MSSQL_PASSWORD,
+          password: revealPasswords([env.MSSQL_PASSWORD], reveal)[0],
           database: env.MSSQL_DATABASE,
           encrypt: env.MSSQL_ENCRYPT,
           trustServerCertificate: env.MSSQL_TRUST_SERVER_CERTIFICATE,

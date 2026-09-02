@@ -90,3 +90,69 @@ test("port is coerced to number", () => {
   });
   assert.equal(configs.maindb.port, 1433);
 });
+
+// -- descifrado perezoso de la contrasena --
+//
+// El wrapper ya no descifra antes de arrancar: manda el token en MSSQL_*_PASSWORD y se
+// abre aqui, en el primer uso. Estos tests fijan las tres cosas que eso exige: que se
+// abra, que no se llame al descifrador cuando no hace falta, y que un solo lote cubra
+// todas las conexiones.
+
+test("una contrasena cifrada se descifra al construir la configuracion", () => {
+  const { protect } = require("../src/secrets");
+  const token = protect("clave-en-claro");
+  const { configs } = loadConfigsFromEnv({
+    MSSQL_SERVER: "s",
+    MSSQL_USER: "u",
+    MSSQL_PASSWORD: token,
+    MSSQL_DATABASE: "d",
+  });
+  assert.equal(configs.maindb.password, "clave-en-claro");
+});
+
+test("sin nada cifrado no se llama al descifrador", () => {
+  // Importa porque descifrar lanza PowerShell: el camino de --from-env con la
+  // contrasena en claro no puede depender de que DPAPI este disponible.
+  let llamadas = 0;
+  const reveal = (vals) => {
+    llamadas++;
+    return vals;
+  };
+  const { configs } = loadConfigsFromEnv(
+    {
+      MSSQL_SERVER: "s",
+      MSSQL_USER: "u",
+      MSSQL_PASSWORD: "en-claro",
+      MSSQL_DATABASE: "d",
+    },
+    { reveal }
+  );
+  assert.equal(llamadas, 0);
+  assert.equal(configs.maindb.password, "en-claro");
+});
+
+test("multi-BD: un solo lote de descifrado para todas las conexiones", () => {
+  // Uno por conexion serian tantos arranques de PowerShell como bases de datos.
+  const { protectAll } = require("../src/secrets");
+  const [a, b] = protectAll(["clave-a", "clave-b"]);
+  let lotes = 0;
+  const reveal = (vals) => {
+    lotes++;
+    const { revealAll } = require("../src/secrets");
+    return revealAll(vals);
+  };
+  const { configs } = loadConfigsFromEnv(
+    {
+      MSSQL_SERVER: "s",
+      MSSQL_USER: "u",
+      MSSQL_CONFIG_DATABASE: "Conf",
+      MSSQL_CONFIG_PASSWORD: a,
+      MSSQL_DATA_DATABASE: "Datos",
+      MSSQL_DATA_PASSWORD: b,
+    },
+    { reveal }
+  );
+  assert.equal(lotes, 1, "un unico lote, no uno por conexion");
+  assert.equal(configs.config.password, "clave-a");
+  assert.equal(configs.data.password, "clave-b");
+});
