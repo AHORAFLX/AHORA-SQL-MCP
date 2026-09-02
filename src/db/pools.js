@@ -1,4 +1,4 @@
-const sqlLib = require("mssql");
+const { loadDriver } = require("./driver");
 const {
   resolveEndpoint,
   invalidateEndpoint,
@@ -111,7 +111,7 @@ function discard(dbKey, entry) {
  * pool nuevo todavia esta conectando, y mirarlo ahi haria que dos llamadas concurrentes
  * se tirasen la una a la otra el pool que acaba de crear.
  */
-async function getPool(dbKey, config, driver = sqlLib) {
+async function getPool(dbKey, config, driver = loadDriver()) {
   const existing = pools.get(dbKey);
   if (existing && !existing.broken) return existing.promise;
   if (existing) discard(dbKey, existing);

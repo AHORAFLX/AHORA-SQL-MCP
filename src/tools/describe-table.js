@@ -1,5 +1,5 @@
 const { z } = require("zod");
-const sql = require("mssql");
+const { loadDriver } = require("../db/driver");
 const { getConfig } = require("../config");
 const { getPool } = require("../db/pools");
 const { runRead, splitTableIdentifier } = require("../db/safety");
@@ -26,6 +26,7 @@ const outputShape = {
 };
 
 async function handler({ dbKey, table }, extra) {
+  const sql = loadDriver();
   const { dbKey: actualKey, config } = getConfig(dbKey);
   const { schema, table: tableName } = splitTableIdentifier(table);
   const pool = await getPool(actualKey, config);
