@@ -99,7 +99,10 @@ function runDpapi(method, inputs, { exec = execFileSync } = {}) {
       input: `${inputs.join("\n")}\n`,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
-      timeout: 15000,
+      // 5 segundos, no 15: descifrar son ~0,5 s medidos, y esto corre en el arranque del
+      // wrapper, donde el cliente MCP esta contando sus 30 segundos hacia el saludo. Un
+      // tope de 15 se comia la mitad del presupuesto sin dar ninguna opcion de arreglo.
+      timeout: 5000,
       windowsHide: true,
     }
   );

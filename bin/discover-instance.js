@@ -9,7 +9,7 @@
  *
  * Aqui se pregunta al sistema, que no necesita privilegios: se localiza el proceso
  * del servicio de esa instancia y se mira en que puerto y en que direcciones esta
- * escuchando. Se hace EN CADA ARRANQUE, no se escribe en la configuracion, y por eso
+ * escuchando. Se hace EN CADA PROCESO, no se escribe en la configuracion, y por eso
  * aguanta que el puerto sea dinamico y cambie al reiniciar.
  *
  * Que un puerto este abierto no significa que sirva: al proceso de una instancia se le han
@@ -21,11 +21,19 @@
  * la loopback: en ese caso conectarse al nombre del equipo falla aunque el puerto sea
  * el correcto, y hay que usar 127.0.0.1 o ::1.
  *
- * COSTE: preguntar cuesta un arranque de PowerShell mas dos consultas CIM, unos 2
- * segundos, y el wrapper lo hace ANTES de levantar el servidor MCP, asi que ese tiempo
- * se lo come el cliente esperando el saludo `initialize`. Su limite son 30 segundos
- * por defecto (MCP_TIMEOUT), y al agotarse descarta el servidor entero: las tools no
- * llegan a aparecer. De ahi las dos precauciones de aqui: se pregunta por TODAS las
+ * COSTE: preguntar cuesta un arranque de PowerShell mas dos consultas CIM. Medido en la
+ * maquina de desarrollo son 3,5-4,5 segundos, no los ~2 que se estimaron al escribir
+ * esto. Ese tiempo se pagaba en el wrapper, ANTES de levantar el servidor MCP, asi que
+ * se lo comia el cliente esperando el saludo `initialize`: con 30 segundos de limite por
+ * defecto (MCP_TIMEOUT) y el servidor entero descartado al agotarse, las tools no
+ * llegaban a aparecer. De ahi el sintoma "a veces hay que reiniciar el MCP": el reinicio
+ * caia dentro del minuto de cache, y el segundo arranque costaba 0 ms.
+ *
+ * Por eso ya no se pregunta al arrancar. Lo hace el servidor en el PRIMER USO de la
+ * conexion (src/db/endpoint.js), fuera del camino critico del saludo, con la variante
+ * `...Async` para no bloquear el bucle de eventos mientras PowerShell responde.
+ *
+ * Siguen en pie las dos precauciones que abaratan el sondeo: se pregunta por TODAS las
  * instancias en una sola invocacion, de modo que el coste no crece con el numero de
  * conexiones, y hay una cache corta entre procesos para que varios MCP arrancando a la
  * vez no repitan cada uno el mismo sondeo.
@@ -33,7 +41,7 @@
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
-const { execFileSync } = require("child_process");
+const { execFile, execFileSync } = require("child_process");
 
 /**
  * Fichero de cache de puertos, compartido por todos los MCP de este usuario.
@@ -59,6 +67,16 @@ const CACHE_TTL_MS = 60_000;
  * la reutilizaba, con lo que la version nueva parecia igual de rota que la vieja.
  */
 const CACHE_VERSION = 2;
+
+/**
+ * Tope de tiempo de la invocacion a PowerShell.
+ *
+ * Eran 15 segundos, la mitad del presupuesto del cliente MCP, y no compraban nada: si el
+ * sondeo no ha contestado en 5 el arranque ya va mal, y al agotarse se degrada solo -se
+ * deja la instancia nombrada y que lo intente el SQL Browser-, asi que esperar mas solo
+ * alarga el fallo.
+ */
+const QUERY_TIMEOUT_MS = 5000;
 
 /** Nombres que se refieren a esta misma maquina. */
 function isLocalHost(host) {
@@ -94,10 +112,10 @@ function asList(value) {
  * todas las conexiones del equipo, asi que llamarla una vez por instancia era justo lo
  * que hacia crecer el coste con el numero de conexiones.
  *
- * El sondeo TDS va aqui dentro, y no en Node con el modulo `net`, para que todo esto siga
- * siendo sincrono: el wrapper lo llama sin `await` y volverlo asincrono arrastraria tambien
- * a la sonda del instalador. PowerShell ya esta arrancado y pagado, y sondear un puerto son
- * dos milisegundos, asi que aprovechar esta misma invocacion es lo mas barato que hay.
+ * El sondeo TDS va aqui dentro, y no en Node con el modulo `net`, para que la variante
+ * sincrona siga existiendo: la usa la sonda del instalador, donde no hay bucle de eventos
+ * que respetar. PowerShell ya esta arrancado y pagado, y sondear un puerto son dos
+ * milisegundos, asi que aprovechar esta misma invocacion es lo mas barato que hay.
  */
 function buildScript(names) {
   const list = names.map((n) => `'${n}'`).join(",");
@@ -189,15 +207,18 @@ $out | ConvertTo-Json -Depth 5 -Compress
  * no crece con el numero de conexiones, que es lo que hay que garantizar para no
  * agotar el MCP_TIMEOUT del cliente.
  */
-function queryWindowsInstances(instanceNames, { exec = execFileSync } = {}) {
-  const names = [...new Set(asList(instanceNames).map(String))].filter(isSafeInstanceName);
-  if (!names.length) return {};
+/** Los nombres por los que tiene sentido preguntar, sin repetidos. */
+function askableNames(instanceNames) {
+  return [...new Set(asList(instanceNames).map(String))].filter(isSafeInstanceName);
+}
 
-  const out = exec(
-    "powershell",
-    ["-NoProfile", "-NonInteractive", "-Command", buildScript(names)],
-    { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 15000 }
-  );
+/** Los argumentos de PowerShell, iguales para la via sincrona y la asincrona. */
+function powershellArgs(names) {
+  return ["-NoProfile", "-NonInteractive", "-Command", buildScript(names)];
+}
+
+/** Lo que contesto PowerShell, indexado por nombre de instancia. */
+function parseInstances(names, out) {
   const parsed = JSON.parse(String(out).trim() || "{}");
   // Las claves de una hashtable de PowerShell no distinguen mayusculas, y los nombres
   // de instancia tampoco, asi que la busqueda no puede ser sensible a ellas.
@@ -215,6 +236,46 @@ function queryWindowsInstances(instanceNames, { exec = execFileSync } = {}) {
     };
   }
   return result;
+}
+
+function queryWindowsInstances(instanceNames, { exec = execFileSync } = {}) {
+  const names = askableNames(instanceNames);
+  if (!names.length) return {};
+
+  const out = exec("powershell", powershellArgs(names), {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: QUERY_TIMEOUT_MS,
+  });
+  return parseInstances(names, out);
+}
+
+/** `execFile` con forma de promesa, sin arrastrar `util.promisify` a las pruebas. */
+function execFileAsync(file, args, options) {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, options, (err, stdout) =>
+      err ? reject(err) : resolve(stdout)
+    );
+  });
+}
+
+/**
+ * Igual que `queryWindowsInstances`, sin bloquear el bucle de eventos.
+ *
+ * Es la que usa el servidor MCP. La version sincrona detiene el proceso los cuatro
+ * segundos que tarda PowerShell, y dentro del servidor eso significa dejar de atender
+ * el canal JSON-RPC: el cliente no distingue "pensando" de "colgado".
+ */
+async function queryWindowsInstancesAsync(instanceNames, { execAsync = execFileAsync } = {}) {
+  const names = askableNames(instanceNames);
+  if (!names.length) return {};
+
+  const out = await execAsync("powershell", powershellArgs(names), {
+    encoding: "utf8",
+    timeout: QUERY_TIMEOUT_MS,
+    windowsHide: true,
+  });
+  return parseInstances(names, out);
 }
 
 /** Igual que `queryWindowsInstances`, para una sola instancia. */
@@ -342,6 +403,53 @@ function writeCache(file, data) {
 }
 
 /**
+ * Lo que se sabe ya y lo que hay que preguntar.
+ *
+ * Separado del sondeo para que la via sincrona y la asincrona compartan exactamente la
+ * misma politica de cache, en lugar de tener cada una su copia.
+ *
+ * `refresh` ignora los aciertos de cache pero NO tira el fichero: lo que hay de otras
+ * instancias se conserva y se vuelve a escribir. Es lo que pide el servidor cuando una
+ * conexion que funcionaba deja de funcionar — ahi la entrada cacheada es justo la
+ * sospechosa, y reutilizarla seria volver a fallar igual durante un minuto.
+ */
+function discoveryPlan(instanceNames, options) {
+  const names = [...new Set(asList(instanceNames).filter(Boolean).map(String))];
+  const now = options.now || Date.now();
+  const cacheFile = options.cacheFile;
+  const cache = cacheFile ? readCache(cacheFile, now) : {};
+
+  const found = {};
+  const missing = [];
+  for (const name of names) {
+    const hit = options.refresh ? undefined : cache[name.toLowerCase()];
+    if (hit) {
+      found[name] = hit.found
+        ? { port: String(hit.found.port), address: hit.found.address || undefined }
+        : null;
+    } else {
+      missing.push(name);
+    }
+  }
+
+  return { names, now, cacheFile, cache, found, missing };
+}
+
+/** Aplica al plan lo que ha contestado el sistema y deja la cache al dia. */
+function applyDiscovery(plan, info) {
+  for (const name of plan.missing) {
+    plan.found[name] = chooseEndpoint(info[name]) || null;
+    plan.cache[name.toLowerCase()] = {
+      v: CACHE_VERSION,
+      at: plan.now,
+      found: plan.found[name],
+    };
+  }
+  if (plan.cacheFile) writeCache(plan.cacheFile, plan.cache);
+  return plan.found;
+}
+
+/**
  * Puerto (y direccion si hace falta) de varias instancias locales, en una sola
  * consulta al sistema. Devuelve un objeto indexado por nombre; las instancias que no
  * se han podido averiguar quedan a `null`.
@@ -352,41 +460,33 @@ function writeCache(file, data) {
  */
 function discoverLocalInstances(instanceNames, options = {}) {
   if ((options.platform || process.platform) !== "win32") return {};
-  const names = [...new Set(asList(instanceNames).filter(Boolean).map(String))];
-  if (!names.length) return {};
+  const plan = discoveryPlan(instanceNames, options);
+  if (!plan.names.length) return {};
+  if (!plan.missing.length) return plan.found;
 
-  const now = options.now || Date.now();
-  const cacheFile = options.cacheFile;
-  const cache = cacheFile ? readCache(cacheFile, now) : {};
-
-  const found = {};
-  const missing = [];
-  for (const name of names) {
-    const hit = cache[name.toLowerCase()];
-    if (hit) {
-      found[name] = hit.found
-        ? { port: String(hit.found.port), address: hit.found.address || undefined }
-        : null;
-    } else {
-      missing.push(name);
-    }
+  let info;
+  try {
+    info = queryWindowsInstances(plan.missing, options);
+  } catch {
+    info = {}; // sin PowerShell, o consulta agotada: no se pudo averiguar
   }
+  return applyDiscovery(plan, info);
+}
 
-  if (missing.length) {
-    let info;
-    try {
-      info = queryWindowsInstances(missing, options);
-    } catch {
-      info = {}; // sin PowerShell, o consulta agotada: no se pudo averiguar
-    }
-    for (const name of missing) {
-      found[name] = chooseEndpoint(info[name]) || null;
-      cache[name.toLowerCase()] = { v: CACHE_VERSION, at: now, found: found[name] };
-    }
-    if (cacheFile) writeCache(cacheFile, cache);
+/** Igual que `discoverLocalInstances`, sin bloquear el bucle de eventos. */
+async function discoverLocalInstancesAsync(instanceNames, options = {}) {
+  if ((options.platform || process.platform) !== "win32") return {};
+  const plan = discoveryPlan(instanceNames, options);
+  if (!plan.names.length) return {};
+  if (!plan.missing.length) return plan.found;
+
+  let info;
+  try {
+    info = await queryWindowsInstancesAsync(plan.missing, options);
+  } catch {
+    info = {}; // sin PowerShell, o consulta agotada: no se pudo averiguar
   }
-
-  return found;
+  return applyDiscovery(plan, info);
 }
 
 /** Puerto (y direccion si hace falta) de una instancia local. */
@@ -454,6 +554,7 @@ module.exports = {
   DEFAULT_CACHE_FILE,
   CACHE_TTL_MS,
   CACHE_VERSION,
+  QUERY_TIMEOUT_MS,
   tdsVerdict,
   isLocalHost,
   isSafeInstanceName,
@@ -462,8 +563,10 @@ module.exports = {
   chooseEndpoint,
   discoverLocalInstance,
   discoverLocalInstances,
+  discoverLocalInstancesAsync,
   queryWindowsInstance,
   queryWindowsInstances,
+  queryWindowsInstancesAsync,
   instanceToDiscover,
   withDiscoveredPort,
 };
