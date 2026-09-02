@@ -64,6 +64,7 @@ test("buildArgs: orden y forma de los argumentos", () => {
   });
   assert.deepEqual(args, [
     "--yes",
+    "--prefer-offline",
     `--package=${PKG_SPEC}`,
     "start-mssql-mcp",
     "--config-file",
@@ -88,7 +89,8 @@ test("buildArgs: sin alias, sin entorno, sin escritura y sin carpetas extra", ()
     allowWrites: false,
     sqlDirs: [],
   });
-  assert.deepEqual(args.slice(3), [
+  // slice(4): --yes, --prefer-offline, --package=... y start-mssql-mcp van delante.
+  assert.deepEqual(args.slice(4), [
     "--config-file",
     "C:/proy/Web.config",
     "--connection-name",

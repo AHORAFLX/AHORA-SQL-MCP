@@ -5,8 +5,12 @@
  *   node installer/build-exe.js
  *
  * Usa las SEA (Single Executable Applications) que trae Node de serie. esbuild y
- * postject se invocan con npx y NO se anaden a las dependencias del repo: solo
- * hacen falta para construir, nunca para ejecutar.
+ * postject son devDependencies: hacen falta para construir, nunca para ejecutar, y por
+ * eso no entran en el paquete que se publica. Se siguen invocando con `npx`, que resuelve
+ * primero el binario local de node_modules, asi que construir no depende de la red.
+ *
+ * Ojo: esto BORRA dist/ al empezar. El paquete del servidor vive en bundle/, que es otra
+ * carpeta a proposito, para que construir el .exe no se lo lleve por delante.
  *
  * El .exe lleva el runtime de Node embebido, asi que pesa lo que pese node.exe
  * (~110 MB). No se autofirma: en maquinas con SmartScreen o antivirus estrictos
