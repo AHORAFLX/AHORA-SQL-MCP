@@ -53,7 +53,7 @@ const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
 const { instanceToDiscover } = require("./discover-instance");
-const { revealAll } = require("../src/secrets");
+const { isProtected } = require("../src/secrets");
 
 const USAGE =
   "Uso â€” elige UNA fuente de conexion:\n" +
@@ -643,10 +643,30 @@ function readCredentialsFile(filePath) {
     throw new Error(`${filePath} no declara ninguna conexion dentro de "connections".`);
   }
 
-  // Todas de una vez: descifrar cuesta un arranque de PowerShell, y hacerlo por
-  // conexion es justo lo que agota el MCP_TIMEOUT del cliente.
-  const passwords = revealAll(
-    raws.map(({ raw }) => (raw.passwordEnc === undefined ? raw.password : raw.passwordEnc))
+  // Aqui NO se descifra. El texto cifrado se pasa tal cual, y lo abre el servidor en el
+  // primer uso de la conexion (src/config.js). Descifrar cuesta un arranque de PowerShell
+  // -505-536 ms medidos- y se pagaba en este punto, antes de que el servidor existiera,
+  // con el cliente MCP contando hacia su CONNECT_TIMEOUT. Es tiempo que se gastaba
+  // SIEMPRE, incluso con la cache de npm caliente y la base de datos al lado.
+  //
+  // El servidor recibe el token en la misma variable MSSQL_*_PASSWORD de siempre: no hay
+  // un contrato nuevo, porque `revealAll` deja pasar sin tocar lo que no esta cifrado, y
+  // por eso --from-env con la contrasena en claro sigue funcionando igual.
+  //
+  // Lo que si se comprueba aqui es la FORMA del token, que es gratis (no lanza
+  // PowerShell): asi un fichero corrupto o cifrado con otro esquema sigue fallando al
+  // arrancar, con su mensaje, en lugar de esperar a la primera consulta.
+  for (const { alias, raw } of raws) {
+    if (raw.passwordEnc !== undefined && !isProtected(raw.passwordEnc)) {
+      throw new Error(
+        `[${alias || "credenciales"}] el campo passwordEnc de ${filePath} no tiene una ` +
+          "marca de cifrado reconocible. Vuelve a ejecutar el instalador."
+      );
+    }
+  }
+
+  const passwords = raws.map(({ raw }) =>
+    raw.passwordEnc === undefined ? raw.password : raw.passwordEnc
   );
 
   return raws.map(({ alias, raw }, i) => ({

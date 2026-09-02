@@ -731,13 +731,17 @@ function writeCreds(doc) {
   return file;
 }
 
-test("readCredentialsFile: la contrasena cifrada se descifra al arrancar", () => {
+test("readCredentialsFile: el wrapper NO descifra; pasa el token tal cual", () => {
+  // El descifrado cuesta un arranque de PowerShell y aqui se pagaria antes de que el
+  // servidor exista, dentro del CONNECT_TIMEOUT del cliente. Lo abre el servidor en el
+  // primer uso (src/config.js); este test fija que el wrapper no lo toque.
   const { protect } = require("../src/secrets");
+  const token = protect("contrasena-secreta");
   const file = writeCreds({
     server: "PC",
     database: "BD",
     user: "sa",
-    passwordEnc: protect("contrasena-secreta"),
+    passwordEnc: token,
   });
   assert.ok(
     !fs.readFileSync(file, "utf8").includes("contrasena-secreta"),
@@ -745,12 +749,28 @@ test("readCredentialsFile: la contrasena cifrada se descifra al arrancar", () =>
   );
   const env = {};
   applyConnection(env, "MSSQL_", readCredentialsFile(file)[0].parts, "creds");
-  assert.equal(env.MSSQL_PASSWORD, "contrasena-secreta");
+  assert.equal(env.MSSQL_PASSWORD, token);
+  assert.ok(
+    !JSON.stringify(env).includes("contrasena-secreta"),
+    "la contrasena en claro no puede aparecer en el entorno que prepara el wrapper"
+  );
 });
 
-test("readCredentialsFile: multi-BD cifrado, cada clave con su conexion", () => {
-  // Descifrar va en bloque; si el orden se cruzara, cada BD arrancaria con la
-  // contrasena de la otra y el error no diria por que.
+test("readCredentialsFile: un passwordEnc sin marca reconocible falla al arrancar", () => {
+  // Comprobar la FORMA es gratis (no lanza PowerShell), asi que un fichero corrupto
+  // sigue fallando aqui y no en la primera consulta.
+  const file = writeCreds({
+    server: "PC",
+    database: "BD",
+    user: "sa",
+    passwordEnc: "esto-no-es-un-token",
+  });
+  assert.throws(() => readCredentialsFile(file), /marca de cifrado reconocible/);
+});
+
+test("readCredentialsFile: multi-BD cifrado, cada clave con su token", () => {
+  // Si el orden se cruzara, cada BD arrancaria con la contrasena de la otra y el error
+  // no diria por que.
   const { protectAll } = require("../src/secrets");
   const [conf, data] = protectAll(["clave-conf", "clave-data"]);
   const file = writeCreds({
@@ -763,8 +783,21 @@ test("readCredentialsFile: multi-BD cifrado, cada clave con su conexion", () => 
   const env = {};
   applyConnection(env, "MSSQL_CONFIG_", entries[0].parts, "config");
   applyConnection(env, "MSSQL_DATA_", entries[1].parts, "data");
-  assert.equal(env.MSSQL_CONFIG_PASSWORD, "clave-conf");
-  assert.equal(env.MSSQL_DATA_PASSWORD, "clave-data");
+  assert.equal(env.MSSQL_CONFIG_PASSWORD, conf);
+  assert.equal(env.MSSQL_DATA_PASSWORD, data);
+
+  // Y el servidor las abre en el orden correcto, que es lo que de verdad importa.
+  const { loadConfigsFromEnv, _resetForTests } = require("../src/config");
+  _resetForTests();
+  const { configs } = loadConfigsFromEnv({
+    ...env,
+    MSSQL_CONFIG_SERVER: "PC",
+    MSSQL_DATA_SERVER: "PC",
+    MSSQL_CONFIG_USER: "sa",
+    MSSQL_DATA_USER: "sa",
+  });
+  assert.equal(configs.config.password, "clave-conf");
+  assert.equal(configs.data.password, "clave-data");
 });
 
 test("readCredentialsFile: forma simple", () => {
