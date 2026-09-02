@@ -1,4 +1,4 @@
-const sqlLib = require("mssql");
+const { loadDriver } = require("./driver");
 
 function escapeIdentifier(name) {
   return `[${String(name).replace(/]/g, "]]")}]`;
@@ -60,7 +60,7 @@ function attachAbort(request, signal) {
  * statements will run in autocommit mode and persist. Defense-in-depth requires a
  * least-privilege SQL login.
  */
-async function runRead(pool, fn, { mssql = sqlLib, signal } = {}) {
+async function runRead(pool, fn, { mssql = loadDriver(), signal } = {}) {
   if (signal?.aborted) throw new Error("Request aborted");
   const transaction = new mssql.Transaction(pool);
   await transaction.begin(mssql.ISOLATION_LEVEL.READ_COMMITTED);
@@ -81,7 +81,7 @@ async function runRead(pool, fn, { mssql = sqlLib, signal } = {}) {
 async function runWrite(
   pool,
   fn,
-  { mssql = sqlLib, signal, writesEnabled: enabled = writesEnabled() } = {}
+  { mssql = loadDriver(), signal, writesEnabled: enabled = writesEnabled() } = {}
 ) {
   if (!enabled) {
     throw new Error(
@@ -109,7 +109,7 @@ async function runWrite(
 async function streamRead(
   pool,
   query,
-  { offset = 0, limit = 100, mssql = sqlLib, signal } = {}
+  { offset = 0, limit = 100, mssql = loadDriver(), signal } = {}
 ) {
   if (signal?.aborted) throw new Error("Request aborted");
   const transaction = new mssql.Transaction(pool);

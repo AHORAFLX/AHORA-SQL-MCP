@@ -1,6 +1,6 @@
 const crypto = require("crypto");
 const { z } = require("zod");
-const sqlLib = require("mssql");
+const { loadDriver } = require("../db/driver");
 
 const { getConfig } = require("../config");
 const { getPool } = require("../db/pools");
@@ -167,6 +167,7 @@ async function handler(
   { path: filePath, dbKey, dryRun = false, maxRowsPerBatch = 0 },
   extra
 ) {
+  const sqlLib = loadDriver();
   // Checked first, before any filesystem or pool access, so a read-only server
   // never even opens the file for a non-dry run.
   if (!dryRun && !writesEnabled(process.env, dbKey)) {
