@@ -16,11 +16,31 @@ const {
   aliasError,
   CLIENTS,
   PKG_SPEC,
+  toolVersion,
 } = require("../installer/setup");
 
 function tempDir(prefix) {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
 }
+
+// -- deteccion de herramientas cuando el shell del sistema no esta sano --
+
+test("toolVersion encuentra node sin depender del shell del sistema", () => {
+  // Node es el ejecutable que corre este test, asi que si no lo encuentra es que la
+  // deteccion esta atada al shell. Es lo que rompia el instalador en un equipo cuyo
+  // sh.exe de Git para Windows aborta: checkNode() concluia que no hay Node instalado
+  // y se negaba a seguir en una maquina que si lo tiene.
+  const v = toolVersion("node");
+  assert.match(
+    v || "",
+    /^v\d+\.\d+\.\d+/,
+    `esperaba la version de node y salio ${JSON.stringify(v)}`
+  );
+});
+
+test("toolVersion devuelve null si el ejecutable no esta, y no lanza", () => {
+  assert.equal(toolVersion("no-existe-este-ejecutable-de-ahora-sql"), null);
+});
 
 const sink = { write() {} };
 

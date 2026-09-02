@@ -75614,15 +75614,19 @@ var require_setup = __commonJS({
       return text.charCodeAt(0) === 65279 ? text.slice(1) : text;
     }
     function toolVersion(command) {
-      try {
-        return execFileSync2(command, ["--version"], {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-          shell: process.platform === "win32"
-        }).trim();
-      } catch {
-        return null;
+      const intentos = process.platform === "win32" ? [false, true] : [false];
+      for (const conShell of intentos) {
+        try {
+          const salida = execFileSync2(command, ["--version"], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+            shell: conShell
+          });
+          if (salida && salida.trim()) return salida.trim();
+        } catch {
+        }
       }
+      return null;
     }
     function checkNode() {
       const nodeVersion = toolVersion("node");
@@ -76264,6 +76268,7 @@ var require_setup = __commonJS({
       buildFlags,
       nodeCommand,
       npxCommand,
+      toolVersion,
       resolveServerEntry,
       writeClientConfig,
       pruneLegacyServer,
