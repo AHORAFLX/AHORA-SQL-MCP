@@ -322,6 +322,37 @@ test("write acepta mas de dos cadenas, cada una con su alias", async () => {
   });
 });
 
+test("write informa en la respuesta si la instalacion ha fallado y se ha caido a npx", async () => {
+  // Regresion: resolveServerEntry cae a npx en silencio si install() lanza (ver su
+  // comentario en installer/setup.js). Sin `command`/`installError` en la respuesta,
+  // el formulario terminaba "bien" y nadie se enteraba de que quedo la forma lenta.
+  const root = coreProject();
+  const failingInstall = () => {
+    throw new Error("git no encontrado en PATH\nmas detalle que no debe llegar al usuario");
+  };
+  await withGui(
+    async ({ call, origin }) => {
+      const det = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+      const core = det.files.find((f) => f.type === "core");
+      const r = await call("/api/write", {
+        origin,
+        body: {
+          projectDir: root,
+          configFile: core.path,
+          environment: det.defaultEnvironment,
+          connections: [{ name: "DataConnectionString", alias: "data" }],
+          profileKey: "local",
+          clients: ["claude"],
+        },
+      });
+      assert.equal(r.status, 200);
+      assert.equal(r.json.command, "npx");
+      assert.equal(r.json.installError, "git no encontrado en PATH");
+    },
+    { install: failingInstall }
+  );
+});
+
 test("write rechaza un alias que no cabe en un nombre de variable de entorno", async () => {
   // Sin esto la conexion desaparece sin ningun error: el servidor descubre las bases
   // de datos escaneando MSSQL_<ALIAS>_DATABASE.

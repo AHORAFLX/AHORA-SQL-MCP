@@ -186,7 +186,17 @@ function write(payload, { install } = {}) {
   // El servidor se instala una vez y la configuracion apunta ahi. Resolverlo con npx
   // en cada arranque costaba ~7 segundos, y ~48 la primera vez con un pin de version
   // nuevo, contra los 30 que espera el cliente MCP antes de descartar el servidor.
-  const serverEntry = resolveServerEntry(flags, install ? { install } : {});
+  //
+  // Si la instalacion falla, resolveServerEntry cae a la forma npx en silencio (ver
+  // su comentario en setup.js): sin capturar `installError` aqui, el formulario
+  // termina "bien" y deja escrito el .mcp.json lento sin que nadie se entere.
+  let installError;
+  const serverEntry = resolveServerEntry(flags, {
+    ...(install ? { install } : {}),
+    log: (r) => {
+      if (!r.ok) installError = r.error.message.split("\n")[0];
+    },
+  });
   const args = serverEntry.args;
 
   const written = [];
@@ -223,6 +233,7 @@ function write(payload, { install } = {}) {
     pruned,
     args,
     command: serverEntry.command,
+    installError,
     credentialsFile,
     permissions,
     production: profile.production,
@@ -764,6 +775,14 @@ $("btnWrite").onclick = async () => {
           "ese nombre chocaba con la extension nativa de SQL Server de VS Code.</span>" : "") +
         (w.others.length ? ' <span class="hint">· conservados: ' + esc(w.others.join(", ")) + "</span>" : "") +
         "</li>").join("") + "</ul>";
+    if (res.command === "npx") {
+      html += '<div class="banner warn">No se ha podido instalar el servidor en tu maquina' +
+        (res.installError ? " (" + esc(res.installError) + ")" : "") +
+        ". Se ha escrito una configuracion de reserva con <code>npx</code>: funciona, pero " +
+        "resuelve el paquete contra GitHub en cada arranque y puede tardar hasta un minuto o " +
+        "agotar la espera del cliente MCP. Vuelve a lanzar el instalador cuando el problema " +
+        "este resuelto para que quede la version rapida.</div>";
+    }
     if (res.credentialsFile) {
       html += "<p>Credenciales cifradas con tu cuenta de Windows, fuera del repositorio:</p><pre>" +
         esc(res.credentialsFile) + "</pre>";
