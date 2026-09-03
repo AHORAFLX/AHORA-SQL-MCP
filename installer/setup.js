@@ -978,6 +978,7 @@ module.exports = {
   PKG_SPEC,
   SERVER_NAME,
   LEGACY_SERVER_NAME,
+  MIN_NODE_MAJOR,
 };
 
 // DESPUES de module.exports, y no antes, porque el ciclo con gui.js es real: run()

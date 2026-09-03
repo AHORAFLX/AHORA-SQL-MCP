@@ -99,6 +99,22 @@ async function withGui(fn, { install = fakeInstall } = {}) {
   }
 }
 
+test("checkNodeOnMachine no lanza si la version pasada cumple el minimo", () => {
+  assert.doesNotThrow(() => gui.checkNodeOnMachine("v20.11.0"));
+});
+
+test("checkNodeOnMachine lanza si no hay Node en el PATH de la maquina", () => {
+  // Caso real: el .exe empaquetado lleva su propio Node embebido (SEA), asi que
+  // puede correr sin Node instalado, pero resolveServerEntry necesita el npm/npx
+  // DEL SISTEMA para instalar o arrancar el servidor. Sin esta comprobacion el
+  // formulario terminaba "bien" con un .mcp.json que ningun cliente puede arrancar.
+  assert.throws(() => gui.checkNodeOnMachine(null), /No hay Node\.js instalado/);
+});
+
+test("checkNodeOnMachine lanza si el Node de la maquina es mas antiguo que el minimo", () => {
+  assert.throws(() => gui.checkNodeOnMachine("v14.21.3"), /demasiado antiguo/);
+});
+
 test("el formulario rechaza las peticiones sin token", async () => {
   await withGui(async ({ call }) => {
     const r = await call("/api/detect", { body: { projectDir: "." }, token: null });

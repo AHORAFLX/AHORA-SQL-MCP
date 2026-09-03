@@ -40,9 +40,11 @@ const {
   pruneLegacyServer,
   suggestAliases,
   aliasError,
+  toolVersion,
   CLIENTS,
   PROFILES,
   SERVER_NAME,
+  MIN_NODE_MAJOR,
 } = require("./setup");
 const { credentialsPathFor, writeCredentialsFile } = require("./credentials");
 const { probeConnection } = require("./probe");
@@ -128,10 +130,39 @@ async function validate({ configFile, environment, names = [], manual }) {
 }
 
 /**
+ * Node DE LA MAQUINA, no el que ejecuta esto.
+ *
+ * El .exe empaquetado lleva su propio Node embebido (postject/SEA), asi que puede
+ * detectar el proyecto y probar la conexion sin que haya Node instalado en el
+ * equipo. Pero `resolveServerEntry` instala el runtime con `npm` del sistema y, si
+ * eso falla, cae a una configuracion que arranca con `npx` del sistema: sin Node en
+ * el PATH ninguna de las dos existe, y el formulario terminaria "bien" dejando un
+ * .mcp.json que ningun cliente puede arrancar. Se comprueba aqui, antes de tocar
+ * nada, en vez de dejar que resolveServerEntry falle y confiar en el aviso de la
+ * forma npx (ver mas abajo): con Node ausente esa forma tampoco funciona.
+ */
+function checkNodeOnMachine(version = toolVersion("node")) {
+  if (!version) {
+    throw new Error(
+      "No hay Node.js instalado en este equipo (no esta en el PATH). Instala Node " +
+        "LTS desde https://nodejs.org/ y vuelve a lanzar el instalador."
+    );
+  }
+  const major = Number(String(version).replace(/^v/, "").split(".")[0]);
+  if (Number.isFinite(major) && major < MIN_NODE_MAJOR) {
+    throw new Error(
+      `Node ${version} es demasiado antiguo. Hace falta ${MIN_NODE_MAJOR} o superior: ` +
+        "instala Node LTS desde https://nodejs.org/ y vuelve a lanzar el instalador."
+    );
+  }
+}
+
+/**
  * `install` es inyectable para poder probar el formulario sin instalar nada de la red:
  * en produccion es la instalacion de verdad, que ocurre una sola vez.
  */
 function write(payload, { install } = {}) {
+  checkNodeOnMachine();
   const {
     projectDir,
     configFile,
@@ -833,6 +864,7 @@ module.exports = {
   detect,
   validate,
   write,
+  checkNodeOnMachine,
   credentialsPathFor,
   writeCredentialsFile,
   renderPage,
