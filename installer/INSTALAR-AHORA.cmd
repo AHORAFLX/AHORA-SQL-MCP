@@ -40,7 +40,7 @@ pause
 REM OJO: este pin se sube a mano. No lo deriva nadie, asi que va en la lista de
 REM ficheros a tocar en cada `chore(release)`, junto a package.json, README.md
 REM e INSTALAR.md. Quedarse atras aqui instala una version vieja en silencio.
-npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.9.0 ahora-setup
+npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.10.0 ahora-setup
 
 echo.
 if errorlevel 1 (
