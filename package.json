@@ -39,6 +39,7 @@
     "build:exe": "node installer/build-exe.js",
     "dev": "nodemon src/index.js",
     "integration": "node scripts/integration.js",
+    "repro:pool": "node scripts/repro-pool-poisoning.js",
     "start": "node src/index.js",
     "test": "node --test \"test/*.test.js\"",
     "verify:bundle": "node scripts/verify-bundle.js"

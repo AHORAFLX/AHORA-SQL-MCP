@@ -609,6 +609,13 @@ desarrollador configure bien su `.mcp.json`.
   lugar de los resources.
 - **`execute_read_query` devuelve 100 filas por defecto** (máximo 1000). Si una skill necesita
   más, tiene que paginar con `offset`.
+- **`execute_write_query` es todo-o-nada.** Toda la consulta va en UNA transacción explícita, se
+  trocea por `GO` igual que un `.sql`, y si algo falla no se aplica nada. Las sentencias que SQL
+  Server no admite dentro de una transacción (`CREATE`/`ALTER DATABASE`, `BACKUP`, `RESTORE`,
+  `CREATE FULLTEXT INDEX`) necesitan `transactional: false`, que renuncia a la atomicidad —y,
+  porque un `Request` sobre el pool coge y suelta conexión en cada sentencia, también al estado
+  de sesión entre ellas—. En ese modo, si falla a media tanda, el error enumera exactamente qué
+  sentencias quedaron commiteadas.
 - **`execute_sql_file` ejecuta todo el script en una sola transacción.** No es solo por
   atomicidad: un `Request` creado sobre el pool coge y suelta conexión en cada batch, así que sin
   transacción los batches irían a conexiones distintas y se rompería la semántica de `GO` (el
@@ -618,12 +625,73 @@ desarrollador configure bien su `.mcp.json`.
 - **`execute_sql_file` rechaza un `USE` al principio de un batch.** Cambiaría la base de datos de
   una conexión que después vuelve al pool y contaminaría llamadas posteriores. La base de datos se
   elige con `dbKey`.
-- **Los `SET` del script sobreviven en la conexión.** Antes del commit se restauran los valores por
-  defecto de tedious (`ANSI_NULLS`, `QUOTED_IDENTIFIER` y compañía), pero es un repaso pragmático,
-  no un reset de conexión: un `SET` menos habitual puede quedar activo en esa conexión del pool.
+- **Los `SET` del script sobreviven al batch, pero no a la conexión.** Antes del commit se
+  restauran los valores por defecto de tedious (`ANSI_NULLS`, `QUOTED_IDENTIFIER` y compañía) como
+  repaso pragmático; lo que cierra el hueco de verdad es que **cada conexión se resetea al salir
+  del pool**, lo que devuelve las opciones SET a su estado inicial y tira las tablas temporales.
+  Ver «Higiene del pool» más abajo.
 - **Los `.sql` deben llevar BOM si no son UTF-8.** SSMS guarda en UTF-16LE con BOM, que se detecta
   y decodifica bien. Un UTF-16 **sin** BOM se rechaza con un error claro en lugar de mandar texto
   con NUL al servidor. Tope de tamaño: 2 MB, y 500 batches por fichero.
+
+---
+
+## Higiene del pool: transacciones huérfanas y timeouts por llamada
+
+Un pool reparte la **misma** conexión a llamadas que no tienen nada que ver entre sí, así que el
+estado que una deja pegado a la conexión lo hereda la siguiente. El caso que duele es una
+transacción abierta, y llegaba a pasar así:
+
+1. Una lectura se cancela —timeout del cliente, o el `AbortSignal` del cliente MCP—. `request.cancel()`
+   no mata nada de golpe: manda un paquete ATTENTION y espera el acuse del servidor.
+2. Mientras ese acuse no llega, el request sigue en vuelo, y **tedious serializa los requests de una
+   conexión**: el `ROLLBACK` de la transacción de lectura no se puede ni enviar. Fallaba con
+   `EREQINPROG` dentro de un `catch` vacío.
+3. La conexión volvía al pool con `@@TRANCOUNT = 1`.
+
+Medido contra SQL Server: cuatro sesiones `program_name='node-mssql'` durmiendo con
+`open_transaction_count = 1` entre 372 y 434 segundos, `sys.dm_exec_requests` vacío y un único lock
+`DATABASE` en modo `S` por sesión. **No bloquean a nadie**, y por eso no se ve como un bloqueo. El
+daño era el de después: llamadas posteriores y sin relación fallando de forma intermitente —según en
+qué conexión del pool cayeran—, con un `operation timed out for an unknown reason` que apunta al
+servidor y no dice nada.
+
+Lo peor no era ni eso. Una **lectura** que hereda la transacción se salva sola: su propio `ROLLBACK`
+deshace todo el `@@TRANCOUNT`, heredado incluido. Una **escritura** no: hace `BEGIN` sobre el 1 que
+hereda, el `COMMIT` lo baja a 1 otra vez, y el dato se queda dentro de una transacción ajena que
+nadie va a cerrar. La llamada contestaba `committed: true` y el dato no era durable — desde otra
+sesión no se veía. `scripts/repro-pool-poisoning.js` lo demuestra: con el saneado desactivado, la
+lectura de comprobación se queda bloqueada en el lock exclusivo del `INSERT`.
+
+Lo que hay ahora, por orden de lo que aporta:
+
+- **Cada conexión se sanea al SALIR del pool**, no al devolverla. Es un `validate` propio en tarn
+  (`config.pool.validate`, que mssql mezcla después de poner el suyo) que hace un reset de conexión
+  TDS: el servidor deshace cualquier transacción abierta, tira las tablas temporales y restaura las
+  opciones `SET`. Si la conexión no se deja resetear —o si el servidor sigue diciendo que tiene
+  transacción abierta— se rechaza, y tarn crea otra en su lugar. **No cuesta un viaje extra**:
+  sustituye al `SELECT 1` que mssql ya lanzaba por defecto. Con esto, una conexión quemada deja de
+  contaminar a las llamadas siguientes.
+- **Una conexión cuya cancelación o rollback ha fallado no vuelve al pool: se destruye.** La
+  cancelación se espera con un límite acotado (5 s), se comprueba `@@TRANCOUNT` en **esa** conexión,
+  y si no es 0 —o no se puede comprobar— la conexión se marca, se cierra (lo único que hace que el
+  servidor deshaga la transacción *ya*, en lugar de dejarla durmiendo) y se suelta para que el pool
+  recupere el hueco. Sin ese último paso cada fallo quemaría una plaza del pool para siempre, y al
+  agotarlas todo `acquire` posterior muere por timeout.
+- **El error del rollback ya no se traga.** En lugar de un timeout genérico, el mensaje dice que la
+  transacción de esa conexión no se pudo cerrar, con qué `@@TRANCOUNT` se quedó, que la conexión se
+  ha descartado y que hay que reintentar. Código de error `ETXNABANDONED`. El caso legítimo —un
+  `COMMIT` explícito dentro de la consulta del usuario, que cierra la transacción envolvente— sigue
+  sin ser un error: se sondea el `@@TRANCOUNT` y si es 0 no hay nada que reportar.
+- **`list_databases` publica `recycledConnections`** por `dbKey`: cuántas conexiones se han tirado al
+  sanearlas. Un contador que no se mueve descarta esta causa de un vistazo.
+
+Y el timeout, que era la otra mitad del problema: `requestTimeout` (30 s por defecto) es de **pool**,
+y no había forma de subirlo para una llamada. Un `DELETE` legítimo sobre una tabla concentradora con
+41 FK `ON DELETE CASCADE` no cabe en 30 s y, tal como estaba, no se podía ejecutar. `execute_read_query`
+y `execute_write_query` aceptan ahora **`timeoutMs` por llamada** (1.000–600.000 ms), que se aplica
+donde tedious lo lee de verdad (`request.timeout` del request de tedious, que mssql nunca llegaba a
+poner).
 
 ---
 
@@ -632,6 +700,15 @@ desarrollador configure bien su `.mcp.json`.
 ```bash
 npm test              # tests unitarios, sin base de datos
 npm run integration   # requiere una BD real; ver docs/REFERENCE.md
+npm run repro:pool    # requiere una BD real; reproduce el envenenamiento del pool
+```
+
+`repro:pool` es la reproducción del fallo descrito en «Higiene del pool»: envenena una conexión
+del pool a mano, comprueba en `sys.dm_exec_sessions` que no queda ninguna transacción huérfana y
+lanza 20 lecturas seguidas. Sin el saneado al adquirir, tres de sus comprobaciones fallan.
+
+```bash
+MSSQL_TEST_SERVER=localhost MSSQL_TEST_INSTANCE=SQL2022 MSSQL_TEST_USER=sa MSSQL_TEST_PASSWORD='...' npm run repro:pool
 ```
 
 Al subir versión, **comprueba que los nombres de las herramientas no han cambiado**: si cambian,

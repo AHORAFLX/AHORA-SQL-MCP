@@ -34,6 +34,29 @@ const dbKeyShape = {
     ),
 };
 
+// Bounds for the per-call `timeoutMs`. The pool-wide `requestTimeout` is 30 s, which is
+// not always enough: a legitimate DELETE on a hub table with 41 `ON DELETE CASCADE`
+// foreign keys does not fit, and with no per-call override there was no way to run it at
+// all. Bounded on both ends on purpose - below a second nothing real completes, and ten
+// minutes is already far past what a client will wait for.
+const MIN_TIMEOUT_MS = 1000;
+const MAX_TIMEOUT_MS = 600000;
+
+const timeoutMsShape = {
+  timeoutMs: z
+    .number()
+    .int()
+    .min(MIN_TIMEOUT_MS)
+    .max(MAX_TIMEOUT_MS)
+    .optional()
+    .describe(
+      `Per-call request timeout in milliseconds (${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS}). ` +
+        "Omit to use the server-wide default of 30000. Raise it for a statement that is " +
+        "legitimately slow (a cascading DELETE, a large index rebuild) rather than " +
+        "letting it be cancelled halfway."
+    ),
+};
+
 const paginationShape = {
   limit: z
     .number()
@@ -74,11 +97,14 @@ module.exports = {
   tableIdentifier,
   dbKeyShape,
   paginationShape,
+  timeoutMsShape,
   queryString,
   sqlFilePath,
   resourceUri,
   MAX_LIMIT,
   DEFAULT_LIMIT,
+  MIN_TIMEOUT_MS,
+  MAX_TIMEOUT_MS,
   MAX_QUERY_LEN,
   MAX_SQL_FILE_BYTES,
   MAX_BATCHES,

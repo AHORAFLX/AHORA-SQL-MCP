@@ -32203,6 +32203,7 @@ var require_package = __commonJS({
         "build:exe": "node installer/build-exe.js",
         dev: "nodemon src/index.js",
         integration: "node scripts/integration.js",
+        "repro:pool": "node scripts/repro-pool-poisoning.js",
         start: "node src/index.js",
         test: 'node --test "test/*.test.js"',
         "verify:bundle": "node scripts/verify-bundle.js"
@@ -101497,6 +101498,125 @@ var require_driver = __commonJS({
   }
 });
 
+// src/db/connections.js
+var require_connections = __commonJS({
+  "src/db/connections.js"(exports2, module2) {
+    var ACQUIRE_RESET_TIMEOUT_MS = 5e3;
+    var CLOSE_TIMEOUT_MS = 2e3;
+    function withTimeout(promise, ms, label) {
+      if (!ms || ms <= 0) return Promise.resolve(promise);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          const err = new Error(`${label} did not complete in ${ms}ms`);
+          err.code = "ETIMEOUT";
+          reject(err);
+        }, ms);
+        Promise.resolve(promise).then(
+          (value) => {
+            clearTimeout(timer);
+            resolve(value);
+          },
+          (err) => {
+            clearTimeout(timer);
+            reject(err);
+          }
+        );
+      });
+    }
+    function acquiredConnection(transaction) {
+      return transaction?._acquiredConnection || null;
+    }
+    function isReusable(connection) {
+      return Boolean(connection) && !connection.closed && !connection.hasError;
+    }
+    function hasOpenTransaction(connection) {
+      return connection?.inTransaction === true;
+    }
+    function resetConnection(connection, timeoutMs = ACQUIRE_RESET_TIMEOUT_MS) {
+      if (typeof connection?.reset !== "function") {
+        return Promise.resolve();
+      }
+      return withTimeout(
+        new Promise((resolve, reject) => {
+          try {
+            connection.reset((err) => err ? reject(err) : resolve());
+          } catch (err) {
+            reject(err);
+          }
+        }),
+        timeoutMs,
+        "connection reset"
+      );
+    }
+    function makeAcquireReset({
+      timeoutMs = ACQUIRE_RESET_TIMEOUT_MS,
+      onDiscard
+    } = {}) {
+      return function validateOnAcquire(connection) {
+        if (!isReusable(connection)) return false;
+        return resetConnection(connection, timeoutMs).then(
+          () => {
+            if (!hasOpenTransaction(connection)) return true;
+            onDiscard?.("open-transaction", connection);
+            return false;
+          },
+          (err) => {
+            onDiscard?.(err?.code || "reset-failed", connection);
+            return false;
+          }
+        );
+      };
+    }
+    function closeConnection(connection, timeoutMs = CLOSE_TIMEOUT_MS) {
+      if (!connection || connection.closed) return Promise.resolve();
+      return withTimeout(
+        new Promise((resolve) => {
+          try {
+            if (typeof connection.once === "function") {
+              connection.once("end", resolve);
+              connection.close();
+            } else {
+              connection.close();
+              resolve();
+            }
+          } catch {
+            resolve();
+          }
+        }),
+        timeoutMs,
+        "connection close"
+      ).catch(() => {
+      });
+    }
+    async function destroyConnection(pool, connection) {
+      if (!connection) return false;
+      try {
+        connection.hasError = true;
+      } catch {
+      }
+      const closed = closeConnection(connection);
+      try {
+        pool?.release?.(connection);
+      } catch {
+      }
+      await closed;
+      return true;
+    }
+    module2.exports = {
+      ACQUIRE_RESET_TIMEOUT_MS,
+      CLOSE_TIMEOUT_MS,
+      withTimeout,
+      acquiredConnection,
+      isReusable,
+      hasOpenTransaction,
+      resetConnection,
+      makeAcquireReset,
+      closeConnection,
+      destroyConnection
+    };
+  }
+});
+
 // bin/discover-instance.js
 var require_discover_instance = __commonJS({
   "bin/discover-instance.js"(exports2, module2) {
@@ -101910,6 +102030,7 @@ var require_endpoint = __commonJS({
 var require_pools = __commonJS({
   "src/db/pools.js"(exports2, module2) {
     var { loadDriver } = require_driver();
+    var { makeAcquireReset } = require_connections();
     var {
       resolveEndpoint,
       invalidateEndpoint,
@@ -101917,6 +102038,11 @@ var require_pools = __commonJS({
     } = require_endpoint();
     var pools = /* @__PURE__ */ new Map();
     var status = /* @__PURE__ */ new Map();
+    var recycled = /* @__PURE__ */ new Map();
+    function noteRecycled(dbKey, reason) {
+      const prev = recycled.get(dbKey) || { count: 0 };
+      recycled.set(dbKey, { count: prev.count + 1, lastReason: String(reason) });
+    }
     var STALE_ENDPOINT_CODES = /* @__PURE__ */ new Set([
       "ECONNRESET",
       "ECONNCLOSED",
@@ -101957,6 +102083,17 @@ var require_pools = __commonJS({
       entry.promise.then((pool) => pool.close()).catch(() => {
       });
     }
+    function withAcquireReset(config, dbKey) {
+      return {
+        ...config,
+        pool: {
+          ...config?.pool || {},
+          validate: makeAcquireReset({
+            onDiscard: (reason) => noteRecycled(dbKey, reason)
+          })
+        }
+      };
+    }
     async function getPool(dbKey, config, driver = loadDriver()) {
       const existing = pools.get(dbKey);
       if (existing && !existing.broken) return existing.promise;
@@ -101964,7 +102101,9 @@ var require_pools = __commonJS({
       const entry = { promise: null, broken: false };
       entry.promise = Promise.resolve().then(async () => {
         try {
-          const pool = new driver.ConnectionPool(await resolveEndpoint(dbKey, config));
+          const pool = new driver.ConnectionPool(
+            withAcquireReset(await resolveEndpoint(dbKey, config), dbKey)
+          );
           if (typeof pool.on === "function") {
             pool.on("error", (err) => {
               entry.broken = true;
@@ -101998,332 +102137,26 @@ var require_pools = __commonJS({
       );
     }
     function getConnectionStatus() {
-      return Object.fromEntries(status.entries());
+      return Object.fromEntries(
+        Array.from(status.entries()).map(([dbKey, entry]) => [
+          dbKey,
+          { ...entry, recycledConnections: recycled.get(dbKey)?.count || 0 }
+        ])
+      );
     }
     function _resetForTests() {
       pools.clear();
       status.clear();
+      recycled.clear();
       resetEndpoints();
     }
     module2.exports = {
       getPool,
+      withAcquireReset,
       STALE_ENDPOINT_CODES,
       closeAllPools: closeAllPools2,
       getConnectionStatus,
       _resetForTests
-    };
-  }
-});
-
-// src/db/safety.js
-var require_safety = __commonJS({
-  "src/db/safety.js"(exports2, module2) {
-    var { loadDriver } = require_driver();
-    function escapeIdentifier(name) {
-      return `[${String(name).replace(/]/g, "]]")}]`;
-    }
-    function splitTableIdentifier(identifier) {
-      if (!identifier.includes(".")) return { schema: null, table: identifier };
-      const parts = identifier.split(".");
-      if (parts.length !== 2 || !parts[0] || !parts[1]) {
-        throw new Error(
-          `Invalid table identifier '${identifier}'. Expected 'schema.table'.`
-        );
-      }
-      return { schema: parts[0], table: parts[1] };
-    }
-    function quoteTable(identifier) {
-      const { schema, table } = splitTableIdentifier(identifier);
-      return schema ? `${escapeIdentifier(schema)}.${escapeIdentifier(table)}` : escapeIdentifier(table);
-    }
-    function writesEnabled(env = process.env, dbKey) {
-      if (dbKey) {
-        const perDb = env[`MSSQL_${String(dbKey).toUpperCase()}_ENABLE_WRITES`];
-        if (perDb !== void 0) return String(perDb).toLowerCase() === "true";
-      }
-      return String(env.MSSQL_ENABLE_WRITES || "").toLowerCase() === "true";
-    }
-    function attachAbort(request, signal) {
-      if (!signal) return;
-      const cancel = () => {
-        try {
-          request.cancel();
-        } catch {
-        }
-      };
-      if (signal.aborted) {
-        cancel();
-        return;
-      }
-      signal.addEventListener("abort", cancel, { once: true });
-    }
-    async function runRead(pool, fn, { mssql = loadDriver(), signal } = {}) {
-      if (signal?.aborted) throw new Error("Request aborted");
-      const transaction = new mssql.Transaction(pool);
-      await transaction.begin(mssql.ISOLATION_LEVEL.READ_COMMITTED);
-      try {
-        const request = new mssql.Request(transaction);
-        attachAbort(request, signal);
-        return await fn(request);
-      } finally {
-        try {
-          await transaction.rollback();
-        } catch {
-        }
-      }
-    }
-    async function runWrite(pool, fn, { mssql = loadDriver(), signal, writesEnabled: enabled = writesEnabled() } = {}) {
-      if (!enabled) {
-        throw new Error(
-          "writes are disabled. Set MSSQL_ENABLE_WRITES=true to enable execute_write_query."
-        );
-      }
-      if (signal?.aborted) throw new Error("Request aborted");
-      const request = new mssql.Request(pool);
-      attachAbort(request, signal);
-      return fn(request);
-    }
-    async function streamRead(pool, query, { offset = 0, limit = 100, mssql = loadDriver(), signal } = {}) {
-      if (signal?.aborted) throw new Error("Request aborted");
-      const transaction = new mssql.Transaction(pool);
-      await transaction.begin(mssql.ISOLATION_LEVEL.READ_COMMITTED);
-      try {
-        const request = new mssql.Request(transaction);
-        request.stream = true;
-        attachAbort(request, signal);
-        return await new Promise((resolve, reject) => {
-          const rows = [];
-          let totalSeen = 0;
-          let truncated = false;
-          let canceled = false;
-          let settled = false;
-          const settle = (fn, value) => {
-            if (settled) return;
-            settled = true;
-            fn(value);
-          };
-          request.on("row", (row) => {
-            totalSeen++;
-            if (totalSeen > offset && rows.length < limit) {
-              rows.push(row);
-            }
-            if (totalSeen > offset + limit && !canceled) {
-              truncated = true;
-              canceled = true;
-              try {
-                request.cancel();
-              } catch {
-              }
-            }
-          });
-          request.on("error", (err) => {
-            if (canceled) {
-              settle(resolve, { rows, totalSeen, truncated });
-            } else {
-              settle(reject, err);
-            }
-          });
-          request.on("done", () => {
-            settle(resolve, { rows, totalSeen, truncated });
-          });
-          try {
-            request.query(query);
-          } catch (err) {
-            settle(reject, err);
-          }
-        });
-      } finally {
-        try {
-          await transaction.rollback();
-        } catch {
-        }
-      }
-    }
-    module2.exports = {
-      escapeIdentifier,
-      splitTableIdentifier,
-      quoteTable,
-      writesEnabled,
-      attachAbort,
-      runRead,
-      runWrite,
-      streamRead
-    };
-  }
-});
-
-// src/validation.js
-var require_validation2 = __commonJS({
-  "src/validation.js"(exports2, module2) {
-    var { z } = require_zod();
-    var MAX_LIMIT = 1e3;
-    var DEFAULT_LIMIT = 100;
-    var MAX_QUERY_LEN = 1e4;
-    var MAX_SQL_FILE_BYTES = 2e6;
-    var MAX_BATCHES = 500;
-    var MAX_BATCH_REPEAT = 100;
-    var tableIdentifier = z.string().min(1).max(260).regex(/^[a-zA-Z0-9_#$@]+(?:\.[a-zA-Z0-9_#$@]+)?$/, {
-      message: "Use bare or `schema.table` identifiers - only alphanumerics, underscore, #, $, @"
-    });
-    var dbKeyShape = {
-      dbKey: z.string().min(1).max(50).regex(/^[a-zA-Z0-9_]+$/, {
-        message: "dbKey must be alphanumeric/underscore"
-      }).optional().describe(
-        "Database key (lowercased). Optional in single-database mode. Call `list_databases` to discover valid keys."
-      )
-    };
-    var paginationShape = {
-      limit: z.number().int().positive().max(MAX_LIMIT).default(DEFAULT_LIMIT).describe(`Max rows to return (1..${MAX_LIMIT}).`),
-      offset: z.number().int().nonnegative().default(0).describe("Row offset for pagination.")
-    };
-    var queryString = z.string().min(1).max(MAX_QUERY_LEN);
-    var sqlFilePath = z.string().min(1).max(500).refine((s) => s.indexOf(String.fromCharCode(0)) === -1, {
-      message: "path must not contain NUL characters"
-    });
-    var resourceUri = z.string().regex(
-      /^mssql:\/\/[a-zA-Z0-9_]+@[a-zA-Z0-9_#$@]+(?:\.[a-zA-Z0-9_#$@]+)?\/data$/,
-      {
-        message: "URI must match mssql://<dbKey>@<table>/data or mssql://<dbKey>@<schema>.<table>/data"
-      }
-    );
-    module2.exports = {
-      tableIdentifier,
-      dbKeyShape,
-      paginationShape,
-      queryString,
-      sqlFilePath,
-      resourceUri,
-      MAX_LIMIT,
-      DEFAULT_LIMIT,
-      MAX_QUERY_LEN,
-      MAX_SQL_FILE_BYTES,
-      MAX_BATCHES,
-      MAX_BATCH_REPEAT
-    };
-  }
-});
-
-// src/tools/execute-read-query.js
-var require_execute_read_query = __commonJS({
-  "src/tools/execute-read-query.js"(exports2, module2) {
-    var { z } = require_zod();
-    var { getConfig } = require_config();
-    var { getPool } = require_pools();
-    var { streamRead } = require_safety();
-    var { paginationShape, dbKeyShape, queryString } = require_validation2();
-    var inputShape = {
-      query: queryString.describe(
-        "Read-only SQL query. Wrapped in a rollback-only transaction, so any incidental writes are discarded. Results are streamed and the underlying request is cancelled once `offset + limit` rows have been seen - so even a naive `SELECT *` against a huge table will not load the full recordset into memory."
-      ),
-      ...dbKeyShape,
-      ...paginationShape
-    };
-    var outputShape = {
-      db: z.string(),
-      dbKey: z.string(),
-      rowCount: z.number().int().nonnegative(),
-      totalRowsSeen: z.number().int().nonnegative(),
-      truncated: z.boolean(),
-      recordset: z.array(z.record(z.unknown()))
-    };
-    async function handler({ query, dbKey, limit, offset }, extra) {
-      const { dbKey: actualKey, config } = getConfig(dbKey);
-      const pool = await getPool(actualKey, config);
-      const { rows, totalSeen, truncated } = await streamRead(pool, query, {
-        offset,
-        limit,
-        signal: extra?.signal
-      });
-      const structured = {
-        db: config.database,
-        dbKey: actualKey,
-        rowCount: rows.length,
-        totalRowsSeen: totalSeen,
-        truncated,
-        recordset: rows
-      };
-      return {
-        content: [{ type: "text", text: JSON.stringify(structured, null, 2) }],
-        structuredContent: structured
-      };
-    }
-    module2.exports = {
-      name: "execute_read_query",
-      config: {
-        title: "Execute Read Query",
-        description: "Run a SELECT-style SQL query against a configured database. The query executes inside a transaction that is ALWAYS rolled back, so accidental DML/DDL is non-durable (this is a guardrail, not a sandbox: an explicit `COMMIT TRANSACTION` in the query string ends the wrapper and following writes will persist - rely on a least-privilege SQL login for real isolation). Results are streamed; the server cancels the underlying request once `offset + limit` rows have been seen, so `truncated:true` means more rows exist.",
-        inputSchema: inputShape,
-        outputSchema: outputShape,
-        annotations: {
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
-          openWorldHint: true
-        }
-      },
-      handler
-    };
-  }
-});
-
-// src/tools/execute-write-query.js
-var require_execute_write_query = __commonJS({
-  "src/tools/execute-write-query.js"(exports2, module2) {
-    var { z } = require_zod();
-    var { getConfig } = require_config();
-    var { getPool } = require_pools();
-    var { runWrite, writesEnabled } = require_safety();
-    var { dbKeyShape, queryString } = require_validation2();
-    var inputShape = {
-      query: queryString.describe(
-        "Mutating SQL (INSERT/UPDATE/DELETE/MERGE/DDL). Disabled unless MSSQL_ENABLE_WRITES=true."
-      ),
-      ...dbKeyShape
-    };
-    var outputShape = {
-      db: z.string(),
-      dbKey: z.string(),
-      rowsAffected: z.array(z.number().int().nonnegative()),
-      message: z.string()
-    };
-    async function handler({ query, dbKey }, extra) {
-      if (!writesEnabled(process.env, dbKey)) {
-        throw new Error(
-          dbKey ? `writes are disabled for '${dbKey}'. Set MSSQL_${String(dbKey).toUpperCase()}_ENABLE_WRITES=true to enable them for this database, or MSSQL_ENABLE_WRITES=true for every database.` : "writes are disabled. Set MSSQL_ENABLE_WRITES=true to enable execute_write_query."
-        );
-      }
-      const { dbKey: actualKey, config } = getConfig(dbKey);
-      const pool = await getPool(actualKey, config);
-      const result = await runWrite(pool, async (request) => request.query(query), {
-        signal: extra?.signal,
-        writesEnabled: true
-      });
-      const structured = {
-        db: config.database,
-        dbKey: actualKey,
-        rowsAffected: result.rowsAffected || [],
-        message: "Query executed successfully"
-      };
-      return {
-        content: [{ type: "text", text: JSON.stringify(structured, null, 2) }],
-        structuredContent: structured
-      };
-    }
-    module2.exports = {
-      name: "execute_write_query",
-      config: {
-        title: "Execute Write Query",
-        description: "Run a mutating SQL statement. DISABLED unless MSSQL_ENABLE_WRITES=true (all databases) or MSSQL_<DBKEY>_ENABLE_WRITES=true (just that `dbKey`). There is no keyword denylist - the database user's grants are the source of truth. Use a least-privilege account for the relevant `dbKey`.",
-        inputSchema: inputShape,
-        outputSchema: outputShape,
-        annotations: {
-          readOnlyHint: false,
-          destructiveHint: true,
-          idempotentHint: false,
-          openWorldHint: true
-        }
-      },
-      handler
     };
   }
 });
@@ -102500,6 +102333,658 @@ var require_batches = __commonJS({
       startsWithUse,
       stripLeadingNoise,
       MAX_PREVIEW_LEN
+    };
+  }
+});
+
+// src/db/safety.js
+var require_safety = __commonJS({
+  "src/db/safety.js"(exports2, module2) {
+    var { loadDriver } = require_driver();
+    var {
+      acquiredConnection,
+      destroyConnection,
+      withTimeout
+    } = require_connections();
+    var { splitBatches, previewOf } = require_batches();
+    var CANCEL_GRACE_MS = 5e3;
+    var TRANCOUNT_PROBE_MS = 5e3;
+    var SETTLE_POLL_MS = 25;
+    var TRANCOUNT_SQL = "SELECT @@TRANCOUNT AS trancount";
+    var NON_TRANSACTIONAL_STATEMENTS = "CREATE/ALTER DATABASE, BACKUP, RESTORE, CREATE FULLTEXT INDEX, ALTER FULLTEXT CATALOG";
+    function escapeIdentifier(name) {
+      return `[${String(name).replace(/]/g, "]]")}]`;
+    }
+    function splitTableIdentifier(identifier) {
+      if (!identifier.includes(".")) return { schema: null, table: identifier };
+      const parts = identifier.split(".");
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        throw new Error(
+          `Invalid table identifier '${identifier}'. Expected 'schema.table'.`
+        );
+      }
+      return { schema: parts[0], table: parts[1] };
+    }
+    function quoteTable(identifier) {
+      const { schema, table } = splitTableIdentifier(identifier);
+      return schema ? `${escapeIdentifier(schema)}.${escapeIdentifier(table)}` : escapeIdentifier(table);
+    }
+    function writesEnabled(env = process.env, dbKey) {
+      if (dbKey) {
+        const perDb = env[`MSSQL_${String(dbKey).toUpperCase()}_ENABLE_WRITES`];
+        if (perDb !== void 0) return String(perDb).toLowerCase() === "true";
+      }
+      return String(env.MSSQL_ENABLE_WRITES || "").toLowerCase() === "true";
+    }
+    function attachAbort(request, signal) {
+      const state = { aborted: false, cancelError: null, detach: () => {
+      } };
+      if (!signal) return state;
+      const cancel = () => {
+        state.aborted = true;
+        try {
+          request.cancel();
+        } catch (err) {
+          state.cancelError = err;
+        }
+      };
+      if (signal.aborted) {
+        cancel();
+        return state;
+      }
+      signal.addEventListener("abort", cancel, { once: true });
+      state.detach = () => signal.removeEventListener("abort", cancel);
+      return state;
+    }
+    function applyRequestTimeout(request, timeoutMs) {
+      if (!request || !timeoutMs) return request;
+      const base = typeof request._setCurrentRequest === "function" ? request._setCurrentRequest.bind(request) : null;
+      request._setCurrentRequest = (tdsRequest) => {
+        if (tdsRequest) tdsRequest.timeout = timeoutMs;
+        return base ? base(tdsRequest) : request;
+      };
+      return request;
+    }
+    async function waitForRequestToSettle(transaction, graceMs = CANCEL_GRACE_MS) {
+      if (!transaction) return true;
+      const deadline = Date.now() + graceMs;
+      while (transaction._activeRequest) {
+        if (Date.now() >= deadline) return false;
+        await new Promise((resolve) => setTimeout(resolve, SETTLE_POLL_MS));
+      }
+      return true;
+    }
+    async function probeTrancount(transaction, connection, { mssql, timeoutMs = TRANCOUNT_PROBE_MS } = {}) {
+      if (connection?.closed) return { trancount: 0, closed: true };
+      if (!acquiredConnection(transaction)) {
+        return { trancount: 0, releasedToPool: true };
+      }
+      try {
+        const request = applyRequestTimeout(new mssql.Request(transaction), timeoutMs);
+        const result = await withTimeout(
+          request.query(TRANCOUNT_SQL),
+          timeoutMs,
+          "@@TRANCOUNT probe"
+        );
+        const value = Number(result?.recordset?.[0]?.trancount);
+        if (Number.isFinite(value)) return { trancount: value };
+        return {
+          trancount: null,
+          error: new Error("the @@TRANCOUNT probe returned no value")
+        };
+      } catch (err) {
+        return { trancount: null, error: err };
+      }
+    }
+    async function rollbackAndCheck(pool, transaction, {
+      aborted = false,
+      mssql = loadDriver(),
+      cancelGraceMs = CANCEL_GRACE_MS,
+      probeTimeoutMs = TRANCOUNT_PROBE_MS
+    } = {}) {
+      const connection = acquiredConnection(transaction);
+      const cancelLanded = aborted ? await waitForRequestToSettle(transaction, cancelGraceMs) : true;
+      let rollbackError = null;
+      try {
+        await transaction.rollback();
+      } catch (err) {
+        rollbackError = err;
+      }
+      if (cancelLanded && !rollbackError) {
+        return { ok: true, cancelLanded, rollbackError: null };
+      }
+      const probe = await probeTrancount(transaction, connection, {
+        mssql,
+        timeoutMs: probeTimeoutMs
+      });
+      if (probe.trancount === 0) {
+        return { ok: true, cancelLanded, rollbackError, trancount: 0 };
+      }
+      await destroyConnection(pool, connection);
+      return {
+        ok: false,
+        cancelLanded,
+        rollbackError,
+        trancount: probe.trancount ?? null,
+        probeError: probe.error || null
+      };
+    }
+    function abandonedTransactionError(cleanup, cause) {
+      const parts = [
+        "The transaction on the connection that ran this statement could not be closed."
+      ];
+      if (!cleanup.cancelLanded) {
+        parts.push(
+          `The cancellation did not complete within ${CANCEL_GRACE_MS}ms, so the request was still in flight and the ROLLBACK could not even be sent.`
+        );
+      }
+      if (cleanup.rollbackError) {
+        parts.push(`ROLLBACK failed: ${cleanup.rollbackError.message}`);
+      }
+      if (cleanup.trancount === null) {
+        parts.push(
+          `@@TRANCOUNT could not be read on that connection${cleanup.probeError ? `: ${cleanup.probeError.message}` : "."}`
+        );
+      } else {
+        parts.push(
+          `That connection was left with @@TRANCOUNT=${cleanup.trancount}, i.e. inside an open transaction.`
+        );
+      }
+      parts.push(
+        "The connection has been closed and dropped from the pool, so it cannot leak that transaction into an unrelated call - but this call needs to be retried on a fresh connection. Run it again."
+      );
+      if (cause) parts.push(`Original failure: ${cause.message}`);
+      const err = new Error(parts.join(" "));
+      err.code = "ETXNABANDONED";
+      if (cause) err.cause = cause;
+      return err;
+    }
+    async function runRead(pool, fn, { mssql = loadDriver(), signal, timeoutMs, ...cleanupOptions } = {}) {
+      if (signal?.aborted) throw new Error("Request aborted");
+      const transaction = new mssql.Transaction(pool);
+      await transaction.begin(mssql.ISOLATION_LEVEL.READ_COMMITTED);
+      const request = applyRequestTimeout(new mssql.Request(transaction), timeoutMs);
+      const abort = attachAbort(request, signal);
+      let result;
+      let failure = null;
+      try {
+        result = await fn(request);
+      } catch (err) {
+        failure = err;
+      } finally {
+        abort.detach();
+      }
+      const cleanup = await rollbackAndCheck(pool, transaction, {
+        ...cleanupOptions,
+        aborted: abort.aborted,
+        mssql
+      });
+      if (!cleanup.ok) throw abandonedTransactionError(cleanup, failure);
+      if (failure) throw failure;
+      return result;
+    }
+    async function streamRead(pool, query, {
+      offset = 0,
+      limit = 100,
+      mssql = loadDriver(),
+      signal,
+      timeoutMs,
+      ...cleanupOptions
+    } = {}) {
+      if (signal?.aborted) throw new Error("Request aborted");
+      const transaction = new mssql.Transaction(pool);
+      await transaction.begin(mssql.ISOLATION_LEVEL.READ_COMMITTED);
+      const request = applyRequestTimeout(new mssql.Request(transaction), timeoutMs);
+      request.stream = true;
+      const abort = attachAbort(request, signal);
+      let cutoff = false;
+      let result;
+      let failure = null;
+      try {
+        result = await new Promise((resolve, reject) => {
+          const rows = [];
+          let totalSeen = 0;
+          let truncated = false;
+          let canceled = false;
+          let settled = false;
+          const settle = (fn, value) => {
+            if (settled) return;
+            settled = true;
+            fn(value);
+          };
+          request.on("row", (row) => {
+            totalSeen++;
+            if (totalSeen > offset && rows.length < limit) {
+              rows.push(row);
+            }
+            if (totalSeen > offset + limit && !canceled) {
+              truncated = true;
+              canceled = true;
+              cutoff = true;
+              try {
+                request.cancel();
+              } catch {
+              }
+            }
+          });
+          request.on("error", (err) => {
+            if (canceled) {
+              settle(resolve, { rows, totalSeen, truncated });
+            } else {
+              settle(reject, err);
+            }
+          });
+          request.on("done", () => {
+            settle(resolve, { rows, totalSeen, truncated });
+          });
+          try {
+            request.query(query);
+          } catch (err) {
+            settle(reject, err);
+          }
+        });
+      } catch (err) {
+        failure = err;
+      } finally {
+        abort.detach();
+      }
+      const cleanup = await rollbackAndCheck(pool, transaction, {
+        ...cleanupOptions,
+        aborted: abort.aborted || cutoff,
+        mssql
+      });
+      if (!cleanup.ok) throw abandonedTransactionError(cleanup, failure);
+      if (failure) throw failure;
+      return result;
+    }
+    function describeStatement(statement, result) {
+      const out = {
+        index: statement.index,
+        startLine: statement.startLine,
+        endLine: statement.endLine,
+        preview: previewOf(statement.sql)
+      };
+      if (result) {
+        out.rowsAffected = (result.rowsAffected || []).map(Number);
+        out.recordsetCount = (result.recordsets || []).length;
+      }
+      return out;
+    }
+    function listStatements(applied) {
+      return applied.map(
+        (s) => `#${s.index} (lines ${s.startLine}-${s.endLine}): ${s.preview}` + (s.rowsAffected ? ` [rowsAffected ${s.rowsAffected.join(", ")}]` : "")
+      ).join("; ");
+    }
+    function writeFailureError(cause, { applied, total, transactional, cleanup }) {
+      const position = applied.length + 1;
+      const parts = [
+        total > 1 ? `Statement ${position} of ${total} failed.` : "The statement failed."
+      ];
+      if (transactional && cleanup?.ok) {
+        parts.push(
+          total > 1 ? `All ${total} statements ran in ONE transaction, which was rolled back: nothing was applied.` : "It ran in a transaction, which was rolled back: nothing was applied."
+        );
+      } else if (transactional) {
+        parts.push(
+          "It ran in a transaction, but that transaction could NOT be rolled back, so " + (applied.length > 0 ? `whether these statements persisted is UNKNOWN: ${listStatements(applied)}.` : "whether anything persisted is UNKNOWN.") + " Verify the data before retrying."
+        );
+      } else if (applied.length > 0) {
+        parts.push(
+          `transactional:false was requested, so there was nothing to roll back and these statements are already COMMITTED: ${listStatements(applied)}.`
+        );
+      } else {
+        parts.push(
+          "transactional:false was requested, and nothing had been applied before the failure."
+        );
+      }
+      if (transactional) {
+        parts.push(
+          `If this statement is one SQL Server refuses to run inside a transaction (${NON_TRANSACTIONAL_STATEMENTS}), call again with transactional:false - which gives up all-or-nothing.`
+        );
+      }
+      parts.push(cause.message);
+      const err = new Error(parts.join(" "));
+      err.code = "EWRITEFAILED";
+      err.cause = cause;
+      err.applied = applied;
+      return err;
+    }
+    async function executeStatements(target, statements, { mssql, timeoutMs, signal }) {
+      const applied = [];
+      for (const statement of statements) {
+        if (signal?.aborted) {
+          const err = new Error("Request aborted");
+          err.applied = applied;
+          throw err;
+        }
+        const request = applyRequestTimeout(new mssql.Request(target), timeoutMs);
+        const abort = attachAbort(request, signal);
+        try {
+          const result = await request.batch(statement.sql);
+          applied.push(describeStatement(statement, result));
+        } catch (err) {
+          err.applied = applied;
+          err.aborted = abort.aborted;
+          throw err;
+        } finally {
+          abort.detach();
+        }
+      }
+      return applied;
+    }
+    async function runWrite(pool, query, {
+      mssql = loadDriver(),
+      signal,
+      writesEnabled: enabled = writesEnabled(),
+      transactional = true,
+      timeoutMs,
+      ...cleanupOptions
+    } = {}) {
+      if (!enabled) {
+        throw new Error(
+          "writes are disabled. Set MSSQL_ENABLE_WRITES=true to enable execute_write_query."
+        );
+      }
+      if (signal?.aborted) throw new Error("Request aborted");
+      const statements = splitBatches(String(query));
+      if (statements.length === 0) {
+        throw new Error("No executable SQL found in the query.");
+      }
+      const total = statements.length;
+      if (!transactional) {
+        try {
+          const applied2 = await executeStatements(pool, statements, {
+            mssql,
+            timeoutMs,
+            signal
+          });
+          return summarize(applied2, { committed: true, transactional: false });
+        } catch (err) {
+          throw writeFailureError(err, {
+            applied: err.applied || [],
+            total,
+            transactional: false
+          });
+        }
+      }
+      const transaction = new mssql.Transaction(pool);
+      let serverRolledBack = false;
+      transaction.on("rollback", () => {
+        serverRolledBack = true;
+      });
+      await transaction.begin(mssql.ISOLATION_LEVEL.READ_COMMITTED);
+      let applied;
+      try {
+        applied = await executeStatements(transaction, statements, {
+          mssql,
+          timeoutMs,
+          signal
+        });
+        await transaction.commit();
+      } catch (err) {
+        const cleanup = serverRolledBack ? { ok: true, serverRolledBack: true } : await rollbackAndCheck(pool, transaction, {
+          ...cleanupOptions,
+          aborted: Boolean(err.aborted),
+          mssql
+        });
+        throw writeFailureError(err, {
+          applied: err.applied || applied || [],
+          total,
+          transactional: true,
+          cleanup
+        });
+      }
+      return summarize(applied, { committed: true, transactional: true });
+    }
+    function summarize(applied, { committed, transactional }) {
+      const rowsAffected = applied.flatMap((s) => s.rowsAffected || []);
+      return { rowsAffected, statements: applied, committed, transactional };
+    }
+    module2.exports = {
+      escapeIdentifier,
+      splitTableIdentifier,
+      quoteTable,
+      writesEnabled,
+      attachAbort,
+      applyRequestTimeout,
+      waitForRequestToSettle,
+      probeTrancount,
+      rollbackAndCheck,
+      abandonedTransactionError,
+      runRead,
+      runWrite,
+      streamRead,
+      CANCEL_GRACE_MS,
+      TRANCOUNT_PROBE_MS,
+      NON_TRANSACTIONAL_STATEMENTS
+    };
+  }
+});
+
+// src/validation.js
+var require_validation2 = __commonJS({
+  "src/validation.js"(exports2, module2) {
+    var { z } = require_zod();
+    var MAX_LIMIT = 1e3;
+    var DEFAULT_LIMIT = 100;
+    var MAX_QUERY_LEN = 1e4;
+    var MAX_SQL_FILE_BYTES = 2e6;
+    var MAX_BATCHES = 500;
+    var MAX_BATCH_REPEAT = 100;
+    var tableIdentifier = z.string().min(1).max(260).regex(/^[a-zA-Z0-9_#$@]+(?:\.[a-zA-Z0-9_#$@]+)?$/, {
+      message: "Use bare or `schema.table` identifiers - only alphanumerics, underscore, #, $, @"
+    });
+    var dbKeyShape = {
+      dbKey: z.string().min(1).max(50).regex(/^[a-zA-Z0-9_]+$/, {
+        message: "dbKey must be alphanumeric/underscore"
+      }).optional().describe(
+        "Database key (lowercased). Optional in single-database mode. Call `list_databases` to discover valid keys."
+      )
+    };
+    var MIN_TIMEOUT_MS = 1e3;
+    var MAX_TIMEOUT_MS = 6e5;
+    var timeoutMsShape = {
+      timeoutMs: z.number().int().min(MIN_TIMEOUT_MS).max(MAX_TIMEOUT_MS).optional().describe(
+        `Per-call request timeout in milliseconds (${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS}). Omit to use the server-wide default of 30000. Raise it for a statement that is legitimately slow (a cascading DELETE, a large index rebuild) rather than letting it be cancelled halfway.`
+      )
+    };
+    var paginationShape = {
+      limit: z.number().int().positive().max(MAX_LIMIT).default(DEFAULT_LIMIT).describe(`Max rows to return (1..${MAX_LIMIT}).`),
+      offset: z.number().int().nonnegative().default(0).describe("Row offset for pagination.")
+    };
+    var queryString = z.string().min(1).max(MAX_QUERY_LEN);
+    var sqlFilePath = z.string().min(1).max(500).refine((s) => s.indexOf(String.fromCharCode(0)) === -1, {
+      message: "path must not contain NUL characters"
+    });
+    var resourceUri = z.string().regex(
+      /^mssql:\/\/[a-zA-Z0-9_]+@[a-zA-Z0-9_#$@]+(?:\.[a-zA-Z0-9_#$@]+)?\/data$/,
+      {
+        message: "URI must match mssql://<dbKey>@<table>/data or mssql://<dbKey>@<schema>.<table>/data"
+      }
+    );
+    module2.exports = {
+      tableIdentifier,
+      dbKeyShape,
+      paginationShape,
+      timeoutMsShape,
+      queryString,
+      sqlFilePath,
+      resourceUri,
+      MAX_LIMIT,
+      DEFAULT_LIMIT,
+      MIN_TIMEOUT_MS,
+      MAX_TIMEOUT_MS,
+      MAX_QUERY_LEN,
+      MAX_SQL_FILE_BYTES,
+      MAX_BATCHES,
+      MAX_BATCH_REPEAT
+    };
+  }
+});
+
+// src/tools/execute-read-query.js
+var require_execute_read_query = __commonJS({
+  "src/tools/execute-read-query.js"(exports2, module2) {
+    var { z } = require_zod();
+    var { getConfig } = require_config();
+    var { getPool } = require_pools();
+    var { streamRead } = require_safety();
+    var {
+      paginationShape,
+      dbKeyShape,
+      timeoutMsShape,
+      queryString,
+      MIN_TIMEOUT_MS,
+      MAX_TIMEOUT_MS
+    } = require_validation2();
+    var inputShape = {
+      query: queryString.describe(
+        "Read-only SQL query. Wrapped in a rollback-only transaction, so any incidental writes are discarded. Results are streamed and the underlying request is cancelled once `offset + limit` rows have been seen - so even a naive `SELECT *` against a huge table will not load the full recordset into memory."
+      ),
+      ...dbKeyShape,
+      ...paginationShape,
+      ...timeoutMsShape
+    };
+    var outputShape = {
+      db: z.string(),
+      dbKey: z.string(),
+      rowCount: z.number().int().nonnegative(),
+      totalRowsSeen: z.number().int().nonnegative(),
+      truncated: z.boolean(),
+      recordset: z.array(z.record(z.unknown()))
+    };
+    async function handler({ query, dbKey, limit, offset, timeoutMs }, extra) {
+      const { dbKey: actualKey, config } = getConfig(dbKey);
+      const pool = await getPool(actualKey, config);
+      const { rows, totalSeen, truncated } = await streamRead(pool, query, {
+        offset,
+        limit,
+        timeoutMs,
+        signal: extra?.signal
+      });
+      const structured = {
+        db: config.database,
+        dbKey: actualKey,
+        rowCount: rows.length,
+        totalRowsSeen: totalSeen,
+        truncated,
+        recordset: rows
+      };
+      return {
+        content: [{ type: "text", text: JSON.stringify(structured, null, 2) }],
+        structuredContent: structured
+      };
+    }
+    module2.exports = {
+      name: "execute_read_query",
+      config: {
+        title: "Execute Read Query",
+        description: `Run a SELECT-style SQL query against a configured database. The query executes inside a transaction that is ALWAYS rolled back, so accidental DML/DDL is non-durable (this is a guardrail, not a sandbox: an explicit \`COMMIT TRANSACTION\` in the query string ends the wrapper and following writes will persist - rely on a least-privilege SQL login for real isolation). Results are streamed; the server cancels the underlying request once \`offset + limit\` rows have been seen, so \`truncated:true\` means more rows exist. \`timeoutMs\` (${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS}) overrides the 30 s default for a query that is legitimately slow. If the rollback cannot be completed the connection is closed and dropped from the pool instead of leaking its open transaction into an unrelated call, and the error says so - retry, and the next call gets a clean connection.`,
+        inputSchema: inputShape,
+        outputSchema: outputShape,
+        annotations: {
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true
+        }
+      },
+      handler
+    };
+  }
+});
+
+// src/tools/execute-write-query.js
+var require_execute_write_query = __commonJS({
+  "src/tools/execute-write-query.js"(exports2, module2) {
+    var { z } = require_zod();
+    var { getConfig } = require_config();
+    var { getPool } = require_pools();
+    var {
+      runWrite,
+      writesEnabled,
+      NON_TRANSACTIONAL_STATEMENTS
+    } = require_safety();
+    var {
+      dbKeyShape,
+      timeoutMsShape,
+      queryString,
+      MIN_TIMEOUT_MS,
+      MAX_TIMEOUT_MS
+    } = require_validation2();
+    var inputShape = {
+      query: queryString.describe(
+        "Mutating SQL (INSERT/UPDATE/DELETE/MERGE/DDL). Disabled unless MSSQL_ENABLE_WRITES=true. Runs in ONE explicit transaction by default, so a multi-statement batch is all-or-nothing. `GO` separators are honoured, as in a .sql file."
+      ),
+      ...dbKeyShape,
+      ...timeoutMsShape,
+      transactional: z.boolean().default(true).describe(
+        `Keep true unless the statement is one SQL Server refuses to run inside a transaction (${NON_TRANSACTIONAL_STATEMENTS}). false gives up all-or-nothing: a failure halfway through leaves the earlier statements committed, and the error lists which ones.`
+      )
+    };
+    var statementShape = z.object({
+      index: z.number().int().nonnegative(),
+      startLine: z.number().int().positive(),
+      endLine: z.number().int().positive(),
+      preview: z.string(),
+      rowsAffected: z.array(z.number().int().nonnegative()).optional(),
+      recordsetCount: z.number().int().nonnegative().optional()
+    });
+    var outputShape = {
+      db: z.string(),
+      dbKey: z.string(),
+      rowsAffected: z.array(z.number().int().nonnegative()),
+      transactional: z.boolean(),
+      committed: z.boolean(),
+      statementCount: z.number().int().nonnegative(),
+      statements: z.array(statementShape),
+      message: z.string()
+    };
+    async function handler({ query, dbKey, timeoutMs, transactional = true }, extra) {
+      if (!writesEnabled(process.env, dbKey)) {
+        throw new Error(
+          dbKey ? `writes are disabled for '${dbKey}'. Set MSSQL_${String(dbKey).toUpperCase()}_ENABLE_WRITES=true to enable them for this database, or MSSQL_ENABLE_WRITES=true for every database.` : "writes are disabled. Set MSSQL_ENABLE_WRITES=true to enable execute_write_query."
+        );
+      }
+      const { dbKey: actualKey, config } = getConfig(dbKey);
+      const pool = await getPool(actualKey, config);
+      const result = await runWrite(pool, query, {
+        signal: extra?.signal,
+        writesEnabled: true,
+        transactional,
+        timeoutMs
+      });
+      const count = result.statements.length;
+      const structured = {
+        db: config.database,
+        dbKey: actualKey,
+        rowsAffected: result.rowsAffected,
+        transactional: result.transactional,
+        committed: result.committed,
+        statementCount: count,
+        statements: result.statements,
+        message: result.transactional ? `Executed ${count} statement(s) in one transaction and committed.` : `Executed ${count} statement(s) in autocommit (transactional:false).`
+      };
+      return {
+        content: [{ type: "text", text: JSON.stringify(structured, null, 2) }],
+        structuredContent: structured
+      };
+    }
+    module2.exports = {
+      name: "execute_write_query",
+      config: {
+        title: "Execute Write Query",
+        description: `Run a mutating SQL statement. DISABLED unless MSSQL_ENABLE_WRITES=true (all databases) or MSSQL_<DBKEY>_ENABLE_WRITES=true (just that \`dbKey\`). There is no keyword denylist - the database user's grants are the source of truth. Use a least-privilege account for the relevant \`dbKey\`. The whole query runs in ONE explicit transaction and is all-or-nothing, like \`execute_sql_file\`: if any part fails, nothing is applied and the error says so per statement. Set \`transactional:false\` for the statements that cannot run inside a transaction (${NON_TRANSACTIONAL_STATEMENTS}); that gives up atomicity, and the error then lists exactly which statements were already committed. \`timeoutMs\` (${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS}) overrides the 30 s default - needed for a legitimately slow statement such as a DELETE that cascades over dozens of foreign keys.`,
+        inputSchema: inputShape,
+        outputSchema: outputShape,
+        annotations: {
+          readOnlyHint: false,
+          destructiveHint: true,
+          idempotentHint: false,
+          openWorldHint: true
+        }
+      },
+      handler
     };
   }
 });
@@ -102885,6 +103370,10 @@ var require_list_databases = __commonJS({
           trustServerCertificate: z.boolean(),
           status: z.string().optional(),
           lastConnected: z.string().nullable().optional(),
+          // Conexiones que el pool ha tirado al sanearlas antes de entregarlas (una
+          // transaccion heredada, o una conexion que no se deja resetear). Un numero que no
+          // crece descarta de un vistazo que los fallos sueltos vengan de ahi.
+          recycledConnections: z.number().int().nonnegative().optional(),
           lastError: z.object({
             name: z.string(),
             code: z.string().nullable(),

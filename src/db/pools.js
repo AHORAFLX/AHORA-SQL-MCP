@@ -1,4 +1,5 @@
 const { loadDriver } = require("./driver");
+const { makeAcquireReset } = require("./connections");
 const {
   resolveEndpoint,
   invalidateEndpoint,
@@ -8,6 +9,21 @@ const {
 /** dbKey -> { promise: Promise<pool>, broken: boolean } */
 const pools = new Map();
 const status = new Map();
+
+/**
+ * dbKey -> conexiones tiradas al sanearlas, y el motivo de la ultima.
+ *
+ * Se cuenta y se publica en `list_databases` porque el sintoma que se venia reportando
+ * -llamadas sueltas que fallan sin patron- era invisible desde fuera: no habia forma de
+ * saber si el pool estaba reciclando conexiones envenenadas o si el problema era del
+ * servidor. Un contador que no se mueve descarta esta causa en un vistazo.
+ */
+const recycled = new Map();
+
+function noteRecycled(dbKey, reason) {
+  const prev = recycled.get(dbKey) || { count: 0 };
+  recycled.set(dbKey, { count: prev.count + 1, lastReason: String(reason) });
+}
 
 /**
  * Errores que hacen sospechar del ENDPOINT y no de las credenciales.
@@ -97,6 +113,34 @@ function discard(dbKey, entry) {
 }
 
 /**
+ * La config del pool, con el saneado al COGER conexion ya montado.
+ *
+ * `config.pool` se pasa tal cual a tarn, y mssql lo mezcla DESPUES de poner sus propios
+ * `create`/`validate`/`destroy`, asi que un `validate` aqui gana al suyo. Es el unico
+ * punto donde se puede intervenir en el momento exacto en que una conexion sale del pool
+ * hacia una llamada, que es donde hay que cortar la herencia de transacciones: con esto,
+ * una conexion que quedo quemada por un fallo anterior se sanea o se tira ANTES de
+ * entregarse, y las llamadas siguientes dejan de pagar por un fallo que no era suyo.
+ *
+ * No cuesta un viaje extra al servidor: sustituye al `SELECT 1` que mssql ya lanzaba en su
+ * `_poolValidate` por defecto.
+ *
+ * Cuidado al tocar esto: tarn valida las claves que recibe y revienta con cualquiera que
+ * no conozca, asi que aqui solo caben sus opciones (`validate` es una de ellas).
+ */
+function withAcquireReset(config, dbKey) {
+  return {
+    ...config,
+    pool: {
+      ...(config?.pool || {}),
+      validate: makeAcquireReset({
+        onDiscard: (reason) => noteRecycled(dbKey, reason),
+      }),
+    },
+  };
+}
+
+/**
  * El pool de esta conexion, creandolo si hace falta.
  *
  * Un pool que ya habia conectado y luego se rompe -el servicio SQL se reinicia, el
@@ -123,7 +167,9 @@ async function getPool(dbKey, config, driver = loadDriver()) {
   // delete no borraba nada y la promesa rechazada se quedaba cacheada para siempre.
   entry.promise = Promise.resolve().then(async () => {
     try {
-      const pool = new driver.ConnectionPool(await resolveEndpoint(dbKey, config));
+      const pool = new driver.ConnectionPool(
+        withAcquireReset(await resolveEndpoint(dbKey, config), dbKey)
+      );
       if (typeof pool.on === "function") {
         pool.on("error", (err) => {
           entry.broken = true;
@@ -163,17 +209,24 @@ async function closeAllPools() {
 }
 
 function getConnectionStatus() {
-  return Object.fromEntries(status.entries());
+  return Object.fromEntries(
+    Array.from(status.entries()).map(([dbKey, entry]) => [
+      dbKey,
+      { ...entry, recycledConnections: recycled.get(dbKey)?.count || 0 },
+    ])
+  );
 }
 
 function _resetForTests() {
   pools.clear();
   status.clear();
+  recycled.clear();
   resetEndpoints();
 }
 
 module.exports = {
   getPool,
+  withAcquireReset,
   STALE_ENDPOINT_CODES,
   closeAllPools,
   getConnectionStatus,

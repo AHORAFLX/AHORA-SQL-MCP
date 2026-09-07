@@ -2,7 +2,14 @@ const { z } = require("zod");
 const { getConfig } = require("../config");
 const { getPool } = require("../db/pools");
 const { streamRead } = require("../db/safety");
-const { paginationShape, dbKeyShape, queryString } = require("../validation");
+const {
+  paginationShape,
+  dbKeyShape,
+  timeoutMsShape,
+  queryString,
+  MIN_TIMEOUT_MS,
+  MAX_TIMEOUT_MS,
+} = require("../validation");
 
 const inputShape = {
   query: queryString.describe(
@@ -12,6 +19,7 @@ const inputShape = {
   ),
   ...dbKeyShape,
   ...paginationShape,
+  ...timeoutMsShape,
 };
 
 const outputShape = {
@@ -23,12 +31,13 @@ const outputShape = {
   recordset: z.array(z.record(z.unknown())),
 };
 
-async function handler({ query, dbKey, limit, offset }, extra) {
+async function handler({ query, dbKey, limit, offset, timeoutMs }, extra) {
   const { dbKey: actualKey, config } = getConfig(dbKey);
   const pool = await getPool(actualKey, config);
   const { rows, totalSeen, truncated } = await streamRead(pool, query, {
     offset,
     limit,
+    timeoutMs,
     signal: extra?.signal,
   });
   const structured = {
@@ -54,7 +63,11 @@ module.exports = {
       "that is ALWAYS rolled back, so accidental DML/DDL is non-durable (this is a guardrail, not a sandbox: " +
       "an explicit `COMMIT TRANSACTION` in the query string ends the wrapper and following writes will persist - " +
       "rely on a least-privilege SQL login for real isolation). Results are streamed; the server cancels the " +
-      "underlying request once `offset + limit` rows have been seen, so `truncated:true` means more rows exist.",
+      "underlying request once `offset + limit` rows have been seen, so `truncated:true` means more rows exist. " +
+      `\`timeoutMs\` (${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS}) overrides the 30 s default for a query that is ` +
+      "legitimately slow. If the rollback cannot be completed the connection is closed and dropped from the " +
+      "pool instead of leaking its open transaction into an unrelated call, and the error says so - retry, " +
+      "and the next call gets a clean connection.",
     inputSchema: inputShape,
     outputSchema: outputShape,
     annotations: {

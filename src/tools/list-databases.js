@@ -17,6 +17,10 @@ const outputShape = {
       trustServerCertificate: z.boolean(),
       status: z.string().optional(),
       lastConnected: z.string().nullable().optional(),
+      // Conexiones que el pool ha tirado al sanearlas antes de entregarlas (una
+      // transaccion heredada, o una conexion que no se deja resetear). Un numero que no
+      // crece descarta de un vistazo que los fallos sueltos vengan de ahi.
+      recycledConnections: z.number().int().nonnegative().optional(),
       lastError: z
         .object({
           name: z.string(),

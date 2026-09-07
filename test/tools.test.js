@@ -120,6 +120,39 @@ test("execute_sql_file: a per-dbKey override is reported in the rejection messag
   }
 });
 
+test("execute_read_query and execute_write_query take a bounded per-call timeoutMs", () => {
+  const { MIN_TIMEOUT_MS, MAX_TIMEOUT_MS } = require("../src/validation");
+  for (const name of ["execute-read-query", "execute-write-query"]) {
+    const { config } = require(`../src/tools/${name}`);
+    const shape = config.inputSchema.timeoutMs;
+    assert.ok(shape, `${name} must accept timeoutMs`);
+    // Fuera de rango se rechaza en el borde: un 0 desactivaria el timeout del driver y
+    // un valor enorme dejaria una sentencia colgada mas alla de lo que espera el cliente.
+    assert.equal(shape.safeParse(undefined).success, true, "es opcional");
+    assert.equal(shape.safeParse(MIN_TIMEOUT_MS).success, true);
+    assert.equal(shape.safeParse(MAX_TIMEOUT_MS).success, true);
+    assert.equal(shape.safeParse(MIN_TIMEOUT_MS - 1).success, false);
+    assert.equal(shape.safeParse(MAX_TIMEOUT_MS + 1).success, false);
+    assert.equal(shape.safeParse(0).success, false);
+    assert.equal(shape.safeParse(1500.5).success, false, "milisegundos enteros");
+    assert.match(
+      config.description,
+      /timeoutMs/,
+      `${name} must document timeoutMs in its description`
+    );
+  }
+});
+
+test("execute_write_query is transactional by default and documents the opt-out", () => {
+  const { config } = require("../src/tools/execute-write-query");
+  assert.equal(config.inputSchema.transactional.parse(undefined), true);
+  assert.equal(config.inputSchema.transactional.parse(false), false);
+  assert.match(config.description, /ONE explicit transaction/);
+  assert.match(config.description, /all-or-nothing/);
+  assert.match(config.description, /transactional:false/);
+  assert.match(config.description, /CREATE\/ALTER DATABASE/);
+});
+
 test("every tool module exports { name, config, handler }", () => {
   for (const mod of tools.modules) {
     assert.equal(typeof mod.name, "string");

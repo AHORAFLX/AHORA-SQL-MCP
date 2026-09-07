@@ -74823,6 +74823,7 @@ var require_package2 = __commonJS({
         "build:exe": "node installer/build-exe.js",
         dev: "nodemon src/index.js",
         integration: "node scripts/integration.js",
+        "repro:pool": "node scripts/repro-pool-poisoning.js",
         start: "node src/index.js",
         test: 'node --test "test/*.test.js"',
         "verify:bundle": "node scripts/verify-bundle.js"
@@ -74869,9 +74870,11 @@ var require_gui = __commonJS({
       pruneLegacyServer,
       suggestAliases,
       aliasError,
+      toolVersion,
       CLIENTS,
       PROFILES,
-      SERVER_NAME
+      SERVER_NAME,
+      MIN_NODE_MAJOR
     } = require_setup();
     var { credentialsPathFor, writeCredentialsFile } = require_credentials();
     var { probeConnection } = require_probe();
@@ -74942,7 +74945,21 @@ var require_gui = __commonJS({
       }
       return results;
     }
+    function checkNodeOnMachine(version = toolVersion("node")) {
+      if (!version) {
+        throw new Error(
+          "No hay Node.js instalado en este equipo (no esta en el PATH). Instala Node LTS desde https://nodejs.org/ y vuelve a lanzar el instalador."
+        );
+      }
+      const major = Number(String(version).replace(/^v/, "").split(".")[0]);
+      if (Number.isFinite(major) && major < MIN_NODE_MAJOR) {
+        throw new Error(
+          `Node ${version} es demasiado antiguo. Hace falta ${MIN_NODE_MAJOR} o superior: instala Node LTS desde https://nodejs.org/ y vuelve a lanzar el instalador.`
+        );
+      }
+    }
     function write(payload, { install } = {}) {
+      checkNodeOnMachine();
       const {
         projectDir,
         configFile,
@@ -74984,7 +75001,13 @@ var require_gui = __commonJS({
         production: profile.production,
         sqlDirs
       });
-      const serverEntry = resolveServerEntry(flags, install ? { install } : {});
+      let installError;
+      const serverEntry = resolveServerEntry(flags, {
+        ...install ? { install } : {},
+        log: (r) => {
+          if (!r.ok) installError = r.error.message.split("\n")[0];
+        }
+      });
       const args = serverEntry.args;
       const written = [];
       for (const key of clients) {
@@ -75012,6 +75035,7 @@ var require_gui = __commonJS({
         pruned,
         args,
         command: serverEntry.command,
+        installError,
         credentialsFile,
         permissions,
         production: profile.production,
@@ -75520,6 +75544,14 @@ $("btnWrite").onclick = async () => {
           "ese nombre chocaba con la extension nativa de SQL Server de VS Code.</span>" : "") +
         (w.others.length ? ' <span class="hint">\xB7 conservados: ' + esc(w.others.join(", ")) + "</span>" : "") +
         "</li>").join("") + "</ul>";
+    if (res.command === "npx") {
+      html += '<div class="banner warn">No se ha podido instalar el servidor en tu maquina' +
+        (res.installError ? " (" + esc(res.installError) + ")" : "") +
+        ". Se ha escrito una configuracion de reserva con <code>npx</code>: funciona, pero " +
+        "resuelve el paquete contra GitHub en cada arranque y puede tardar hasta un minuto o " +
+        "agotar la espera del cliente MCP. Vuelve a lanzar el instalador cuando el problema " +
+        "este resuelto para que quede la version rapida.</div>";
+    }
     if (res.credentialsFile) {
       html += "<p>Credenciales cifradas con tu cuenta de Windows, fuera del repositorio:</p><pre>" +
         esc(res.credentialsFile) + "</pre>";
@@ -75569,6 +75601,7 @@ $("btnWrite").onclick = async () => {
       detect,
       validate,
       write,
+      checkNodeOnMachine,
       credentialsPathFor,
       writeCredentialsFile,
       renderPage,
@@ -76280,7 +76313,8 @@ var require_setup = __commonJS({
       PROFILES,
       PKG_SPEC,
       SERVER_NAME,
-      LEGACY_SERVER_NAME
+      LEGACY_SERVER_NAME,
+      MIN_NODE_MAJOR
     };
     if (require.main === module2) run();
   }

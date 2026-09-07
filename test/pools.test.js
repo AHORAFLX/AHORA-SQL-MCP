@@ -1,7 +1,9 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const tarn = require("tarn");
 const {
   getPool,
+  withAcquireReset,
   closeAllPools,
   getConnectionStatus,
   _resetForTests,
@@ -237,4 +239,54 @@ test("dos llamadas concurrentes no se tiran el pool que la otra esta creando", a
   const [p1, p2] = await Promise.all([a, b]);
   assert.equal(p1, p2);
   assert.equal(events.connects, 1, "un solo connect, no uno por llamada");
+});
+
+// -- el saneado al coger conexion del pool ---------------------------------
+
+test("getPool monta el saneado al adquirir, sin perder las opciones del pool", async () => {
+  // Esta es la cura que hace que el fallo se cure solo: sin un validate propio, una
+  // conexion que quedo con @@TRANCOUNT > 0 se reparte tal cual a la siguiente llamada.
+  const { ConnectionPool, created } = makeFakeMssql();
+  await getPool(
+    "k",
+    { server: "x", pool: { max: 7, min: 1, idleTimeoutMillis: 1234 } },
+    { ConnectionPool }
+  );
+  const { pool } = created[0].cfg;
+  assert.equal(typeof pool.validate, "function", "hay validate propio");
+  assert.deepEqual(
+    { max: pool.max, min: pool.min, idleTimeoutMillis: pool.idleTimeoutMillis },
+    { max: 7, min: 1, idleTimeoutMillis: 1234 },
+    "y las opciones configuradas siguen ahi"
+  );
+});
+
+test("withAcquireReset no toca la config original ni pierde el resto de campos", () => {
+  const original = { server: "x", requestTimeout: 30000, pool: { max: 3 } };
+  const out = withAcquireReset(original);
+  assert.equal(out.server, "x");
+  assert.equal(out.requestTimeout, 30000);
+  assert.equal(out.pool.max, 3);
+  assert.equal(original.pool.validate, undefined, "la config de entrada no se muta");
+});
+
+test("withAcquireReset produce opciones que tarn acepta", () => {
+  // tarn valida las claves que recibe y revienta con cualquiera que no conozca, asi que
+  // colar aqui una opcion inventada rompe TODAS las conexiones al primer uso.
+  const { pool } = withAcquireReset({
+    pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
+  });
+  const built = new tarn.Pool({
+    create: () => Promise.resolve({}),
+    destroy: () => {},
+    propagateCreateError: true,
+    ...pool,
+  });
+  assert.equal(built.validate, pool.validate, "tarn se queda con nuestro validate");
+  return built.destroy();
+});
+
+test("withAcquireReset aguanta una config sin bloque pool", () => {
+  const { pool } = withAcquireReset({ server: "x" });
+  assert.equal(typeof pool.validate, "function");
 });

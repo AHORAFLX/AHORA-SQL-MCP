@@ -415,8 +415,11 @@ src/
 ├── resources.js          # ResourceTemplate registration
 ├── prompts.js            # MCP prompts
 ├── db/
-│   ├── pools.js          # per-dbKey ConnectionPool cache
-│   ├── safety.js         # runRead (rollback-only) + runWrite (gated)
+│   ├── pools.js          # per-dbKey ConnectionPool cache + acquire-time reset wiring
+│   ├── connections.js    # raw pooled-connection hygiene: acquire reset, destroy
+│   ├── safety.js         # runRead/streamRead (rollback-only) + runWrite (transactional)
+│   ├── driver.js         # lazy require("mssql")
+│   ├── endpoint.js       # named-instance port discovery, invalidatable
 │   └── introspection.js  # parameterized INFORMATION_SCHEMA / sys.* queries
 ├── sql/
 │   ├── batches.js        # BOM decoding + GO splitting (pure, no I/O)
@@ -473,7 +476,33 @@ src/
   Identifiers with spaces or non-ASCII characters aren't supported by the introspection tools; use
   `execute_read_query` with raw SQL for those.
 - **Cancellation** — tool handlers honor the MCP request `AbortSignal`; an aborted request fires
-  `request.cancel()` on the underlying mssql request.
+  `request.cancel()` on the underlying mssql request. The cancellation is then **waited for**, with a
+  5 s bound, before the `ROLLBACK` is attempted: `request.cancel()` only sends an ATTENTION packet,
+  and tedious serialises requests per connection, so a `ROLLBACK` issued while the cancelled request
+  is still in flight cannot even be sent. That was the bug: it failed with `EREQINPROG` into an empty
+  `catch`, and the connection went back into the pool with `@@TRANCOUNT = 1`.
+- **Connection hygiene** — two layers, in `db/connections.js`:
+  - *On acquire*, a tarn `validate` (installed through `config.pool.validate`, which mssql merges
+    after its own) resets the connection with tedious's TDS connection reset: the server rolls back
+    any open transaction, drops temp tables and restores the session `SET` options. A connection that
+    will not reset, or that the server still reports as being in a transaction, is rejected and tarn
+    replaces it. This costs no extra round trip — it replaces the `SELECT 1` mssql already ran — and
+    it is what makes the failure self-healing.
+  - *On failure*, a connection whose cancellation or rollback did not complete is **not** returned to
+    the pool: `@@TRANCOUNT` is probed on that connection and, if it is not provably 0, the connection
+    is marked, closed (so the server undoes the transaction now rather than leaving it sleeping) and
+    released so tarn reclaims the slot. The caller gets an `ETXNABANDONED` error naming the state,
+    not a generic timeout. `list_databases` reports `recycledConnections` per `dbKey`.
+- **Write atomicity** — `execute_write_query` splits the query on `GO` and runs every statement in
+  ONE explicit transaction, all-or-nothing like `execute_sql_file`. On failure the error states which
+  statement failed, how many there were, and whether anything persisted. `transactional: false` is the
+  opt-out for statements SQL Server refuses to run inside a transaction; it gives up atomicity, and
+  the error then lists exactly which statements were already committed.
+- **Per-call request timeout** — `timeoutMs` (1000..600000) on `execute_read_query` and
+  `execute_write_query` is stamped onto the tedious request's own `timeout`, which
+  `Connection#createRequestTimer` reads in preference to the pool-wide `requestTimeout`. mssql never
+  sets it, so the hook is `Request#_setCurrentRequest`, called after the tedious request is built and
+  before it is sent.
 - **Least privilege** — the safest setup is a SQL login with only `SELECT` (and `EXECUTE` if
   needed) on the relevant schemas. The MCP layer reinforces that, it doesn't replace it.
 
