@@ -42,6 +42,12 @@ prueba la conexión, y guarda las credenciales en `%APPDATA%\ahora-sql-mcp\` par
 el `.mcp.json`**, que es un fichero que se commitea. En la carpeta solo queda el `.mcp.json` con la
 ruta. Abres esa carpeta con tu cliente y ya tienes acceso a la BD.
 
+Ahí puedes meter **tantas conexiones como quieras**, no solo una: el formulario tiene un botón
+_«Añadir otra conexión»_ y el asistente de terminal te las va pidiendo hasta que dejas el servidor en
+blanco. A partir de la segunda te pide un **alias** por conexión, que es la clave con la que el
+agente pedirá cada base de datos (`dbKey`); en Flexygo son `config` y `data`, que es lo que esperan
+las skills de SC0. Con una sola conexión el alias no se pregunta y la clave es `maindb`.
+
 La contraseña **no se guarda en claro**: va cifrada con DPAPI de Windows, con una clave que deriva de
 tu cuenta y gestiona el sistema. Solo tu cuenta y en este equipo puede descifrarla, así que copiar
 ese JSON a otra máquina no sirve de nada. Si te cambian de equipo o de usuario, vuelve a ejecutar el

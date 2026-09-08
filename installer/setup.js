@@ -612,39 +612,87 @@ async function main() {
     let environment;
 
     if (!resolved) {
-      // Datos a mano. Aqui la prueba de conexion no es un lujo: lo que falla
-      // normalmente es una errata al teclear, y sin conectar no se ve.
-      const server = await ask(rl, "Servidor (p. ej. PC_158\\SQL2022 o 10.0.0.9,1433)");
-      const database = await ask(rl, "Base de datos");
-      const user = await ask(rl, "Usuario");
-      const password = await ask(rl, "Contrasena");
-      if (!server || !database || !user || !password) {
-        say("✗ Faltan datos. Nada escrito.");
-        process.exit(1);
-      }
-      const manual = { server, database, user, password };
-
-      say();
-      say("Probando la conexion de verdad...");
-      const result = await probeConnection({
-        datasource: server,
-        initialcatalog: database,
-        userid: user,
-        password,
-      });
-      if (result.ok) {
-        say(`   ✓ conectado a ${result.target} / ${result.database}`);
-        if (result.version) say(`     ${result.version}`);
-      } else {
-        say(`   ✗ no he podido conectar: ${result.error}`);
-        if (result.hint) say(`     ${result.hint}`);
+      // Datos a mano, tantas conexiones como haga falta. Sin fichero de
+      // configuracion del que leerlas, la unica forma de exponer la de configuracion
+      // y la de datos de Flexygo -o cualquier otro par- es teclear las dos: antes
+      // solo cabia una, y el resto de la cadena (fichero de credenciales, wrapper y
+      // servidor) ya soportaba varias.
+      //
+      // Aqui la prueba de conexion no es un lujo: lo que falla normalmente es una
+      // errata al teclear, y sin conectar no se ve.
+      say("Puedes meter varias: cada una sera una base de datos distinta para el");
+      say("agente. Se piden de una en una y se prueban al momento.");
+      while (true) {
+        const n = manualConnections.length;
         say();
-        if (!(await askYesNo(rl, "¿Sigo de todas formas?", false))) {
-          say("✗ Nada escrito. Corrige los datos y vuelve a lanzarlo.");
+        const server =
+          n === 0
+            ? await ask(rl, "Servidor (p. ej. PC_158\\SQL2022 o 10.0.0.9,1433)")
+            : await ask(rl, `Servidor de la conexion ${n + 1} (vacio para terminar)`);
+        if (!server) {
+          if (n > 0) break;
+          say("✗ Faltan datos. Nada escrito.");
           process.exit(1);
         }
+        const database = await ask(rl, "Base de datos");
+        const user = await ask(rl, "Usuario");
+        const password = await ask(rl, "Contrasena");
+        if (!database || !user || !password) {
+          say("✗ Faltan datos. Nada escrito.");
+          process.exit(1);
+        }
+        const manual = { server, database, user, password };
+
+        say();
+        say("Probando la conexion de verdad...");
+        const result = await probeConnection({
+          datasource: server,
+          initialcatalog: database,
+          userid: user,
+          password,
+        });
+        if (result.ok) {
+          say(`   ✓ conectado a ${result.target} / ${result.database}`);
+          if (result.version) say(`     ${result.version}`);
+        } else {
+          say(`   ✗ no he podido conectar: ${result.error}`);
+          if (result.hint) say(`     ${result.hint}`);
+          say();
+          if (!(await askYesNo(rl, "¿Sigo de todas formas?", false))) {
+            say("✗ Nada escrito. Corrige los datos y vuelve a lanzarlo.");
+            process.exit(1);
+          }
+        }
+        manualConnections.push(manual);
       }
-      manualConnections.push(manual);
+
+      // Con una sola conexion la clave es siempre `maindb`, asi que no se pregunta.
+      // Con varias, el alias ES la clave con la que el agente pide la base de datos
+      // y ademas acaba dentro del nombre de una variable de entorno: uno invalido o
+      // repetido hace desaparecer una conexion sin ningun error.
+      if (manualConnections.length > 1) {
+        say();
+        say("Alias de cada una. Es la clave con la que el agente pedira la base de");
+        say("datos ('dbKey'); en Flexygo las skills de SC0 esperan config y data.");
+        const suggested = suggestAliases(manualConnections.map((c) => c.database));
+        const taken = [];
+        for (const [i, conn] of manualConnections.entries()) {
+          while (true) {
+            const alias = await ask(
+              rl,
+              `   Alias de ${conn.database} (${conn.server})`,
+              suggested[i]
+            );
+            const problem = aliasError(alias, taken);
+            if (!problem) {
+              conn.alias = alias;
+              taken.push(alias);
+              break;
+            }
+            say(`   ✗ ${problem}.`);
+          }
+        }
+      }
     } else {
       environment = isCore
         ? await ask(rl, "Entorno de appsettings", resolveEnvironment(undefined))

@@ -584,3 +584,157 @@ test("la carpeta precargada se escapa para no romper el atributo", () => {
   const html = gui.renderPage("t0ken", 'C:\\ra"ra&<x>');
   assert.ok(html.includes('value="C:\\ra&quot;ra&amp;&lt;x>"'), "comillas y & escapados");
 });
+
+test("validate sin fichero acepta VARIAS conexiones a mano y sugiere un alias a cada una", async () => {
+  // Regresion: el formulario solo tenia un bloque de datos, asi que en una carpeta
+  // sin Web.config no habia forma de exponer la de configuracion Y la de datos de
+  // Flexygo, aunque el fichero de credenciales y el wrapper ya soportaban varias.
+  await withGui(async ({ call, origin }) => {
+    const r = await call("/api/validate", {
+      origin,
+      body: {
+        configFile: null,
+        manual: [
+          { server: "127.0.0.1,9999", database: "DEMO_IC", user: "sa", password: "x" },
+          { server: "127.0.0.1,9999", database: "DEMO", user: "sa", password: "x" },
+        ],
+      },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.results.length, 2, "una fila por conexion");
+    for (const result of r.json.results) {
+      assert.equal(result.manual, true);
+      assert.equal(result.ok, false, "no hay servidor en ese puerto");
+    }
+    // El alias se sugiere en el servidor, con la misma regla que las cadenas de un
+    // fichero de configuracion, para no tener dos implementaciones.
+    assert.deepEqual(
+      r.json.results.map((x) => x.alias),
+      ["demo_ic", "demo"]
+    );
+  });
+});
+
+test("validate con una sola conexion a mano NO inventa alias", async () => {
+  // Con una la clave es siempre maindb: devolver un alias haria que el formulario lo
+  // mandase y el wrapper avisara de que lo ignora.
+  await withGui(async ({ call, origin }) => {
+    const r = await call("/api/validate", {
+      origin,
+      body: {
+        configFile: null,
+        manual: [{ server: "127.0.0.1,9999", database: "DEMO", user: "sa", password: "x" }],
+      },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.results.length, 1);
+    assert.equal(r.json.results[0].alias, undefined);
+  });
+});
+
+test("validate respeta el alias tecleado en vez de sugerir otro", async () => {
+  await withGui(async ({ call, origin }) => {
+    const r = await call("/api/validate", {
+      origin,
+      body: {
+        configFile: null,
+        manual: [
+          { server: "127.0.0.1,9999", database: "DEMO_IC", user: "sa", password: "x", alias: "config" },
+          { server: "127.0.0.1,9999", database: "DEMO", user: "sa", password: "x", alias: "data" },
+        ],
+      },
+    });
+    assert.deepEqual(
+      r.json.results.map((x) => x.alias),
+      ["config", "data"]
+    );
+  });
+});
+
+test("write guarda VARIAS conexiones a mano, cada una bajo su alias y cifrada", async () => {
+  const root = coreProject();
+  await withGui(async ({ call, origin }) => {
+    const r = await call("/api/write", {
+      origin,
+      body: {
+        projectDir: root,
+        configFile: null,
+        manualConnections: [
+          { server: HOST, database: "DEMO_IC", user: "sa", password: "clave-config", alias: "config" },
+          { server: HOST, database: "DEMO", user: "sa", password: "clave-data", alias: "data" },
+        ],
+        profileKey: "local",
+        clients: ["claude"],
+      },
+    });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json.dbKeys, ["config", "data"]);
+
+    const raw = fs.readFileSync(r.json.credentialsFile, "utf8");
+    assert.ok(!raw.includes("clave-config"), "la contrasena no puede estar en claro");
+    assert.ok(!raw.includes("clave-data"), "la contrasena no puede estar en claro");
+    const creds = JSON.parse(raw);
+    assert.deepEqual(Object.keys(creds.connections), ["config", "data"]);
+    assert.equal(creds.connections.config.database, "DEMO_IC");
+    assert.equal(creds.connections.data.database, "DEMO");
+    assert.equal(reveal(creds.connections.config.passwordEnc), "clave-config");
+    assert.equal(reveal(creds.connections.data.passwordEnc), "clave-data");
+
+    // Y ninguna de las dos en el .mcp.json, que se commitea.
+    const args = JSON.stringify(
+      JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8")).mcpServers["ahora-sql"].args
+    );
+    assert.ok(!args.includes("clave-config") && !args.includes("clave-data"));
+    assert.ok(args.includes("--credentials-file"));
+    fs.rmSync(r.json.credentialsFile, { force: true });
+  });
+});
+
+test("write rechaza un alias repetido o vacio entre las conexiones a mano", async () => {
+  // El alias acaba en MSSQL_<ALIAS>_DATABASE: repetido o vacio, una de las dos bases
+  // de datos desaparece sin ningun error.
+  const root = coreProject();
+  const base = { projectDir: root, configFile: null, profileKey: "local", clients: ["claude"] };
+  await withGui(async ({ call, origin }) => {
+    const repetido = await call("/api/write", {
+      origin,
+      body: {
+        ...base,
+        manualConnections: [
+          { server: HOST, database: "DEMO_IC", user: "sa", password: "x", alias: "data" },
+          { server: HOST, database: "DEMO", user: "sa", password: "x", alias: "data" },
+        ],
+      },
+    });
+    assert.equal(repetido.status, 400);
+    assert.match(repetido.json.error, /ya esta usado/);
+
+    const vacio = await call("/api/write", {
+      origin,
+      body: {
+        ...base,
+        manualConnections: [
+          { server: HOST, database: "DEMO_IC", user: "sa", password: "x" },
+          { server: HOST, database: "DEMO", user: "sa", password: "x" },
+        ],
+      },
+    });
+    assert.equal(vacio.status, 400);
+    assert.match(vacio.json.error, /no puede estar vacio/);
+  });
+});
+
+test("la pagina trae el boton de anadir otra conexion a mano", () => {
+  const html = gui.renderPage("t0ken");
+  assert.match(html, /id="btnAddManual"/);
+  assert.match(html, /id="manualList"/);
+});
+
+test("tocar los datos de una conexion a mano deshace la validacion", () => {
+  // Escribir lo que no se ha probado contra el servidor vacia de sentido el
+  // instalador: los bloques se pueden anadir y editar DESPUES de validar.
+  const html = gui.renderPage("t0ken");
+  assert.match(html, /function invalidateManual\(\)/);
+  assert.match(html, /oninput = invalidateManual/);
+  assert.match(html, /if \(!validated\) throw new Error/);
+});
