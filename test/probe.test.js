@@ -117,6 +117,27 @@ test("un timeout contra instancia nombrada sugiere el SQL Browser", async () => 
   assert.match(r.hint, /--port/);
 });
 
+test("un EINSTLOOKUP de 'not found in' sugiere activar TCP/IP en la instancia", async () => {
+  // Este es el caso que confunde de verdad: el SQL Browser SI contesta y SI conoce la
+  // instancia (no es un timeout), pero no trae un puerto tcp en su respuesta porque esa
+  // instancia solo tiene Named Pipes/memoria compartida. Sin pista, "Port for X not
+  // found in Y" parece un problema de red o de nombre cuando en realidad falta TCP/IP.
+  const mssql = {
+    ConnectionPool: function () {
+      this.connect = async () => {
+        throw Object.assign(new Error("Port for SQLEXPRESS not found in PC_158"), {
+          code: "EINSTLOOKUP",
+        });
+      };
+      this.close = async () => {};
+    },
+  };
+  const r = await probeConnection(PARTS, { mssql, discover: () => null });
+  assert.equal(r.ok, false);
+  assert.match(r.hint, /SQL Browser/);
+  assert.match(r.hint, /TCP\/IP/);
+});
+
 test("no se sugiere el SQL Browser cuando no hay instancia nombrada", async () => {
   const mssql = {
     ConnectionPool: function () {

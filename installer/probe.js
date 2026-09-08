@@ -38,10 +38,35 @@ function sanitizeError(err, secret) {
  * locales SSMS usa memoria compartida, mientras que tedious es solo TCP. Sin esta
  * aclaracion, el mensaje del driver parece decir que no hay acceso a la base de
  * datos cuando el acceso esta perfectamente.
+ *
+ * Hay un tercer fallo, distinto y mas confuso todavia porque no es un timeout: el SQL
+ * Browser SI contesta y SI conoce la instancia (tedious lo marca con el codigo
+ * EINSTLOOKUP), pero en su respuesta no hay un puerto TCP para ofrecer. La respuesta del
+ * Browser es una lista de pares por instancia (InstanceName, Version, tcp, np...), y
+ * tedious solo sabe leer el par "tcp"; si esa instancia tiene el protocolo TCP/IP
+ * desactivado en SQL Server Configuration Manager (solo Named Pipes o memoria
+ * compartida, que es lo unico que necesita SSMS en local), el par "tcp" no esta y el
+ * mensaje literal es "Port for <instancia> not found in <servidor>": lee como un
+ * problema de permisos o de red cuando el Browser ha encontrado la instancia
+ * perfectamente y lo que falta es activar TCP/IP. Una errata en el nombre de instancia
+ * (o una instancia ya desinstalada) da el mismo mensaje, asi que tambien se menciona.
  */
 function hintFor({ viaInstance, error }) {
   if (!viaInstance) return null;
-  if (!/ETIMEOUT|timeout/i.test(String(error))) return null;
+  const message = String(error);
+  if (/EINSTLOOKUP/.test(message) && /not found in/i.test(message)) {
+    return (
+      "El SQL Browser ha contestado y conoce esa instancia, pero no ha ofrecido un " +
+      "puerto TCP para ella: lo mas probable es que el protocolo TCP/IP este " +
+      "desactivado en esa instancia (SQL Server Configuration Manager > Protocolos de " +
+      "<instancia> > TCP/IP > Habilitado, y reiniciar el servicio). Que SSMS conecte " +
+      "no lo descarta: en local usa Named Pipes o memoria compartida, y este driver " +
+      "es solo TCP. Si TCP/IP ya esta habilitado, revisa tambien que el nombre de " +
+      "instancia este bien escrito. Con un puerto estatico puedes pasarlo con --port " +
+      "y evitas depender del SQL Browser."
+    );
+  }
+  if (!/ETIMEOUT|timeout/i.test(message)) return null;
   return (
     "Instancia nombrada con tiempo de espera agotado. Dos causas posibles: el " +
     "servicio SQL Browser parado, o el protocolo TCP/IP desactivado en esa " +
