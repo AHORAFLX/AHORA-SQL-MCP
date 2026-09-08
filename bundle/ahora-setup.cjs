@@ -74544,7 +74544,11 @@ var require_probe = __commonJS({
     }
     function hintFor({ viaInstance, error }) {
       if (!viaInstance) return null;
-      if (!/ETIMEOUT|timeout/i.test(String(error))) return null;
+      const message = String(error);
+      if (/EINSTLOOKUP/.test(message) && /not found in/i.test(message)) {
+        return "El SQL Browser ha contestado y conoce esa instancia, pero no ha ofrecido un puerto TCP para ella: lo mas probable es que el protocolo TCP/IP este desactivado en esa instancia (SQL Server Configuration Manager > Protocolos de <instancia> > TCP/IP > Habilitado, y reiniciar el servicio). Que SSMS conecte no lo descarta: en local usa Named Pipes o memoria compartida, y este driver es solo TCP. Si TCP/IP ya esta habilitado, revisa tambien que el nombre de instancia este bien escrito. Con un puerto estatico puedes pasarlo con --port y evitas depender del SQL Browser.";
+      }
+      if (!/ETIMEOUT|timeout/i.test(message)) return null;
       return "Instancia nombrada con tiempo de espera agotado. Dos causas posibles: el servicio SQL Browser parado, o el protocolo TCP/IP desactivado en esa instancia (comprueba las dos en SQL Server Configuration Manager). Que SSMS conecte no lo descarta: en local usa memoria compartida, y este driver es solo TCP. Con un puerto estatico puedes pasarlo con --port y no hace falta el SQL Browser.";
     }
     async function probeConnection(rawParts, { timeoutMs = DEFAULT_TIMEOUT_MS, mssql = sqlLib, discover } = {}) {
@@ -74784,7 +74788,7 @@ var require_package2 = __commonJS({
   "package.json"(exports2, module2) {
     module2.exports = {
       name: "@ahoraflx/sql-mcp",
-      version: "1.10.0",
+      version: "1.11.0",
       description: "Servidor MCP de SQL Server para los proyectos Flexygo y AHORA_ERP.",
       keywords: [
         "mssql",
@@ -74908,17 +74912,32 @@ var require_gui = __commonJS({
     }
     async function validate({ configFile, environment, names = [], manual }) {
       if (!configFile) {
-        if (!manual || !manual.server || !manual.database || !manual.user || !manual.password) {
+        const typed = (Array.isArray(manual) ? manual : [manual]).filter(Boolean);
+        if (typed.length === 0) {
           throw new Error("Faltan datos: servidor, base de datos, usuario y contrasena.");
         }
-        const probe = await probeConnection({
-          datasource: manual.server,
-          initialcatalog: manual.database,
-          userid: manual.user,
-          password: manual.password,
-          ...manual.port ? { datasource: `${manual.server},${manual.port}` } : {}
-        });
-        return [{ name: "(datos introducidos)", manual: true, ...probe }];
+        const suggested = typed.length > 1 ? suggestAliases(typed.map((m) => m.alias || m.database)) : [];
+        const results2 = [];
+        for (const [i, one] of typed.entries()) {
+          if (!one.server || !one.database || !one.user || !one.password) {
+            throw new Error("Faltan datos: servidor, base de datos, usuario y contrasena.");
+          }
+          const probe = await probeConnection({
+            datasource: one.server,
+            initialcatalog: one.database,
+            userid: one.user,
+            password: one.password,
+            ...one.port ? { datasource: `${one.server},${one.port}` } : {}
+          });
+          const alias = typed.length > 1 ? one.alias || suggested[i] : void 0;
+          results2.push({
+            ...probe,
+            manual: true,
+            alias,
+            name: alias || "(datos introducidos)"
+          });
+        }
+        return results2;
       }
       const resolved = resolveConfigFile(configFile);
       const results = [];
@@ -74976,16 +74995,17 @@ var require_gui = __commonJS({
       for (const dir of sqlDirs) {
         if (!fs6.existsSync(dir)) throw new Error(`La carpeta de .sql no existe: ${dir}`);
       }
-      if (connections.length > 1) {
+      const checkAliases = (list, label) => {
+        if (list.length < 2) return;
         const seen = [];
-        for (const c of connections) {
+        for (const c of list) {
           const problem = aliasError(c.alias, seen);
-          if (problem) {
-            throw new Error(`Alias de '${c.name}': ${problem}.`);
-          }
+          if (problem) throw new Error(`Alias de '${label(c)}': ${problem}.`);
           seen.push(c.alias);
         }
-      }
+      };
+      checkAliases(connections, (c) => c.name);
+      checkAliases(manualConnections, (c) => c.database);
       let credentialsFile;
       if (manualConnections.length > 0) {
         credentialsFile = writeCredentialsFile(root, manualConnections);
@@ -75258,19 +75278,21 @@ Instalador AHORA-SQL-MCP v${PKG_VERSION}`);
         y rellenas en appsettings.&lt;entorno&gt;.json.</p>
     </div>
     <div id="names"></div>
-    <fieldset id="manual" hidden>
-      <legend>Sin fichero de configuracion</legend>
-      <label for="mServer">Servidor</label>
-      <input type="text" id="mServer" placeholder="PC_158\\SQL2022">
-      <label for="mDb">Base de datos</label>
-      <input type="text" id="mDb">
-      <label for="mUser">Usuario</label>
-      <input type="text" id="mUser">
-      <label for="mPass">Contrasena</label>
-      <input type="password" id="mPass">
-      <p class="hint">No se guardan en el .mcp.json: van a un fichero fuera del
-        repositorio y en la configuracion solo queda su ruta.</p>
-    </fieldset>
+    <div id="manual" hidden>
+      <label>Sin fichero de configuracion</label>
+      <p class="hint">Mete <strong>tantas conexiones como quieras</strong>: cada una sera
+        una base de datos distinta para el agente. No se guardan en el .mcp.json: van a
+        un fichero fuera del repositorio y en la configuracion solo queda su ruta.</p>
+      <div id="manualList"></div>
+      <button type="button" class="sec" id="btnAddManual" style="margin-top:10px">
+        + Anadir otra conexion</button>
+      <p class="hint" id="manualAliasHint" hidden>El alias es la clave con la que el
+        agente pedira la base de datos (<code>dbKey</code>). Flexygo usa
+        <code>config</code> y <code>data</code>, que es lo que esperan las skills de SC0.
+        Acaba dentro de un nombre de variable de entorno: solo letras, digitos y guion
+        bajo, empezando por letra. Con una sola conexion se ignora y la clave es
+        <code>maindb</code>.</p>
+    </div>
     <div class="row" style="margin-top:16px">
       <div></div><button id="btnValidate">Validar conexion</button>
     </div>
@@ -75381,9 +75403,14 @@ function renderFiles() {
 
 function onFileChange() {
   const val = document.querySelector('input[name=cfg]:checked').value;
+  // Cambiar de fuente deshace la validacion: lo validado era de la otra.
+  validated = null;
+  $("s3").hidden = true;
+  $("validateOut").innerHTML = "";
   if (val === "none") {
     chosenFile = null;
     $("manual").hidden = false; $("coreEnv").hidden = true; $("names").innerHTML = "";
+    if (document.querySelectorAll("#manualList .mconn").length === 0) addManual();
     return;
   }
   chosenFile = detected.files[Number(val)];
@@ -75427,18 +75454,96 @@ function selectedNames() {
   if (out.length === 1) out[0].alias = undefined;
   return out;
 }
-function manualConnection() {
-  return { server: $("mServer").value.trim(), database: $("mDb").value.trim(),
-           user: $("mUser").value.trim(), password: $("mPass").value };
+// \u2500\u2500 Conexiones a mano \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// Una lista, no un bloque fijo. El caso de Flexygo (configuracion + datos) tambien
+// se da en carpetas sin Web.config, y con un solo bloque la segunda base de datos
+// no habia forma de meterla desde aqui.
+function addManual() {
+  const block = document.createElement("fieldset");
+  block.className = "mconn";
+  block.innerHTML =
+    '<legend></legend>' +
+    '<label>Servidor</label>' +
+    '<input type="text" class="mServer" placeholder="PC_158\\\\SQL2022">' +
+    '<label>Base de datos</label><input type="text" class="mDb">' +
+    '<label>Usuario</label><input type="text" class="mUser">' +
+    '<label>Contrasena</label><input type="password" class="mPass">' +
+    '<div class="mAliasBox" hidden><label>Alias</label>' +
+    '<input type="text" class="mAlias" placeholder="config"></div>' +
+    '<div class="row" style="margin-top:12px"><div></div>' +
+    '<button type="button" class="sec mDel">Quitar</button></div>';
+  block.querySelector(".mDel").onclick = () => { block.remove(); syncManual(); };
+  // Tocar los datos obliga a volver a validar: lo que se escribe tiene que ser lo
+  // que se ha probado contra el servidor, que es la razon de ser del instalador. El
+  // alias queda fuera a proposito: se rellena DESPUES de validar, con la sugerencia.
+  for (const sel of [".mServer", ".mDb", ".mUser", ".mPass"]) {
+    block.querySelector(sel).oninput = invalidateManual;
+  }
+  $("manualList").appendChild(block);
+  syncManual();
+  block.querySelector(".mServer").focus();
 }
+
+/** Deshace la validacion: el paso 3 no vuelve hasta que se prueben los datos nuevos. */
+function invalidateManual() {
+  if (chosenFile) return;
+  validated = null;
+  $("s3").hidden = true;
+  $("validateOut").innerHTML = "";
+}
+
+/**
+ * Numera los bloques y ensena el alias solo cuando hace falta.
+ *
+ * Con una conexion la clave es siempre maindb y pedir un alias solo consigue que el
+ * wrapper avise de que lo ignora; con varias es obligatorio, porque ES la clave.
+ */
+function syncManual() {
+  const blocks = [...document.querySelectorAll("#manualList .mconn")];
+  const varias = blocks.length > 1;
+  blocks.forEach((b, i) => {
+    b.querySelector("legend").textContent = varias ? "Conexion " + (i + 1) : "Datos de conexion";
+    b.querySelector(".mAliasBox").hidden = !varias;
+    b.querySelector(".mDel").hidden = blocks.length < 2;
+  });
+  $("manualAliasHint").hidden = !varias;
+  invalidateManual();
+}
+
+/** Los bloques con algo escrito. Uno vacio del todo se ignora en vez de dar error. */
+function manualBlocks() {
+  return [...document.querySelectorAll("#manualList .mconn")].filter((b) =>
+    [".mServer", ".mDb", ".mUser", ".mPass"].some((sel) => b.querySelector(sel).value.trim())
+  );
+}
+
+function manualConnections() {
+  const out = manualBlocks().map((b) => {
+    const v = (sel) => b.querySelector(sel).value.trim();
+    const one = { server: v(".mServer"), database: v(".mDb"), user: v(".mUser"),
+                  password: b.querySelector(".mPass").value };
+    const alias = v(".mAlias");
+    if (alias) one.alias = alias;
+    return one;
+  });
+  // Con una sola la clave es siempre maindb: un alias que se quedo de cuando habia
+  // dos bloques cambiaria la clave sin que el campo este ni visible.
+  if (out.length === 1) delete out[0].alias;
+  return out;
+}
+
+$("btnAddManual").onclick = addManual;
 
 $("btnValidate").onclick = async () => {
   $("btnValidate").disabled = true;
   $("validateOut").innerHTML = "Probando la conexion contra el servidor\u2026";
   try {
-    const manual = chosenFile ? null : manualConnection();
+    const manual = chosenFile ? null : manualConnections();
     const names = chosenFile ? selectedNames() : [];
     if (chosenFile && names.length === 0) throw new Error("Elige al menos una cadena de conexion.");
+    if (!chosenFile && manual.length === 0) {
+      throw new Error("Faltan datos: servidor, base de datos, usuario y contrasena.");
+    }
 
     const { results } = await api("validate", {
       configFile: chosenFile ? chosenFile.path : null,
@@ -75448,10 +75553,14 @@ $("btnValidate").onclick = async () => {
 
     const rows = results.map((r) => {
       if (r.manual) {
+        // Con varias conexiones hay que poder decir CUAL falla, asi que el alias
+        // sugerido va delante: con una sola no hay ambig\xFCedad y estorba.
+        const quien = r.alias ? "<strong>" + esc(r.alias) + "</strong> \u2192 " : "";
         return r.ok
-          ? '<li><span class="ok">\u2713</span> conectado a <strong>' + esc(r.target) + "</strong> / " +
-            esc(r.database) + (r.version ? ' <span class="hint">' + esc(r.version) + "</span>" : "") + "</li>"
-          : '<li><span class="err">\u2717</span> no conecta a <strong>' + esc(r.target) +
+          ? '<li><span class="ok">\u2713</span> ' + quien + "conectado a <strong>" + esc(r.target) +
+            "</strong> / " + esc(r.database) +
+            (r.version ? ' <span class="hint">' + esc(r.version) + "</span>" : "") + "</li>"
+          : '<li><span class="err">\u2717</span> ' + quien + "no conecta a <strong>" + esc(r.target) +
             '</strong><br><span class="err">' + esc(r.error) + "</span>" +
             (r.hint ? '<br><span class="hint">' + esc(r.hint) + "</span>" : "") + "</li>";
       }
@@ -75485,9 +75594,18 @@ $("btnValidate").onclick = async () => {
         "Continuar de todas formas</label></div>";
       $("forzar").onchange = () => { $("s3").hidden = !$("forzar").checked; };
     }
+    // El alias que ha sugerido el servidor se devuelve a los campos, para que quede
+    // visible y editable antes de escribir: es la clave con la que el agente pedira
+    // la base de datos, no un detalle interno.
+    if (!chosenFile) {
+      const cajas = manualBlocks().map((b) => b.querySelector(".mAlias"));
+      results.forEach((r, i) => {
+        if (r.alias && cajas[i] && !cajas[i].value.trim()) cajas[i].value = r.alias;
+      });
+    }
     validated = chosenFile
       ? { names: results.map((r) => ({ name: r.name, alias: r.alias })) }
-      : { manual: [manual] };
+      : { manual };
     if (!noConecta) $("s3").hidden = false;
   } catch (e) {
     $("validateOut").innerHTML = '<p class="err">' + esc(e.message) + "</p>";
@@ -75518,6 +75636,9 @@ $("btnWrite").onclick = async () => {
   $("btnWrite").disabled = true;
   $("writeOut").innerHTML = "Escribiendo\u2026";
   try {
+    // Se puede llegar aqui con la validacion deshecha: tocar los datos de una
+    // conexion a mano la invalida, y el paso 3 ya estaba a la vista.
+    if (!validated) throw new Error("Vuelve a validar la conexion antes de escribir.");
     const clients = [];
     if ($("cClaude").checked) clients.push("claude");
     if ($("cVscode").checked) clients.push("vscode");
@@ -75529,7 +75650,10 @@ $("btnWrite").onclick = async () => {
       configFile: chosenFile ? chosenFile.path : null,
       environment: $("env").value,
       connections: validated.names || [],
-      manualConnections: validated.manual || [],
+      // Se releen del formulario en vez de usar lo validado: los alias se rellenan
+      // DESPUES de validar (los sugiere el servidor), asi que si se toca uno hay que
+      // escribir el que se ve, no el de la validacion.
+      manualConnections: validated.manual ? manualConnections() : [],
       profileKey: $("profile").value,
       allowWrites: $("writes").checked,
       allowRules: $("cRules").checked,
@@ -76028,36 +76152,70 @@ var require_setup = __commonJS({
         const probes = [];
         let environment;
         if (!resolved) {
-          const server = await ask(rl, "Servidor (p. ej. PC_158\\SQL2022 o 10.0.0.9,1433)");
-          const database = await ask(rl, "Base de datos");
-          const user = await ask(rl, "Usuario");
-          const password = await ask(rl, "Contrasena");
-          if (!server || !database || !user || !password) {
-            say("\u2717 Faltan datos. Nada escrito.");
-            process.exit(1);
-          }
-          const manual = { server, database, user, password };
-          say();
-          say("Probando la conexion de verdad...");
-          const result = await probeConnection({
-            datasource: server,
-            initialcatalog: database,
-            userid: user,
-            password
-          });
-          if (result.ok) {
-            say(`   \u2713 conectado a ${result.target} / ${result.database}`);
-            if (result.version) say(`     ${result.version}`);
-          } else {
-            say(`   \u2717 no he podido conectar: ${result.error}`);
-            if (result.hint) say(`     ${result.hint}`);
+          say("Puedes meter varias: cada una sera una base de datos distinta para el");
+          say("agente. Se piden de una en una y se prueban al momento.");
+          while (true) {
+            const n = manualConnections.length;
             say();
-            if (!await askYesNo(rl, "\xBFSigo de todas formas?", false)) {
-              say("\u2717 Nada escrito. Corrige los datos y vuelve a lanzarlo.");
+            const server = n === 0 ? await ask(rl, "Servidor (p. ej. PC_158\\SQL2022 o 10.0.0.9,1433)") : await ask(rl, `Servidor de la conexion ${n + 1} (vacio para terminar)`);
+            if (!server) {
+              if (n > 0) break;
+              say("\u2717 Faltan datos. Nada escrito.");
               process.exit(1);
             }
+            const database = await ask(rl, "Base de datos");
+            const user = await ask(rl, "Usuario");
+            const password = await ask(rl, "Contrasena");
+            if (!database || !user || !password) {
+              say("\u2717 Faltan datos. Nada escrito.");
+              process.exit(1);
+            }
+            const manual = { server, database, user, password };
+            say();
+            say("Probando la conexion de verdad...");
+            const result = await probeConnection({
+              datasource: server,
+              initialcatalog: database,
+              userid: user,
+              password
+            });
+            if (result.ok) {
+              say(`   \u2713 conectado a ${result.target} / ${result.database}`);
+              if (result.version) say(`     ${result.version}`);
+            } else {
+              say(`   \u2717 no he podido conectar: ${result.error}`);
+              if (result.hint) say(`     ${result.hint}`);
+              say();
+              if (!await askYesNo(rl, "\xBFSigo de todas formas?", false)) {
+                say("\u2717 Nada escrito. Corrige los datos y vuelve a lanzarlo.");
+                process.exit(1);
+              }
+            }
+            manualConnections.push(manual);
           }
-          manualConnections.push(manual);
+          if (manualConnections.length > 1) {
+            say();
+            say("Alias de cada una. Es la clave con la que el agente pedira la base de");
+            say("datos ('dbKey'); en Flexygo las skills de SC0 esperan config y data.");
+            const suggested = suggestAliases(manualConnections.map((c) => c.database));
+            const taken = [];
+            for (const [i, conn] of manualConnections.entries()) {
+              while (true) {
+                const alias = await ask(
+                  rl,
+                  `   Alias de ${conn.database} (${conn.server})`,
+                  suggested[i]
+                );
+                const problem = aliasError(alias, taken);
+                if (!problem) {
+                  conn.alias = alias;
+                  taken.push(alias);
+                  break;
+                }
+                say(`   \u2717 ${problem}.`);
+              }
+            }
+          }
         } else {
           environment = isCore ? await ask(rl, "Entorno de appsettings", resolveEnvironment(void 0)) : void 0;
           const names = listConnectionNames(resolved, { environment });
