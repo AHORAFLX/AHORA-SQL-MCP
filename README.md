@@ -10,7 +10,7 @@ columnas, vistas y procedimientos **antes** de generar T-SQL, en lugar de supone
 > ti, validando la conexión antes:
 >
 > ```bash
-> npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.11.0 ahora-setup
+> npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.12.0 ahora-setup
 > ```
 
 > **Este repositorio no se instala a mano.** Usa la skill `setup-mcp-sql` del repositorio de

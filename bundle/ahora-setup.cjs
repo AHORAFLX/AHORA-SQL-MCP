@@ -75129,7 +75129,7 @@ var require_package2 = __commonJS({
   "package.json"(exports2, module2) {
     module2.exports = {
       name: "@ahoraflx/sql-mcp",
-      version: "1.11.0",
+      version: "1.12.0",
       description: "Servidor MCP de SQL Server para los proyectos Flexygo y AHORA_ERP.",
       keywords: [
         "mssql",
