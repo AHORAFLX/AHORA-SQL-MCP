@@ -32190,7 +32190,8 @@ var require_package = __commonJS({
       bin: {
         "ahora-sql-mcp": "./bundle/ahora-sql-mcp.cjs",
         "start-mssql-mcp": "./bundle/start-mssql-mcp.cjs",
-        "ahora-setup": "./bundle/ahora-setup.cjs"
+        "ahora-setup": "./bundle/ahora-setup.cjs",
+        "start-ahora-mcp": "./bundle/start-ahora-mcp.cjs"
       },
       files: [
         "bundle/",

@@ -541,6 +541,23 @@ test("write no toca los permisos si no se piden las reglas", async () => {
   });
 });
 
+test("el JS que se sirve al navegador es sintacticamente valido", () => {
+  // Toda la logica del formulario vive dentro de un literal de plantilla de gui.js,
+  // asi que una comilla invertida suelta en un comentario -o un ${...} no
+  // intencionado- rompe el JS del navegador. Node no se entera: el fichero sigue
+  // cargando, la pagina se sirve, y lo que falla es el primer clic, sin ningun test
+  // en rojo. Aqui se analiza lo que se sirve de verdad.
+  const html = gui.renderPage("t0ken", "C:\\proy");
+  const script = html.match(/<script>([\s\S]*?)<\/script>/);
+  assert.ok(script, "la pagina tiene que llevar su script dentro");
+  // `new Function` analiza sin ejecutar: el cuerpo referencia `document`, que aqui
+  // no existe, pero un error de sintaxis salta en la construccion.
+  assert.doesNotThrow(
+    () => new Function(script[1]),
+    "el script del formulario no es JavaScript valido"
+  );
+});
+
 test("la casilla de reglas de escritura llega oculta en la pagina", () => {
   // Solo debe aparecer cuando la escritura esta habilitada; el JS la muestra.
   const html = gui.renderPage("t0ken");

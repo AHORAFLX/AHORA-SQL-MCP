@@ -217,6 +217,47 @@ sabes el puerto, deja que lo haga el instalador guiado.
 
 ---
 
+## 2 bis. MCP de desarrollo de producto (`ahora-mcp`), opcional
+
+En el instalador hay una casilla **«Instalar también el MCP de producto»**. Registra un
+**segundo** servidor MCP, `ahora-erp`, en el mismo `.mcp.json`: es el paquete
+[`ahora-mcp`](https://nuget.ahorabh.com/packages/ahora-mcp/) del equipo de producto, con 98
+herramientas para personalizar el ERP (objetos, DDA, scripts de pantalla, campos
+configurables, permisos…).
+
+**Se añade al lado de `ahora-sql`, no en su lugar.** Los dos conviven en la misma sesión con
+prefijos distintos, `mcp__ahora-sql__*` y `mcp__ahora-erp__ahora_*`, y la skill
+`resolver-tickets-erp` sigue usando el primero para diagnosticar.
+
+| | |
+|---|---|
+| **Requisitos** | SDK de .NET 10 y acceso a `nuget.ahorabh.com` **y** a `api.nuget.org` (el feed de AHORA solo hospeda `ahora-mcp`; sus dependencias de Microsoft vienen del feed público). Si no llegas a uno de los dos, el instalador te deja indicar una carpeta con el MCP ya publicado y la copia. |
+| **Dónde se instala** | `%LOCALAPPDATA%\AHORA-SQL-MCP\ahora-mcp\app`. Una sola vez por equipo, no en cada arranque. |
+| **Base de datos** | **Una sola por proceso**: su `ahora_connect` no entiende alias ni `dbKey`. El instalador te hace elegir cuál de las conexiones ya validadas usa. |
+| **Credenciales** | Como en el MCP de SQL: en el `.mcp.json` queda **de dónde** sacar la conexión (`--config-file` + `--connection-name`, o `--credentials-file` + `--db`), nunca la cadena. La resuelve `start-ahora-mcp` en cada arranque. |
+| **Producción** | **No se ofrece.** Ese servidor no tiene modo de solo lectura —ningún flag desactiva `ahora_ejecutar_dml` ni `ahora_crear_*`/`ahora_modificar_*`/`ahora_borrar_*`—, así que no hay forma de dejarlo configurado para que no toque el ERP en vivo. |
+
+La entrada que se escribe tiene esta forma:
+
+```jsonc
+"ahora-erp": {
+  "command": "node",
+  "args": [
+    "C:/Users/<tu-usuario>/AppData/Local/AHORA-SQL-MCP/node_modules/@ahoraflx/sql-mcp/bundle/start-ahora-mcp.cjs",
+    "--server-dll", "C:/Users/<tu-usuario>/AppData/Local/AHORA-SQL-MCP/ahora-mcp/app/ahora-mcp.dll",
+    "--config-file", "C:/ruta/al/proyecto/Web.config",
+    "--connection-name", "DataConnectionString"
+  ]
+}
+```
+
+Para comprobarlo, pide al agente *«prueba la conexión con el ERP»* (`ahora_test_connection`).
+
+⚠️ Las reglas de permisos de sus **escrituras** se ofrecen aparte y por defecto **no** se
+añaden. Al no haber modo de solo lectura, son el único freno que queda.
+
+---
+
 ## 3. Comprobar que funciona
 
 1. **Abre una sesión nueva sobre esa carpeta.** La configuración se lee al arrancar la sesión y es

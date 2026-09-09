@@ -19,6 +19,21 @@ const SERVER_NAME = "ahora-sql";
 const LEGACY_SERVER_NAME = "mssql";
 
 /**
+ * El MCP de desarrollo de producto (el paquete `ahora-mcp` del feed de AHORA).
+ *
+ * Es un servidor DISTINTO, no una variante de este: lo publica el equipo de producto,
+ * corre sobre .NET y trae 98 herramientas propias (`ahora_leer_*`, `ahora_crear_*`,
+ * `ahora_ejecutar_dml`...) para personalizar el ERP. Se registra al lado de
+ * `ahora-sql` en el mismo fichero de cliente, no en su lugar.
+ *
+ * `ahora-erp` y no `ahora-mcp`: el nombre del servidor es lo que el cliente antepone
+ * a cada herramienta, y sus tools ya empiezan por `ahora_`, asi que `ahora-mcp`
+ * dejaria `mcp__ahora-mcp__ahora_leer_objeto`, con el "mcp" repetido dos veces. Y
+ * dice de que habla —el ERP— en lugar de repetir el protocolo.
+ */
+const PRODUCT_SERVER_NAME = "ahora-erp";
+
+/**
  * ¿Esta entrada de servidor MCP la escribimos nosotros?
  *
  * Importa para la migracion: una entrada `mssql` puede ser la nuestra de una
@@ -41,4 +56,23 @@ function isOurServerEntry(entry) {
   );
 }
 
-module.exports = { SERVER_NAME, LEGACY_SERVER_NAME, isOurServerEntry };
+/**
+ * ¿Esta entrada de servidor MCP es el `ahora-erp` que escribimos nosotros?
+ *
+ * Se reconoce por el lanzador, no por el nombre de la entrada: alguien puede tener
+ * un `ahora-erp` propio apuntando al exe del MCP de producto a mano, y ese no se
+ * toca. Lo nuestro siempre arranca por `start-ahora-mcp`.
+ */
+function isOurProductEntry(entry) {
+  if (!entry || typeof entry !== "object") return false;
+  const args = Array.isArray(entry.args) ? entry.args : [];
+  return args.some((a) => typeof a === "string" && a.includes("start-ahora-mcp"));
+}
+
+module.exports = {
+  SERVER_NAME,
+  LEGACY_SERVER_NAME,
+  PRODUCT_SERVER_NAME,
+  isOurServerEntry,
+  isOurProductEntry,
+};

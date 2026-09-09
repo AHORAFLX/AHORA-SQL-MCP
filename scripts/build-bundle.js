@@ -53,6 +53,11 @@ const ENTRIES = [
   { in: "bin/start-mssql-mcp.js", out: "start-mssql-mcp.cjs" },
   { in: "src/index.js", out: "ahora-sql-mcp.cjs" },
   { in: "installer/exe-entry.js", out: "ahora-setup.cjs", shebang: true },
+  // El lanzador del MCP de producto es una CUARTA entrada ejecutable, no parte de las
+  // otras: lo arranca el cliente MCP por su cuenta, con su propia entrada en el
+  // .mcp.json, y lo unico que comparte con el wrapper de SQL es como leer la conexion
+  // del Web.config y del fichero de credenciales cifrado.
+  { in: "bin/start-ahora-mcp.js", out: "start-ahora-mcp.cjs" },
 ];
 
 async function main() {

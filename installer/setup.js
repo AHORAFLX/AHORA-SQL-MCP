@@ -22,7 +22,6 @@
 const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
-const { execFileSync } = require("child_process");
 
 const {
   resolveConfigFile,
@@ -35,8 +34,25 @@ const {
 const { writeCredentialsFile } = require("./credentials");
 const { probeConnection } = require("./probe");
 const { allowMcpTools } = require("./permissions");
-const { SERVER_NAME, LEGACY_SERVER_NAME, isOurServerEntry } = require("./server-name");
+const {
+  SERVER_NAME,
+  LEGACY_SERVER_NAME,
+  PRODUCT_SERVER_NAME,
+  isOurServerEntry,
+  isOurProductEntry,
+} = require("./server-name");
 const { installRuntime } = require("./runtime");
+const { toolVersion } = require("./tools");
+const {
+  PRODUCT_PACKAGE,
+  productRuntimeDir,
+  productDll,
+  installedProductVersion,
+  latestProductVersion,
+  dotnetSdkVersion,
+  installProductMcp,
+  installProductFromFolder,
+} = require("./product-mcp");
 
 const PKG_VERSION = require("../package.json").version;
 const PKG_SPEC = `github:AHORAFLX/AHORA-SQL-MCP#v${PKG_VERSION}`;
@@ -57,38 +73,6 @@ function title(msg) {
 
 function stripBom(text) {
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-}
-
-/**
- * Version de un ejecutable del PATH de la MAQUINA, o null si no esta.
- *
- * Dos intentos, y el ORDEN importa: primero SIN shell, y solo si eso falla, con shell.
- *
- * Con shell hace falta para `npm`, que en Windows es `npm.cmd` y no se puede ejecutar
- * directamente. Pero `node` es un .exe y no lo necesita, y pedir shell cuando no hace
- * falta ataba esta comprobacion a que el shell del sistema estuviera sano.
- *
- * No es hipotetico: en un equipo con una instalacion de Git para Windows cuyo sh.exe
- * aborta con "fatal error - add_item ... failed, errno 1" -un fallo del runtime MSYS que
- * se dispara de forma intermitente-, `node --version` fallaba aqui y checkNode()
- * concluia que en el equipo no hay Node instalado. El instalador se negaba a seguir en
- * una maquina que si lo tiene, y el mensaje no daba ninguna pista de por que.
- */
-function toolVersion(command) {
-  const intentos = process.platform === "win32" ? [false, true] : [false];
-  for (const conShell of intentos) {
-    try {
-      const salida = execFileSync(command, ["--version"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-        shell: conShell,
-      });
-      if (salida && salida.trim()) return salida.trim();
-    } catch {
-      // Se prueba la forma siguiente; si no queda ninguna, se devuelve null.
-    }
-  }
-  return null;
 }
 
 /**
@@ -496,6 +480,128 @@ function writeClientConfig(client, root, { command, args }) {
 }
 
 /**
+ * Los argumentos del lanzador del MCP de producto.
+ *
+ * Deliberadamente NO llevan la cadena de conexion, solo de donde sacarla: el
+ * .mcp.json se commitea, y la contrasena del ERP no puede viajar ahi. La resuelve
+ * bin/start-ahora-mcp.js en cada arranque, igual que hace el servidor de SQL.
+ *
+ * Una sola base de datos, porque `ahora-mcp` maneja una por proceso: su
+ * `ahora_connect` solo acepta servidor y base de datos, sin alias ni `dbKey`.
+ */
+function buildProductFlags({
+  serverDll,
+  configFile,
+  credentialsFile,
+  connectionName,
+  db,
+  environment,
+  production,
+}) {
+  const flags = ["--server-dll", serverDll.replace(/\\/g, "/")];
+  if (credentialsFile) {
+    flags.push("--credentials-file", credentialsFile.replace(/\\/g, "/"));
+    if (db) flags.push("--db", db);
+  } else {
+    flags.push("--config-file", configFile.replace(/\\/g, "/"));
+    flags.push("--connection-name", connectionName);
+    if (environment) flags.push("--environment", environment);
+  }
+  if (production) flags.push("--production");
+  return flags;
+}
+
+/**
+ * Como se lanza el MCP de producto, deducido de como quedo el de SQL.
+ *
+ * Los dos lanzadores viven en la misma carpeta del paquete instalado, asi que no hay
+ * que resolver nada por segunda vez: si el servidor de SQL arranca instalado, este
+ * tambien; si aquel cayo a la forma npx, este cae igual. Deducirlo evita el caso raro
+ * de escribir una entrada que apunta a una instalacion que no existe.
+ */
+function productCommandFrom(serverEntry, flags) {
+  if (serverEntry.command === "npx") {
+    return {
+      command: "npx",
+      args: [
+        "--yes",
+        "--prefer-offline",
+        `--package=${PKG_SPEC}`,
+        "start-ahora-mcp",
+        ...flags,
+      ],
+    };
+  }
+  const bundleDir = path.posix.dirname(String(serverEntry.args[0]).replace(/\\/g, "/"));
+  return { command: "node", args: [`${bundleDir}/start-ahora-mcp.cjs`, ...flags] };
+}
+
+/**
+ * Escribe (o retira) la entrada del MCP de producto en un fichero de cliente.
+ *
+ * SUMA, nunca sustituye: la entrada `ahora-sql` se queda donde esta y las dos
+ * conviven en la misma sesion. Es lo que permite que la skill de resolucion de
+ * tickets siga usando `mcp__ahora-sql__*` mientras el MCP de producto expone sus
+ * `mcp__ahora-erp__*` al lado.
+ *
+ * Con `entry` a null se retira, y SOLO si es la nuestra: alguien puede tener un
+ * `ahora-erp` propio apuntando al exe a mano, y ese no se toca.
+ */
+function writeProductConfig(client, root, entry) {
+  const target = client.file(root);
+  const existing = readJsonIfExists(target);
+  const doc = existing && typeof existing === "object" ? existing : {};
+
+  if (entry === null) {
+    const servers = doc[client.key];
+    if (!servers || typeof servers !== "object") return null;
+    if (!servers[PRODUCT_SERVER_NAME] || !isOurProductEntry(servers[PRODUCT_SERVER_NAME])) {
+      return null;
+    }
+    delete servers[PRODUCT_SERVER_NAME];
+    fs.writeFileSync(target, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
+    return { target, removed: true };
+  }
+
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  doc[client.key] = doc[client.key] && typeof doc[client.key] === "object" ? doc[client.key] : {};
+  const servers = doc[client.key];
+  const replaced = Boolean(servers[PRODUCT_SERVER_NAME]);
+  servers[PRODUCT_SERVER_NAME] = { command: entry.command, args: entry.args };
+
+  fs.writeFileSync(target, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
+  return { target, replaced, removed: false };
+}
+
+/** ¿Este proyecto ya tiene registrado nuestro MCP de producto? */
+function hasProductServer(root) {
+  for (const client of Object.values(CLIENTS)) {
+    const doc = readJsonIfExists(client.file(root));
+    const servers = doc && typeof doc === "object" ? doc[client.key] : null;
+    if (servers && typeof servers === "object" && isOurProductEntry(servers[PRODUCT_SERVER_NAME])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Deja el MCP de producto instalado y devuelve la ruta de su .dll.
+ *
+ * Con `folder` se copia una carpeta ya publicada; sin el, se publica `version` desde
+ * el feed. La carpeta no es un capricho: la restauracion necesita alcanzar
+ * api.nuget.org —el feed de AHORA solo hospeda `ahora-mcp`, sus dependencias de
+ * Microsoft no— y hay redes donde eso no llega. En ese caso, copiar la carpeta que
+ * reparte el equipo de producto deja exactamente el mismo resultado sin red ni SDK.
+ */
+function installProduct({ version, folder, dir = productRuntimeDir() } = {}) {
+  if (folder) {
+    return { ...installProductFromFolder({ source: folder, dir }), from: "carpeta" };
+  }
+  return { ...installProductMcp({ version, dir }), from: "feed" };
+}
+
+/**
  * Retira la entrada `mssql` nuestra de un fichero de cliente que NO se esta
  * configurando.
  *
@@ -827,6 +933,61 @@ async function main() {
       }
     }
 
+    // ── MCP de desarrollo de producto ──
+    //
+    // Es un servidor APARTE, del equipo de producto, que se registra AL LADO del de
+    // SQL: los dos conviven en la misma sesion. Se pregunta aqui y no antes porque
+    // la respuesta depende del entorno que se acaba de elegir.
+    const product = { install: false };
+    say();
+    if (profile.production) {
+      // Mismo criterio que con la escritura: en produccion no se ofrece. Y aqui pesa
+      // mas, porque `ahora-mcp` no tiene modo de solo lectura que poder imponerle —
+      // no hay ningun conmutador que desactive ahora_ejecutar_dml ni la familia
+      // ahora_crear_*/ahora_modificar_*/ahora_borrar_*.
+      say(`El MCP de desarrollo de producto (${PRODUCT_PACKAGE}) no se ofrece en PRODUCCION:`);
+      say("ese servidor no tiene modo de solo lectura, asi que no hay forma de");
+      say("configurarlo para que no pueda escribir en el ERP en vivo.");
+    } else {
+      const yaEstaba = hasProductServer(root);
+      say(`MCP de desarrollo de producto (${PRODUCT_PACKAGE}), del equipo de producto.`);
+      say("Se anade AL LADO del de SQL, no en su lugar: los dos funcionan a la vez.");
+      say("Trae 98 herramientas para personalizar el ERP (objetos, DDA, scripts de");
+      say("pantalla, campos configurables...). Necesita el SDK de .NET 10.");
+      product.install = await askYesNo(rl, "¿Instalo tambien el MCP de producto?", yaEstaba);
+
+      if (product.install) {
+        // Una sola base de datos: `ahora-mcp` maneja una por proceso.
+        const candidatas =
+          connections.length > 0
+            ? connections.map((c) => ({ name: c.name, alias: c.alias }))
+            : manualConnections.map((c) => ({ name: c.database, alias: c.alias }));
+        if (candidatas.length === 1) {
+          product.pick = candidatas[0];
+        } else {
+          say();
+          say("Ese servidor maneja UNA base de datos por proceso, asi que hay que");
+          say("elegir cual de las que acabas de configurar usa.");
+          const etiquetas = candidatas.map((c) =>
+            c.alias ? `${c.name}  (alias ${c.alias})` : c.name
+          );
+          const elegida = await pickFromList(rl, etiquetas, "Base de datos del ERP");
+          product.pick = candidatas[etiquetas.indexOf(elegida)];
+        }
+
+        if (!dotnetSdkVersion()) {
+          say();
+          say("   ⚠ No hay SDK de .NET 10 en este equipo, asi que no se puede publicar");
+          say("     el paquete desde NuGet. Puedes indicar una carpeta con el MCP de");
+          say("     producto ya publicado (la que trae ahora-mcp.dll con sus");
+          say("     dependencias al lado) y se copia tal cual.");
+          const carpeta = await ask(rl, "   Carpeta (vacio para no instalarlo)");
+          if (!carpeta) product.install = false;
+          else product.folder = path.resolve(carpeta);
+        }
+      }
+    }
+
     const clientKeys = [];
     say();
     say("¿Que cliente usas?");
@@ -893,6 +1054,70 @@ async function main() {
       if (others.length > 0) say(`   Se han conservado: ${others.join(", ")}`);
     }
 
+    // ── MCP de producto, como SEGUNDA entrada del mismo fichero ──
+    let productInstalled = null;
+    if (product.install) {
+      say();
+      try {
+        let version;
+        if (!product.folder) {
+          say(`Consultando la ultima version de ${PRODUCT_PACKAGE} en el feed...`);
+          version = await latestProductVersion();
+          const ya = installedProductVersion(productRuntimeDir());
+          say(
+            ya === version
+              ? `✓ ${PRODUCT_PACKAGE} ${version} ya estaba publicado.`
+              : `Publicando ${PRODUCT_PACKAGE} ${version} (una sola vez, no en cada arranque)…`
+          );
+        }
+        productInstalled = installProduct({ version, folder: product.folder });
+        say(
+          `✓ ${PRODUCT_PACKAGE}${productInstalled.version ? ` ${productInstalled.version}` : ""}` +
+            ` en ${productInstalled.dir}${productInstalled.reused ? "   (ya estaba)" : ""}`
+        );
+      } catch (err) {
+        // No aborta la instalacion: el MCP de SQL ya esta escrito y funcionando, y
+        // perderlo por un fallo del segundo servidor seria peor que quedarse sin el
+        // segundo. Se dice claro que ha fallado y por que.
+        say(`⚠ No se ha podido instalar el MCP de producto: ${err.message.split("\n")[0]}`);
+        say("   El MCP de SQL queda configurado igualmente. Para el de producto, vuelve");
+        say("   a lanzar el instalador con el SDK de .NET 10 disponible, o indica una");
+        say("   carpeta con el ya publicado.");
+        product.install = false;
+      }
+    }
+
+    if (productInstalled) {
+      const productFlags = buildProductFlags({
+        serverDll: productDll(productInstalled.dir),
+        configFile: resolved,
+        credentialsFile,
+        connectionName: product.pick.name,
+        db: product.pick.alias,
+        environment: isCore ? environment : undefined,
+        production: profile.production,
+      });
+      const productEntry = productCommandFrom(serverEntry, productFlags);
+      for (const key of clientKeys) {
+        const result = writeProductConfig(CLIENTS[key], root, productEntry);
+        say(
+          `✓ ${result.target}   (servidor '${PRODUCT_SERVER_NAME}' ${
+            result.replaced ? "actualizado" : "anadido"
+          }, junto a '${SERVER_NAME}')`
+        );
+      }
+      say(`   Base de datos del ERP: ${product.pick.name}`);
+      say("   AVISO: ese servidor SIEMPRE puede escribir en el ERP. No tiene modo de");
+      say("   solo lectura, asi que el unico freno son las reglas de permisos.");
+    } else if (!product.install) {
+      // Desmarcarlo a proposito retira la nuestra, y solo la nuestra: si no, quien lo
+      // quita en una reinstalacion se lo encuentra igualmente registrado.
+      for (const key of Object.keys(CLIENTS)) {
+        const result = writeProductConfig(CLIENTS[key], root, null);
+        if (result) say(`✓ ${result.target}   (retirado el '${PRODUCT_SERVER_NAME}' anterior)`);
+      }
+    }
+
     // Y en los ficheros del cliente que NO se ha configurado, la entrada vieja tambien
     // hay que retirarla: dejarla registrada mantiene el choque de nombres y puede
     // acabar levantando dos servidores identicos.
@@ -923,7 +1148,23 @@ async function main() {
             false
           );
         }
-        const perms = allowMcpTools(root, { includeWrites });
+        // El MCP de producto lleva sus propias reglas: sus herramientas no comparten
+        // vocabulario con las de aqui (`ahora_leer_*` frente a `list_*`), asi que un
+        // comodin no cubre las dos. Y sus escrituras se preguntan aparte porque ese
+        // servidor no tiene modo de solo lectura: estas reglas son el unico freno.
+        let productWrites = false;
+        if (productInstalled) {
+          productWrites = await askYesNo(
+            rl,
+            "   ¿Permitir las ESCRITURAS del MCP de producto sin preguntar? (solo en tu maquina)",
+            false
+          );
+        }
+        const perms = allowMcpTools(root, {
+          includeWrites,
+          product: Boolean(productInstalled),
+          productWrites,
+        });
         say(`✓ ${perms.target}`);
         if (perms.alreadyHadAll) say("   (ya estaban todas)");
         else say(`   Anadidas: ${perms.added.join(", ")}`);
@@ -956,6 +1197,14 @@ async function main() {
           .join(" y ") || "'maindb'"
       }.`
     );
+    if (productInstalled) {
+      say("  3. Y para el MCP de producto: «prueba la conexion con el ERP»");
+      say(`     (herramienta ahora_test_connection de '${PRODUCT_SERVER_NAME}').`);
+      say();
+      say(`Los dos servidores conviven: '${SERVER_NAME}' expone sus tools como`);
+      say(`mcp__${SERVER_NAME}__* y '${PRODUCT_SERVER_NAME}' las suyas como`);
+      say(`mcp__${PRODUCT_SERVER_NAME}__ahora_*. No se pisan.`);
+    }
     say();
     say("Si no aparece ninguna herramienta de SQL, casi siempre es una de dos:");
     say("no has abierto una sesion nueva, o la has abierto sobre otra carpeta.");
@@ -1017,6 +1266,11 @@ module.exports = {
   resolveServerEntry,
   writeClientConfig,
   pruneLegacyServer,
+  buildProductFlags,
+  productCommandFrom,
+  writeProductConfig,
+  hasProductServer,
+  installProduct,
   pickManyFromList,
   aliasFromName,
   suggestAliases,
@@ -1026,6 +1280,7 @@ module.exports = {
   PKG_SPEC,
   SERVER_NAME,
   LEGACY_SERVER_NAME,
+  PRODUCT_SERVER_NAME,
   MIN_NODE_MAJOR,
 };
 

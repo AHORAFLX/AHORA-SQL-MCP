@@ -446,6 +446,48 @@ de lanzarlo.
 
 ---
 
+## El MCP de desarrollo de producto (`ahora-erp`), al lado de este
+
+El instalador puede registrar, **además** de `ahora-sql`, un segundo servidor MCP en el mismo
+fichero de cliente: `ahora-erp`, que es el paquete
+[`ahora-mcp`](https://nuget.ahorabh.com/packages/ahora-mcp/) del equipo de producto. No es una
+variante de este servidor ni lo sustituye: es otro proceso, escrito en .NET, con 98 herramientas
+propias para personalizar el ERP.
+
+**Conviven a propósito.** Los prefijos no chocan —`mcp__ahora-sql__list_tables` frente a
+`mcp__ahora-erp__ahora_leer_objeto`— y las reglas de `permissions.allow` de cada uno son
+independientes. El reparto es: `ahora-sql` para leer y diagnosticar con SQL arbitrario sobre
+cualquier `dbKey`; `ahora-erp` para aplicar personalizaciones con las validaciones del producto.
+
+Lo que aporta este repositorio son tres cosas, todas por el mismo motivo —que la contraseña del
+ERP no acabe en un fichero que se commitea:
+
+1. **`bin/start-ahora-mcp.js`**, un lanzador. `ahora-mcp` se configura con la variable de entorno
+   `AHORA_MCP_ERP`, que lleva la cadena de conexión entera. Escribirla en el bloque `env` del
+   `.mcp.json` sería meter usuario y contraseña en el repositorio. El lanzador guarda **de dónde**
+   sacarla (el `Web.config` del proyecto, o el fichero de credenciales cifrado con DPAPI en
+   `%APPDATA%`), la resuelve en cada arranque y se la pasa al proceso hijo por el entorno.
+2. **`installer/product-mcp.js`**, la instalación. El paquete no es un `dotnet tool`: es un
+   `lib/net10.0-windows7.0` con el `.dll` y sus dependencias declaradas como dependencias NuGet
+   normales. Se publica con un proyecto mínimo generado al vuelo en
+   `%LOCALAPPDATA%\AHORA-SQL-MCP\ahora-mcp`, y se arranca con `dotnet exec ahora-mcp.dll` — la
+   forma que el propio paquete contempla en su `buildTransitive/ahora-mcp.targets`. Como esa
+   restauración necesita `api.nuget.org` (el feed de AHORA solo hospeda `ahora-mcp`, no las
+   dependencias de Microsoft), hay una segunda vía: copiar una carpeta ya publicada, sin red ni SDK.
+3. **Reglas de permisos propias.** Sus herramientas no comparten vocabulario con las de aquí
+   (`ahora_leer_*` frente a `list_*`), así que un comodín no cubre las dos.
+
+Dos límites que conviene tener presentes, y ninguno se puede arreglar desde aquí:
+
+- **Una sola base de datos por proceso.** Su `ahora_connect` solo acepta servidor y base de datos
+  con autenticación Windows; no hay alias ni `dbKey`. El instalador hace elegir cuál.
+- **No tiene modo de solo lectura.** `ahora_ejecutar_dml` y la familia
+  `ahora_crear_*`/`ahora_modificar_*`/`ahora_borrar_*` están siempre disponibles y no hay ningún
+  conmutador que las desactive. Por eso el instalador **no lo ofrece** con el perfil de producción,
+  y sus reglas de escritura se piden aparte y por defecto no se añaden.
+
+---
+
 ## Por qué esto no puede tardar
 
 El cliente MCP arranca el servidor y espera el saludo `initialize`. Si no llega a tiempo

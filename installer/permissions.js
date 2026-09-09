@@ -14,7 +14,7 @@
  */
 const fs = require("fs");
 const path = require("path");
-const { SERVER_NAME, LEGACY_SERVER_NAME } = require("./server-name");
+const { SERVER_NAME, LEGACY_SERVER_NAME, PRODUCT_SERVER_NAME } = require("./server-name");
 
 /** Solo introspeccion y consulta. Las escrituras se dejan preguntando a proposito. */
 function readRules(serverName = SERVER_NAME) {
@@ -30,6 +30,60 @@ function writeRules(serverName = SERVER_NAME) {
   return [
     `mcp__${serverName}__execute_write_query`,
     `mcp__${serverName}__execute_sql_file`,
+  ];
+}
+
+/**
+ * Lectura del MCP de producto.
+ *
+ * Sus 98 herramientas no siguen el mismo vocabulario que las de aqui: el verbo va en
+ * castellano y delante (`ahora_leer_objeto`, `ahora_listar_pantallas`), asi que las
+ * reglas son otras, no las mismas con otro prefijo. Tomadas del `tools/list` real del
+ * servidor, no de su documentacion, que las nombra en PascalCase.
+ *
+ * `ahora_connect` y `ahora_disconnect` entran en lectura aunque cambien el estado de
+ * la sesion: no tocan datos, y sin ellas el agente no puede ni reconectar cuando el
+ * servidor pierde la conexion.
+ */
+function productReadRules(serverName = PRODUCT_SERVER_NAME) {
+  return [
+    `mcp__${serverName}__ahora_leer_*`,
+    `mcp__${serverName}__ahora_listar_*`,
+    `mcp__${serverName}__ahora_buscar_*`,
+    `mcp__${serverName}__ahora_obtener_*`,
+    `mcp__${serverName}__ahora_describir_*`,
+    `mcp__${serverName}__ahora_consulta_segura`,
+    `mcp__${serverName}__ahora_diagnosticar_usuario`,
+    `mcp__${serverName}__ahora_test_connection`,
+    `mcp__${serverName}__ahora_connect`,
+    `mcp__${serverName}__ahora_disconnect`,
+  ];
+}
+
+/**
+ * Escritura del MCP de producto.
+ *
+ * Aqui pesa mas que en el servidor de SQL: `ahora-mcp` no tiene modo de solo lectura
+ * —ningun conmutador desactiva estas herramientas—, asi que estas reglas son el unico
+ * freno que queda. Por eso solo se anaden pidiendolas a proposito.
+ */
+function productWriteRules(serverName = PRODUCT_SERVER_NAME) {
+  return [
+    `mcp__${serverName}__ahora_crear_*`,
+    `mcp__${serverName}__ahora_modificar_*`,
+    `mcp__${serverName}__ahora_borrar_*`,
+    `mcp__${serverName}__ahora_eliminar_*`,
+    `mcp__${serverName}__ahora_actualizar_*`,
+    `mcp__${serverName}__ahora_activar_*`,
+    `mcp__${serverName}__ahora_asignar_*`,
+    `mcp__${serverName}__ahora_insertar_*`,
+    `mcp__${serverName}__ahora_aplicar_*`,
+    `mcp__${serverName}__ahora_importar_*`,
+    `mcp__${serverName}__ahora_exportar_*`,
+    `mcp__${serverName}__ahora_escribir_*`,
+    `mcp__${serverName}__ahora_confirmar_*`,
+    `mcp__${serverName}__ahora_cancelar_*`,
+    `mcp__${serverName}__ahora_ejecutar_dml`,
   ];
 }
 
@@ -60,11 +114,26 @@ function permissionsPath(projectDir) {
  * Un `settings.local.json` puede tener permisos de Bash y otros ajustes que no se
  * pueden perder, asi que nunca se sobrescribe: se lee, se fusiona y se deduplica.
  */
-function allowMcpTools(projectDir, { includeWrites = false, serverName = SERVER_NAME } = {}) {
+function allowMcpTools(
+  projectDir,
+  {
+    includeWrites = false,
+    serverName = SERVER_NAME,
+    product = false,
+    productWrites = false,
+    productServerName = PRODUCT_SERVER_NAME,
+  } = {}
+) {
   const target = permissionsPath(projectDir);
+  // Los dos servidores en la misma pasada, y SUMANDO: la entrada del MCP de producto
+  // se anade al lado de la de SQL, nunca en su lugar. Quien resuelve tickets sigue
+  // usando `mcp__ahora-sql__*` en la misma sesion en la que otro personaliza producto
+  // con `mcp__ahora-erp__*`; los prefijos son distintos y las reglas no se pisan.
   const wanted = [
     ...readRules(serverName),
     ...(includeWrites ? writeRules(serverName) : []),
+    ...(product ? productReadRules(productServerName) : []),
+    ...(product && productWrites ? productWriteRules(productServerName) : []),
   ];
   // Reglas del nombre anterior. Se retiran SOLO las que escribimos nosotros, nunca
   // un `mcp__mssql__*` cualquiera: puede ser de otra herramienta del equipo. Si no
@@ -108,6 +177,9 @@ module.exports = {
   gitRootOf,
   readRules,
   writeRules,
+  productReadRules,
+  productWriteRules,
   SERVER_NAME,
   LEGACY_SERVER_NAME,
+  PRODUCT_SERVER_NAME,
 };

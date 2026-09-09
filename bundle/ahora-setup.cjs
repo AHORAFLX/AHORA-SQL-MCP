@@ -74608,6 +74608,7 @@ var require_server_name = __commonJS({
   "installer/server-name.js"(exports2, module2) {
     var SERVER_NAME = "ahora-sql";
     var LEGACY_SERVER_NAME = "mssql";
+    var PRODUCT_SERVER_NAME = "ahora-erp";
     function isOurServerEntry(entry) {
       if (!entry || typeof entry !== "object") return false;
       const args = Array.isArray(entry.args) ? entry.args : [];
@@ -74615,7 +74616,18 @@ var require_server_name = __commonJS({
         (a) => typeof a === "string" && (a.includes("start-mssql-mcp") || a.includes("AHORA-SQL-MCP") || a.includes("@ahoraflx/sql-mcp"))
       );
     }
-    module2.exports = { SERVER_NAME, LEGACY_SERVER_NAME, isOurServerEntry };
+    function isOurProductEntry(entry) {
+      if (!entry || typeof entry !== "object") return false;
+      const args = Array.isArray(entry.args) ? entry.args : [];
+      return args.some((a) => typeof a === "string" && a.includes("start-ahora-mcp"));
+    }
+    module2.exports = {
+      SERVER_NAME,
+      LEGACY_SERVER_NAME,
+      PRODUCT_SERVER_NAME,
+      isOurServerEntry,
+      isOurProductEntry
+    };
   }
 });
 
@@ -74624,7 +74636,7 @@ var require_permissions = __commonJS({
   "installer/permissions.js"(exports2, module2) {
     var fs6 = require("fs");
     var path2 = require("path");
-    var { SERVER_NAME, LEGACY_SERVER_NAME } = require_server_name();
+    var { SERVER_NAME, LEGACY_SERVER_NAME, PRODUCT_SERVER_NAME } = require_server_name();
     function readRules(serverName = SERVER_NAME) {
       return [
         `mcp__${serverName}__list_*`,
@@ -74636,6 +74648,39 @@ var require_permissions = __commonJS({
       return [
         `mcp__${serverName}__execute_write_query`,
         `mcp__${serverName}__execute_sql_file`
+      ];
+    }
+    function productReadRules(serverName = PRODUCT_SERVER_NAME) {
+      return [
+        `mcp__${serverName}__ahora_leer_*`,
+        `mcp__${serverName}__ahora_listar_*`,
+        `mcp__${serverName}__ahora_buscar_*`,
+        `mcp__${serverName}__ahora_obtener_*`,
+        `mcp__${serverName}__ahora_describir_*`,
+        `mcp__${serverName}__ahora_consulta_segura`,
+        `mcp__${serverName}__ahora_diagnosticar_usuario`,
+        `mcp__${serverName}__ahora_test_connection`,
+        `mcp__${serverName}__ahora_connect`,
+        `mcp__${serverName}__ahora_disconnect`
+      ];
+    }
+    function productWriteRules(serverName = PRODUCT_SERVER_NAME) {
+      return [
+        `mcp__${serverName}__ahora_crear_*`,
+        `mcp__${serverName}__ahora_modificar_*`,
+        `mcp__${serverName}__ahora_borrar_*`,
+        `mcp__${serverName}__ahora_eliminar_*`,
+        `mcp__${serverName}__ahora_actualizar_*`,
+        `mcp__${serverName}__ahora_activar_*`,
+        `mcp__${serverName}__ahora_asignar_*`,
+        `mcp__${serverName}__ahora_insertar_*`,
+        `mcp__${serverName}__ahora_aplicar_*`,
+        `mcp__${serverName}__ahora_importar_*`,
+        `mcp__${serverName}__ahora_exportar_*`,
+        `mcp__${serverName}__ahora_escribir_*`,
+        `mcp__${serverName}__ahora_confirmar_*`,
+        `mcp__${serverName}__ahora_cancelar_*`,
+        `mcp__${serverName}__ahora_ejecutar_dml`
       ];
     }
     function gitRootOf(dir) {
@@ -74650,11 +74695,19 @@ var require_permissions = __commonJS({
     function permissionsPath(projectDir) {
       return path2.join(gitRootOf(projectDir), ".claude", "settings.local.json");
     }
-    function allowMcpTools(projectDir, { includeWrites = false, serverName = SERVER_NAME } = {}) {
+    function allowMcpTools(projectDir, {
+      includeWrites = false,
+      serverName = SERVER_NAME,
+      product = false,
+      productWrites = false,
+      productServerName = PRODUCT_SERVER_NAME
+    } = {}) {
       const target = permissionsPath(projectDir);
       const wanted = [
         ...readRules(serverName),
-        ...includeWrites ? writeRules(serverName) : []
+        ...includeWrites ? writeRules(serverName) : [],
+        ...product ? productReadRules(productServerName) : [],
+        ...product && productWrites ? productWriteRules(productServerName) : []
       ];
       const stale = serverName === SERVER_NAME ? /* @__PURE__ */ new Set([...readRules(LEGACY_SERVER_NAME), ...writeRules(LEGACY_SERVER_NAME)]) : /* @__PURE__ */ new Set();
       let doc = {};
@@ -74686,8 +74739,11 @@ var require_permissions = __commonJS({
       gitRootOf,
       readRules,
       writeRules,
+      productReadRules,
+      productWriteRules,
       SERVER_NAME,
-      LEGACY_SERVER_NAME
+      LEGACY_SERVER_NAME,
+      PRODUCT_SERVER_NAME
     };
   }
 });
@@ -74783,6 +74839,291 @@ var require_runtime = __commonJS({
   }
 });
 
+// installer/tools.js
+var require_tools = __commonJS({
+  "installer/tools.js"(exports2, module2) {
+    var { execFileSync: execFileSync2 } = require("child_process");
+    function toolVersion(command) {
+      const intentos = process.platform === "win32" ? [false, true] : [false];
+      for (const conShell of intentos) {
+        try {
+          const salida = execFileSync2(command, ["--version"], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+            shell: conShell
+          });
+          if (salida && salida.trim()) return salida.trim();
+        } catch {
+        }
+      }
+      return null;
+    }
+    module2.exports = { toolVersion };
+  }
+});
+
+// installer/product-mcp.js
+var require_product_mcp = __commonJS({
+  "installer/product-mcp.js"(exports2, module2) {
+    var fs6 = require("fs");
+    var https = require("https");
+    var os2 = require("os");
+    var path2 = require("path");
+    var { execFileSync: execFileSync2 } = require("child_process");
+    var { toolVersion } = require_tools();
+    var PRODUCT_PACKAGE = "ahora-mcp";
+    var PRODUCT_FEED = "https://nuget.ahorabh.com/v3/index.json";
+    var PRODUCT_VERSIONS_URL = `https://nuget.ahorabh.com/v3/package/${PRODUCT_PACKAGE}/index.json`;
+    var PUBLIC_FEED = "https://api.nuget.org/v3/index.json";
+    var MIN_DOTNET_MAJOR = 10;
+    var PRODUCT_DLL = `${PRODUCT_PACKAGE}.dll`;
+    function productRuntimeDir({ platform: platform2 = process.platform, env = process.env, home } = {}) {
+      const homeDir = home || os2.homedir();
+      if (platform2 === "win32") {
+        return path2.join(
+          env.LOCALAPPDATA || path2.join(homeDir, "AppData", "Local"),
+          "AHORA-SQL-MCP",
+          PRODUCT_PACKAGE
+        );
+      }
+      return path2.join(
+        env.XDG_DATA_HOME || path2.join(homeDir, ".local", "share"),
+        "ahora-sql-mcp",
+        PRODUCT_PACKAGE
+      );
+    }
+    function productAppDir(dir) {
+      return path2.join(dir, "app");
+    }
+    function productDll(dir) {
+      return path2.join(productAppDir(dir), PRODUCT_DLL);
+    }
+    function stampPath(dir) {
+      return path2.join(productAppDir(dir), "ahora-mcp-instalado.json");
+    }
+    function installedProductVersion(dir) {
+      try {
+        const stamp = JSON.parse(fs6.readFileSync(stampPath(dir), "utf8"));
+        return fs6.existsSync(productDll(dir)) ? stamp.version || null : null;
+      } catch {
+        return null;
+      }
+    }
+    function compareVersions(a, b) {
+      const parse = (v) => String(v).split(".").map((n) => Number(n) || 0);
+      const [x, y] = [parse(a), parse(b)];
+      for (let i = 0; i < Math.max(x.length, y.length); i += 1) {
+        const diff = (x[i] || 0) - (y[i] || 0);
+        if (diff !== 0) return diff;
+      }
+      return 0;
+    }
+    function pickLatest(versions) {
+      const stable = (versions || []).filter((v) => typeof v === "string" && !v.includes("-"));
+      if (stable.length === 0) return null;
+      return stable.slice().sort(compareVersions).pop();
+    }
+    function getJson(url, { timeoutMs = 15e3, get = https.get } = {}) {
+      return new Promise((resolve, reject) => {
+        const req = get(url, (res) => {
+          if (res.statusCode !== 200) {
+            res.resume();
+            reject(new Error(`${url} ha respondido ${res.statusCode}`));
+            return;
+          }
+          let body = "";
+          res.setEncoding("utf8");
+          res.on("data", (chunk) => {
+            body += chunk;
+          });
+          res.on("end", () => {
+            try {
+              resolve(JSON.parse(body));
+            } catch (err) {
+              reject(new Error(`${url} no ha devuelto JSON: ${err.message}`));
+            }
+          });
+        });
+        req.on("error", reject);
+        req.setTimeout(timeoutMs, () => {
+          req.destroy(new Error(`${url} no responde (${timeoutMs} ms)`));
+        });
+      });
+    }
+    async function latestProductVersion({ url = PRODUCT_VERSIONS_URL, ...options } = {}) {
+      const doc = await getJson(url, options);
+      const latest = pickLatest(doc && doc.versions);
+      if (!latest) throw new Error(`El feed no publica ninguna version estable de ${PRODUCT_PACKAGE}.`);
+      return latest;
+    }
+    function dotnetSdkVersion(version = toolVersion("dotnet")) {
+      if (!version) return null;
+      const major = Number(String(version).split(".")[0]);
+      return Number.isFinite(major) && major >= MIN_DOTNET_MAJOR ? version : null;
+    }
+    function checkDotnetSdk(version = toolVersion("dotnet")) {
+      if (!version) {
+        throw new Error(
+          `No hay SDK de .NET en este equipo (no esta en el PATH). El MCP de producto se publica desde NuGet, y para eso hace falta el SDK de .NET ${MIN_DOTNET_MAJOR} o superior: https://dotnet.microsoft.com/download`
+        );
+      }
+      if (!dotnetSdkVersion(version)) {
+        throw new Error(
+          `El SDK de .NET ${version} es demasiado antiguo. El paquete ${PRODUCT_PACKAGE} es net${MIN_DOTNET_MAJOR}.0-windows y no se puede restaurar con un SDK anterior.`
+        );
+      }
+      return version;
+    }
+    function projectFiles(version) {
+      return {
+        "nuget.config": `<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="nuget.org" value="${PUBLIC_FEED}" />
+    <add key="ahora" value="${PRODUCT_FEED}" />
+  </packageSources>
+</configuration>
+`,
+        "ahora-mcp-host.csproj": `<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net${MIN_DOTNET_MAJOR}.0-windows</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="${PRODUCT_PACKAGE}" Version="[${version}]" />
+  </ItemGroup>
+</Project>
+`,
+        "Program.cs": `// Punto de entrada vacio: el servidor MCP es ${PRODUCT_DLL}, que llega del paquete.
+// Este proyecto solo existe para que el SDK restaure y copie sus dependencias.
+internal static class Host
+{
+    private static void Main()
+    {
+    }
+}
+`
+      };
+    }
+    function installProductMcp({
+      version,
+      dir = productRuntimeDir(),
+      exec = execFileSync2,
+      force = false,
+      sdkVersion
+    } = {}) {
+      if (!version) throw new Error("Falta la version del paquete a instalar.");
+      const dll = productDll(dir);
+      if (!force && installedProductVersion(dir) === version) {
+        return { dll, dir, version, reused: true };
+      }
+      checkDotnetSdk(sdkVersion === void 0 ? toolVersion("dotnet") : sdkVersion);
+      const build = path2.join(dir, "build");
+      fs6.mkdirSync(build, { recursive: true });
+      for (const [name, content] of Object.entries(projectFiles(version))) {
+        fs6.writeFileSync(path2.join(build, name), content, "utf8");
+      }
+      exec(
+        "dotnet",
+        [
+          "publish",
+          "ahora-mcp-host.csproj",
+          "-c",
+          "Release",
+          "-o",
+          productAppDir(dir),
+          "--nologo",
+          "-v",
+          "minimal"
+        ],
+        {
+          // Por `cwd` y no por ruta absoluta en el argumento: asi el nuget.config que
+          // acabamos de escribir es el que manda, que es lo que anade el feed de AHORA.
+          cwd: build,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: 9e5
+        }
+      );
+      if (!fs6.existsSync(dll)) {
+        throw new Error(
+          `La publicacion termino sin errores pero no aparece ${dll}. Revisa que el paquete del feed se llame ${PRODUCT_PACKAGE}.`
+        );
+      }
+      fs6.writeFileSync(
+        stampPath(dir),
+        `${JSON.stringify({ version, origen: PRODUCT_FEED, fecha: (/* @__PURE__ */ new Date()).toISOString() }, null, 2)}
+`,
+        "utf8"
+      );
+      return { dll, dir, version, reused: false };
+    }
+    function installProductFromFolder({ source, dir = productRuntimeDir() } = {}) {
+      if (!source) throw new Error("Falta la carpeta de origen del MCP de producto.");
+      const from = path2.resolve(source);
+      if (!fs6.existsSync(from) || !fs6.statSync(from).isDirectory()) {
+        throw new Error(`No existe la carpeta: ${from}`);
+      }
+      const origen = path2.join(from, PRODUCT_DLL);
+      if (!fs6.existsSync(origen)) {
+        throw new Error(
+          `En ${from} no esta ${PRODUCT_DLL}. Indica la carpeta que contiene el MCP de producto ya publicado (la que trae ahora-mcp.dll con sus dependencias al lado).`
+        );
+      }
+      const app = productAppDir(dir);
+      fs6.rmSync(app, { recursive: true, force: true });
+      fs6.mkdirSync(app, { recursive: true });
+      fs6.cpSync(from, app, { recursive: true });
+      const version = readAssemblyVersion(path2.join(app, PRODUCT_DLL));
+      fs6.writeFileSync(
+        stampPath(dir),
+        `${JSON.stringify({ version, origen: from, fecha: (/* @__PURE__ */ new Date()).toISOString() }, null, 2)}
+`,
+        "utf8"
+      );
+      return { dll: productDll(dir), dir, version, reused: false, source: from };
+    }
+    function readAssemblyVersion(dll, exec = execFileSync2) {
+      try {
+        const out = exec("dotnet", ["exec", dll, "--version"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: 6e4
+        });
+        return String(out).trim().split("+")[0] || null;
+      } catch {
+        return null;
+      }
+    }
+    module2.exports = {
+      PRODUCT_PACKAGE,
+      PRODUCT_FEED,
+      PRODUCT_VERSIONS_URL,
+      PRODUCT_DLL,
+      MIN_DOTNET_MAJOR,
+      productRuntimeDir,
+      productAppDir,
+      productDll,
+      installedProductVersion,
+      compareVersions,
+      pickLatest,
+      latestProductVersion,
+      dotnetSdkVersion,
+      checkDotnetSdk,
+      projectFiles,
+      installProductMcp,
+      installProductFromFolder,
+      readAssemblyVersion
+    };
+  }
+});
+
 // package.json
 var require_package2 = __commonJS({
   "package.json"(exports2, module2) {
@@ -74814,7 +75155,8 @@ var require_package2 = __commonJS({
       bin: {
         "ahora-sql-mcp": "./bundle/ahora-sql-mcp.cjs",
         "start-mssql-mcp": "./bundle/start-mssql-mcp.cjs",
-        "ahora-setup": "./bundle/ahora-setup.cjs"
+        "ahora-setup": "./bundle/ahora-setup.cjs",
+        "start-ahora-mcp": "./bundle/start-ahora-mcp.cjs"
       },
       files: [
         "bundle/",
@@ -74872,14 +75214,28 @@ var require_gui = __commonJS({
       resolveServerEntry,
       writeClientConfig,
       pruneLegacyServer,
+      buildProductFlags,
+      productCommandFrom,
+      writeProductConfig,
+      hasProductServer,
+      installProduct,
       suggestAliases,
       aliasError,
       toolVersion,
       CLIENTS,
       PROFILES,
       SERVER_NAME,
+      PRODUCT_SERVER_NAME,
       MIN_NODE_MAJOR
     } = require_setup();
+    var {
+      PRODUCT_PACKAGE,
+      productRuntimeDir,
+      productDll,
+      installedProductVersion,
+      latestProductVersion,
+      dotnetSdkVersion
+    } = require_product_mcp();
     var { credentialsPathFor, writeCredentialsFile } = require_credentials();
     var { probeConnection } = require_probe();
     var { allowMcpTools } = require_permissions();
@@ -74908,7 +75264,33 @@ var require_gui = __commonJS({
           error
         };
       });
-      return { root, files, defaultEnvironment: resolveEnvironment(void 0) };
+      return {
+        root,
+        files,
+        defaultEnvironment: resolveEnvironment(void 0),
+        // Con el MCP de producto ya registrado, la casilla viene marcada: asi una
+        // reinstalacion no lo retira por dejar la casilla como estaba, que es justo lo
+        // que haria si el valor por defecto fuera siempre "no".
+        hasProduct: hasProductServer(root)
+      };
+    }
+    async function productStatus() {
+      const dir = productRuntimeDir();
+      const status = {
+        package: PRODUCT_PACKAGE,
+        serverName: PRODUCT_SERVER_NAME,
+        dotnet: dotnetSdkVersion(),
+        installed: installedProductVersion(dir),
+        dir,
+        latest: null,
+        feedError: null
+      };
+      try {
+        status.latest = await latestProductVersion();
+      } catch (err) {
+        status.feedError = err.message;
+      }
+      return status;
     }
     async function validate({ configFile, environment, names = [], manual }) {
       if (!configFile) {
@@ -75037,6 +75419,53 @@ var require_gui = __commonJS({
         written.push({ ...result, client: key });
       }
       if (written.length === 0) throw new Error("No se ha indicado ningun cliente MCP.");
+      let productWritten = null;
+      let productError;
+      let productInstall = null;
+      const wantsProduct = Boolean(payload.product) && !profile.production;
+      if (wantsProduct) {
+        const pick = payload.productConnection;
+        if (!pick || !pick.name) {
+          throw new Error(
+            "Falta la base de datos del MCP de producto: ese servidor maneja una sola por proceso, asi que hay que elegir cual."
+          );
+        }
+        try {
+          productInstall = installProduct({
+            version: payload.productVersion,
+            folder: payload.productFolder
+          });
+          const productEntry = productCommandFrom(
+            serverEntry,
+            buildProductFlags({
+              serverDll: productDll(productInstall.dir),
+              configFile: configFile ? resolveConfigFile(configFile) : void 0,
+              credentialsFile,
+              connectionName: pick.name,
+              db: pick.alias,
+              environment: configFile && path2.extname(configFile).toLowerCase() === ".json" ? environment : void 0,
+              production: profile.production
+            })
+          );
+          productWritten = [];
+          for (const key of clients) {
+            const client = CLIENTS[key];
+            if (!client) continue;
+            productWritten.push({
+              ...writeProductConfig(client, root, productEntry),
+              client: key
+            });
+          }
+        } catch (err) {
+          productError = err.message.split("\n")[0];
+          productInstall = null;
+          productWritten = null;
+        }
+      } else {
+        for (const key of Object.keys(CLIENTS)) {
+          writeProductConfig(CLIENTS[key], root, null);
+        }
+      }
       const pruned = [];
       for (const key of Object.keys(CLIENTS)) {
         if (clients.includes(key)) continue;
@@ -75047,7 +75476,11 @@ var require_gui = __commonJS({
       if (payload.allowRules && clients.includes("claude")) {
         permissions = allowMcpTools(root, {
           // Las escrituras solo si se piden Y el perfil las admite.
-          includeWrites: Boolean(payload.allowWriteRules) && allowWrites
+          includeWrites: Boolean(payload.allowWriteRules) && allowWrites,
+          // Las del MCP de producto van aparte: sus herramientas no comparten vocabulario
+          // con las de aqui, asi que un comodin no cubre las dos.
+          product: Boolean(productWritten),
+          productWrites: Boolean(productWritten) && Boolean(payload.allowProductWriteRules)
         });
       }
       return {
@@ -75060,7 +75493,17 @@ var require_gui = __commonJS({
         permissions,
         production: profile.production,
         allowWrites,
-        dbKeys: connections.length > 0 ? connections.map((c) => c.alias || "maindb") : manualConnections.map((c) => c.alias || "maindb")
+        dbKeys: connections.length > 0 ? connections.map((c) => c.alias || "maindb") : manualConnections.map((c) => c.alias || "maindb"),
+        product: productWritten ? {
+          serverName: PRODUCT_SERVER_NAME,
+          written: productWritten,
+          version: productInstall.version,
+          dir: productInstall.dir,
+          from: productInstall.from,
+          reused: productInstall.reused,
+          connection: payload.productConnection.name
+        } : null,
+        productError
       };
     }
     function openBrowser(url) {
@@ -75156,6 +75599,8 @@ var require_gui = __commonJS({
                 return sendJson(res, 200, detect(body.projectDir));
               case "/api/validate":
                 return sendJson(res, 200, { results: await validate(body) });
+              case "/api/product":
+                return sendJson(res, 200, await productStatus());
               case "/api/write":
                 return sendJson(res, 200, write(body, { install }));
               case "/api/quit":
@@ -75335,6 +75780,44 @@ Instalador AHORA-SQL-MCP v${PKG_VERSION}`);
         Permitir tambien las <strong>escrituras</strong> sin preguntar</label>
       <p class="hint" id="hintWriteRules" hidden>Solo en tu maquina. Si no lo marcas, cada
         escritura te pedira permiso, que es el freno que interesa conservar.</p>
+    </fieldset>
+
+    <fieldset id="productBox">
+      <legend>MCP de desarrollo de producto</legend>
+      <label><input type="checkbox" id="cProduct" style="width:auto">
+        Instalar tambien el MCP de producto (<code>ahora-mcp</code>)</label>
+      <p class="hint">Servidor del equipo de producto, con 98 herramientas para
+        personalizar el ERP (objetos, DDA, scripts de pantalla, campos configurables\u2026).
+        Se anade <strong>al lado</strong> del de SQL, no en su lugar: los dos funcionan
+        en la misma sesion, con prefijos distintos
+        (<code>mcp__ahora-sql__*</code> y <code>mcp__ahora-erp__ahora_*</code>).
+        Se publica desde <code>nuget.ahorabh.com</code> y necesita el SDK de .NET 10.</p>
+      <div id="productOut"></div>
+      <div id="productPick" hidden>
+        <label for="productDb">Base de datos del ERP</label>
+        <select id="productDb"></select>
+        <p class="hint">Ese servidor maneja <strong>una sola</strong> base de datos por
+          proceso: su <code>ahora_connect</code> no entiende alias ni <code>dbKey</code>.
+          Para exponer otra hace falta otra entrada MCP.</p>
+      </div>
+      <div id="productFolderBox" hidden>
+        <label for="productFolder">Carpeta con el MCP ya publicado</label>
+        <input type="text" id="productFolder" placeholder="C:\\gitcode\\ahora-mcp">
+        <p class="hint">Sin SDK de .NET 10 no se puede publicar el paquete desde NuGet.
+          Indica una carpeta que contenga <code>ahora-mcp.dll</code> con sus dependencias
+          al lado y se copia tal cual, sin red.</p>
+      </div>
+      <div id="productWarn" class="banner warn" hidden>
+        Ese servidor <strong>siempre</strong> puede escribir en el ERP
+        (<code>ahora_ejecutar_dml</code>, <code>ahora_crear_*</code>,
+        <code>ahora_modificar_*</code>, <code>ahora_borrar_*</code>): no tiene modo de
+        solo lectura, asi que el unico freno son las reglas de permisos.
+        <label style="margin-top:8px"><input type="checkbox" id="cProductWriteRules"
+          style="width:auto"> Permitir sus <strong>escrituras</strong> sin preguntar</label>
+      </div>
+      <p class="hint" id="productProdWarn" hidden>En <strong>PRODUCCION</strong> no se
+        ofrece: al no tener modo de solo lectura, no hay forma de dejarlo configurado
+        para que no toque el ERP en vivo.</p>
     </fieldset>
     <div class="row" style="margin-top:18px">
       <div></div><button id="btnWrite">Escribir configuracion</button>
@@ -75606,6 +76089,13 @@ $("btnValidate").onclick = async () => {
     validated = chosenFile
       ? { names: results.map((r) => ({ name: r.name, alias: r.alias })) }
       : { manual };
+    // El MCP de producto elige entre las conexiones que se acaban de validar, asi
+    // que su desplegable no puede rellenarse antes de este punto. Y si el proyecto
+    // ya lo tenia registrado, la casilla viene marcada: dejarla siempre en "no"
+    // haria que una reinstalacion lo retirase sin que nadie lo pidiera.
+    if (detected.hasProduct && !$("cProduct").disabled) $("cProduct").checked = true;
+    fillProductDb();
+    if ($("cProduct").checked) syncProduct();
     if (!noConecta) $("s3").hidden = false;
   } catch (e) {
     $("validateOut").innerHTML = '<p class="err">' + esc(e.message) + "</p>";
@@ -75622,6 +76112,88 @@ function syncWriteRules() {
   if (!on) $("cWriteRules").checked = false;
 }
 
+// \u2500\u2500 MCP de desarrollo de producto \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// Se consulta el estado del equipo (SDK, feed, version ya instalada) solo al marcar
+// la casilla: implica una llamada al feed, y quien no lo quiera no la paga.
+let productInfo = null;
+
+/**
+ * Las conexiones ya validadas, que son entre las que hay que elegir UNA.
+ *
+ * Con datos tecleados a mano se releen del formulario y no de lo validado, por el
+ * mismo motivo que hace la escritura del MCP de SQL: los alias se rellenan DESPUES
+ * de validar (los sugiere el servidor), asi que lo validado puede llevar uno viejo
+ * y el --db que se escribiria apuntaria a una conexion que ya no se llama asi.
+ */
+function validatedConnections() {
+  if (!validated) return [];
+  if (validated.names) return validated.names.map((n) => ({ name: n.name, alias: n.alias }));
+  return manualConnections().map((m) => ({ name: m.database, alias: m.alias }));
+}
+
+function fillProductDb() {
+  const conns = validatedConnections();
+  const previo = $("productDb").value;
+  $("productDb").innerHTML = conns
+    .map((c, i) => '<option value="' + i + '">' + esc(c.name) +
+      (c.alias ? " (alias " + esc(c.alias) + ")" : "") + "</option>")
+    .join("");
+  if (previo && $("productDb").querySelector('option[value="' + previo + '"]')) {
+    $("productDb").value = previo;
+  }
+  $("productPick").hidden = conns.length < 2;
+}
+
+async function syncProduct() {
+  const prodProfile = $("profile").selectedOptions[0].dataset.canwrite !== "true";
+  $("productProdWarn").hidden = !prodProfile;
+  if (prodProfile) {
+    $("cProduct").checked = false;
+    $("cProduct").disabled = true;
+  } else {
+    $("cProduct").disabled = false;
+  }
+
+  const on = $("cProduct").checked && !prodProfile;
+  $("productWarn").hidden = !on;
+  $("productPick").hidden = !on || validatedConnections().length < 2;
+  if (!on) {
+    $("productOut").innerHTML = "";
+    $("productFolderBox").hidden = true;
+    $("cProductWriteRules").checked = false;
+    return;
+  }
+
+  fillProductDb();
+  $("productOut").innerHTML = '<p class="hint">Comprobando el SDK de .NET y el feed\u2026</p>';
+  try {
+    productInfo = await api("product");
+  } catch (e) {
+    $("productOut").innerHTML = '<p class="err">' + esc(e.message) + "</p>";
+    return;
+  }
+  let html = "<ul class=\\"list\\">";
+  html += "<li>" + (productInfo.dotnet
+    ? '<span class="ok">\u2713</span> SDK de .NET ' + esc(productInfo.dotnet)
+    : '<span class="err">\u2717</span> sin SDK de .NET 10 en este equipo') + "</li>";
+  html += "<li>" + (productInfo.latest
+    ? '<span class="ok">\u2713</span> feed: ultima version <strong>' + esc(productInfo.latest) + "</strong>"
+    : '<span class="err">\u2717</span> feed no alcanzable' +
+      (productInfo.feedError ? ' <span class="hint">' + esc(productInfo.feedError) + "</span>" : "")) + "</li>";
+  if (productInfo.installed) {
+    html += '<li><span class="ok">\u2713</span> ya instalado: <strong>' +
+      esc(productInfo.installed) + "</strong> en " + esc(productInfo.dir) + "</li>";
+  }
+  html += "</ul>";
+  $("productOut").innerHTML = html;
+  // Sin SDK, o sin feed, todavia queda copiar una carpeta ya publicada. Es la salida
+  // real en las redes donde api.nuget.org no se alcanza: el feed de AHORA solo
+  // hospeda ahora-mcp, no sus dependencias de Microsoft.
+  $("productFolderBox").hidden = Boolean(productInfo.dotnet && productInfo.latest);
+}
+
+$("cProduct").onchange = syncProduct;
+
 $("profile").onchange = () => {
   const opt = $("profile").selectedOptions[0];
   const canWrite = opt.dataset.canwrite === "true";
@@ -75629,6 +76201,7 @@ $("profile").onchange = () => {
   $("prodWarn").hidden = canWrite;
   if (!canWrite) $("writes").checked = false;
   syncWriteRules();
+  syncProduct();
 };
 $("writes").onchange = syncWriteRules;
 
@@ -75658,6 +76231,15 @@ $("btnWrite").onclick = async () => {
       allowWrites: $("writes").checked,
       allowRules: $("cRules").checked,
       allowWriteRules: $("cWriteRules").checked,
+      // MCP de producto: se manda la conexion ELEGIDA, no todas, porque ese servidor
+      // maneja una sola por proceso.
+      product: $("cProduct").checked,
+      productConnection: $("cProduct").checked
+        ? validatedConnections()[Number($("productDb").value) || 0]
+        : null,
+      productVersion: productInfo ? productInfo.latest : null,
+      productFolder: $("productFolderBox").hidden ? null : $("productFolder").value.trim() || null,
+      allowProductWriteRules: $("cProductWriteRules").checked,
       sqlDirs, clients,
     });
 
@@ -75679,6 +76261,23 @@ $("btnWrite").onclick = async () => {
     if (res.credentialsFile) {
       html += "<p>Credenciales cifradas con tu cuenta de Windows, fuera del repositorio:</p><pre>" +
         esc(res.credentialsFile) + "</pre>";
+    }
+    if (res.product) {
+      html += '<div class="banner good">MCP de producto <code>' + esc(res.product.serverName) +
+        "</code> anadido <strong>junto a</strong> <code>" + ${JSON.stringify(SERVER_NAME)} +
+        "</code>, sobre la base de datos <strong>" + esc(res.product.connection) + "</strong>." +
+        (res.product.version ? " Version " + esc(res.product.version) + "." : "") +
+        (res.product.reused ? " Ya estaba publicado." : "") +
+        "<br>Los dos conviven en la misma sesion: <code>mcp__" + ${JSON.stringify(SERVER_NAME)} +
+        "__*</code> y <code>mcp__" + esc(res.product.serverName) + "__ahora_*</code>.</div>";
+      html += '<div class="banner warn">Ese servidor no tiene modo de solo lectura: ' +
+        "siempre puede escribir en el ERP. El unico freno son las reglas de permisos.</div>";
+    }
+    if (res.productError) {
+      html += '<div class="banner warn">No se ha podido instalar el MCP de producto (' +
+        esc(res.productError) + "). El de SQL ha quedado configurado igualmente. " +
+        "Vuelve a lanzar el instalador con el SDK de .NET 10 disponible, o indica una " +
+        "carpeta con el MCP de producto ya publicado.</div>";
     }
     if (res.permissions) {
       html += "<p>Reglas de permisos en <code>" + esc(res.permissions.target) + "</code>:</p>" +
@@ -75723,6 +76322,7 @@ $("btnWrite").onclick = async () => {
     module2.exports = {
       startGui,
       detect,
+      productStatus,
       validate,
       write,
       checkNodeOnMachine,
@@ -75740,7 +76340,6 @@ var require_setup = __commonJS({
     var fs6 = require("fs");
     var path2 = require("path");
     var readline = require("readline");
-    var { execFileSync: execFileSync2 } = require("child_process");
     var {
       resolveConfigFile,
       listConnectionNames,
@@ -75752,8 +76351,25 @@ var require_setup = __commonJS({
     var { writeCredentialsFile } = require_credentials();
     var { probeConnection } = require_probe();
     var { allowMcpTools } = require_permissions();
-    var { SERVER_NAME, LEGACY_SERVER_NAME, isOurServerEntry } = require_server_name();
+    var {
+      SERVER_NAME,
+      LEGACY_SERVER_NAME,
+      PRODUCT_SERVER_NAME,
+      isOurServerEntry,
+      isOurProductEntry
+    } = require_server_name();
     var { installRuntime } = require_runtime();
+    var { toolVersion } = require_tools();
+    var {
+      PRODUCT_PACKAGE,
+      productRuntimeDir,
+      productDll,
+      installedProductVersion,
+      latestProductVersion,
+      dotnetSdkVersion,
+      installProductMcp,
+      installProductFromFolder
+    } = require_product_mcp();
     var PKG_VERSION = require_package2().version;
     var PKG_SPEC = `github:AHORAFLX/AHORA-SQL-MCP#v${PKG_VERSION}`;
     var MIN_NODE_MAJOR = 18;
@@ -75769,21 +76385,6 @@ var require_setup = __commonJS({
     }
     function stripBom(text) {
       return text.charCodeAt(0) === 65279 ? text.slice(1) : text;
-    }
-    function toolVersion(command) {
-      const intentos = process.platform === "win32" ? [false, true] : [false];
-      for (const conShell of intentos) {
-        try {
-          const salida = execFileSync2(command, ["--version"], {
-            encoding: "utf8",
-            stdio: ["ignore", "pipe", "ignore"],
-            shell: conShell
-          });
-          if (salida && salida.trim()) return salida.trim();
-        } catch {
-        }
-      }
-      return null;
     }
     function checkNode() {
       const nodeVersion = toolVersion("node");
@@ -76067,6 +76668,83 @@ var require_setup = __commonJS({
         others: Object.keys(servers).filter((k) => k !== SERVER_NAME)
       };
     }
+    function buildProductFlags({
+      serverDll,
+      configFile,
+      credentialsFile,
+      connectionName,
+      db,
+      environment,
+      production
+    }) {
+      const flags = ["--server-dll", serverDll.replace(/\\/g, "/")];
+      if (credentialsFile) {
+        flags.push("--credentials-file", credentialsFile.replace(/\\/g, "/"));
+        if (db) flags.push("--db", db);
+      } else {
+        flags.push("--config-file", configFile.replace(/\\/g, "/"));
+        flags.push("--connection-name", connectionName);
+        if (environment) flags.push("--environment", environment);
+      }
+      if (production) flags.push("--production");
+      return flags;
+    }
+    function productCommandFrom(serverEntry, flags) {
+      if (serverEntry.command === "npx") {
+        return {
+          command: "npx",
+          args: [
+            "--yes",
+            "--prefer-offline",
+            `--package=${PKG_SPEC}`,
+            "start-ahora-mcp",
+            ...flags
+          ]
+        };
+      }
+      const bundleDir = path2.posix.dirname(String(serverEntry.args[0]).replace(/\\/g, "/"));
+      return { command: "node", args: [`${bundleDir}/start-ahora-mcp.cjs`, ...flags] };
+    }
+    function writeProductConfig(client, root, entry) {
+      const target = client.file(root);
+      const existing = readJsonIfExists(target);
+      const doc = existing && typeof existing === "object" ? existing : {};
+      if (entry === null) {
+        const servers2 = doc[client.key];
+        if (!servers2 || typeof servers2 !== "object") return null;
+        if (!servers2[PRODUCT_SERVER_NAME] || !isOurProductEntry(servers2[PRODUCT_SERVER_NAME])) {
+          return null;
+        }
+        delete servers2[PRODUCT_SERVER_NAME];
+        fs6.writeFileSync(target, `${JSON.stringify(doc, null, 2)}
+`, "utf8");
+        return { target, removed: true };
+      }
+      fs6.mkdirSync(path2.dirname(target), { recursive: true });
+      doc[client.key] = doc[client.key] && typeof doc[client.key] === "object" ? doc[client.key] : {};
+      const servers = doc[client.key];
+      const replaced = Boolean(servers[PRODUCT_SERVER_NAME]);
+      servers[PRODUCT_SERVER_NAME] = { command: entry.command, args: entry.args };
+      fs6.writeFileSync(target, `${JSON.stringify(doc, null, 2)}
+`, "utf8");
+      return { target, replaced, removed: false };
+    }
+    function hasProductServer(root) {
+      for (const client of Object.values(CLIENTS)) {
+        const doc = readJsonIfExists(client.file(root));
+        const servers = doc && typeof doc === "object" ? doc[client.key] : null;
+        if (servers && typeof servers === "object" && isOurProductEntry(servers[PRODUCT_SERVER_NAME])) {
+          return true;
+        }
+      }
+      return false;
+    }
+    function installProduct({ version, folder, dir = productRuntimeDir() } = {}) {
+      if (folder) {
+        return { ...installProductFromFolder({ source: folder, dir }), from: "carpeta" };
+      }
+      return { ...installProductMcp({ version, dir }), from: "feed" };
+    }
     function pruneLegacyServer(client, root) {
       const target = client.file(root);
       const doc = readJsonIfExists(target);
@@ -76320,6 +76998,45 @@ var require_setup = __commonJS({
             sqlDirs.push(fs6.realpathSync(dir));
           }
         }
+        const product = { install: false };
+        say();
+        if (profile.production) {
+          say(`El MCP de desarrollo de producto (${PRODUCT_PACKAGE}) no se ofrece en PRODUCCION:`);
+          say("ese servidor no tiene modo de solo lectura, asi que no hay forma de");
+          say("configurarlo para que no pueda escribir en el ERP en vivo.");
+        } else {
+          const yaEstaba = hasProductServer(root);
+          say(`MCP de desarrollo de producto (${PRODUCT_PACKAGE}), del equipo de producto.`);
+          say("Se anade AL LADO del de SQL, no en su lugar: los dos funcionan a la vez.");
+          say("Trae 98 herramientas para personalizar el ERP (objetos, DDA, scripts de");
+          say("pantalla, campos configurables...). Necesita el SDK de .NET 10.");
+          product.install = await askYesNo(rl, "\xBFInstalo tambien el MCP de producto?", yaEstaba);
+          if (product.install) {
+            const candidatas = connections.length > 0 ? connections.map((c) => ({ name: c.name, alias: c.alias })) : manualConnections.map((c) => ({ name: c.database, alias: c.alias }));
+            if (candidatas.length === 1) {
+              product.pick = candidatas[0];
+            } else {
+              say();
+              say("Ese servidor maneja UNA base de datos por proceso, asi que hay que");
+              say("elegir cual de las que acabas de configurar usa.");
+              const etiquetas = candidatas.map(
+                (c) => c.alias ? `${c.name}  (alias ${c.alias})` : c.name
+              );
+              const elegida = await pickFromList(rl, etiquetas, "Base de datos del ERP");
+              product.pick = candidatas[etiquetas.indexOf(elegida)];
+            }
+            if (!dotnetSdkVersion()) {
+              say();
+              say("   \u26A0 No hay SDK de .NET 10 en este equipo, asi que no se puede publicar");
+              say("     el paquete desde NuGet. Puedes indicar una carpeta con el MCP de");
+              say("     producto ya publicado (la que trae ahora-mcp.dll con sus");
+              say("     dependencias al lado) y se copia tal cual.");
+              const carpeta = await ask(rl, "   Carpeta (vacio para no instalarlo)");
+              if (!carpeta) product.install = false;
+              else product.folder = path2.resolve(carpeta);
+            }
+          }
+        }
         const clientKeys = [];
         say();
         say("\xBFQue cliente usas?");
@@ -76371,6 +77088,57 @@ var require_setup = __commonJS({
           }
           if (others.length > 0) say(`   Se han conservado: ${others.join(", ")}`);
         }
+        let productInstalled = null;
+        if (product.install) {
+          say();
+          try {
+            let version;
+            if (!product.folder) {
+              say(`Consultando la ultima version de ${PRODUCT_PACKAGE} en el feed...`);
+              version = await latestProductVersion();
+              const ya = installedProductVersion(productRuntimeDir());
+              say(
+                ya === version ? `\u2713 ${PRODUCT_PACKAGE} ${version} ya estaba publicado.` : `Publicando ${PRODUCT_PACKAGE} ${version} (una sola vez, no en cada arranque)\u2026`
+              );
+            }
+            productInstalled = installProduct({ version, folder: product.folder });
+            say(
+              `\u2713 ${PRODUCT_PACKAGE}${productInstalled.version ? ` ${productInstalled.version}` : ""} en ${productInstalled.dir}${productInstalled.reused ? "   (ya estaba)" : ""}`
+            );
+          } catch (err) {
+            say(`\u26A0 No se ha podido instalar el MCP de producto: ${err.message.split("\n")[0]}`);
+            say("   El MCP de SQL queda configurado igualmente. Para el de producto, vuelve");
+            say("   a lanzar el instalador con el SDK de .NET 10 disponible, o indica una");
+            say("   carpeta con el ya publicado.");
+            product.install = false;
+          }
+        }
+        if (productInstalled) {
+          const productFlags = buildProductFlags({
+            serverDll: productDll(productInstalled.dir),
+            configFile: resolved,
+            credentialsFile,
+            connectionName: product.pick.name,
+            db: product.pick.alias,
+            environment: isCore ? environment : void 0,
+            production: profile.production
+          });
+          const productEntry = productCommandFrom(serverEntry, productFlags);
+          for (const key of clientKeys) {
+            const result = writeProductConfig(CLIENTS[key], root, productEntry);
+            say(
+              `\u2713 ${result.target}   (servidor '${PRODUCT_SERVER_NAME}' ${result.replaced ? "actualizado" : "anadido"}, junto a '${SERVER_NAME}')`
+            );
+          }
+          say(`   Base de datos del ERP: ${product.pick.name}`);
+          say("   AVISO: ese servidor SIEMPRE puede escribir en el ERP. No tiene modo de");
+          say("   solo lectura, asi que el unico freno son las reglas de permisos.");
+        } else if (!product.install) {
+          for (const key of Object.keys(CLIENTS)) {
+            const result = writeProductConfig(CLIENTS[key], root, null);
+            if (result) say(`\u2713 ${result.target}   (retirado el '${PRODUCT_SERVER_NAME}' anterior)`);
+          }
+        }
         for (const key of Object.keys(CLIENTS)) {
           if (clientKeys.includes(key)) continue;
           const pruned = pruneLegacyServer(CLIENTS[key], root);
@@ -76392,7 +77160,19 @@ var require_setup = __commonJS({
                 false
               );
             }
-            const perms = allowMcpTools(root, { includeWrites });
+            let productWrites = false;
+            if (productInstalled) {
+              productWrites = await askYesNo(
+                rl,
+                "   \xBFPermitir las ESCRITURAS del MCP de producto sin preguntar? (solo en tu maquina)",
+                false
+              );
+            }
+            const perms = allowMcpTools(root, {
+              includeWrites,
+              product: Boolean(productInstalled),
+              productWrites
+            });
             say(`\u2713 ${perms.target}`);
             if (perms.alreadyHadAll) say("   (ya estaban todas)");
             else say(`   Anadidas: ${perms.added.join(", ")}`);
@@ -76415,6 +77195,14 @@ var require_setup = __commonJS({
         say(
           `     Debe responder con ${(connections.length > 0 ? connections : manualConnections).map((c) => `'${c.alias || "maindb"}'`).join(" y ") || "'maindb'"}.`
         );
+        if (productInstalled) {
+          say("  3. Y para el MCP de producto: \xABprueba la conexion con el ERP\xBB");
+          say(`     (herramienta ahora_test_connection de '${PRODUCT_SERVER_NAME}').`);
+          say();
+          say(`Los dos servidores conviven: '${SERVER_NAME}' expone sus tools como`);
+          say(`mcp__${SERVER_NAME}__* y '${PRODUCT_SERVER_NAME}' las suyas como`);
+          say(`mcp__${PRODUCT_SERVER_NAME}__ahora_*. No se pisan.`);
+        }
         say();
         say("Si no aparece ninguna herramienta de SQL, casi siempre es una de dos:");
         say("no has abierto una sesion nueva, o la has abierto sobre otra carpeta.");
@@ -76463,6 +77251,11 @@ var require_setup = __commonJS({
       resolveServerEntry,
       writeClientConfig,
       pruneLegacyServer,
+      buildProductFlags,
+      productCommandFrom,
+      writeProductConfig,
+      hasProductServer,
+      installProduct,
       pickManyFromList,
       aliasFromName,
       suggestAliases,
@@ -76472,6 +77265,7 @@ var require_setup = __commonJS({
       PKG_SPEC,
       SERVER_NAME,
       LEGACY_SERVER_NAME,
+      PRODUCT_SERVER_NAME,
       MIN_NODE_MAJOR
     };
     if (require.main === module2) run();

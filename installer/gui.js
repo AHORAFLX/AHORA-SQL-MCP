@@ -38,14 +38,28 @@ const {
   resolveServerEntry,
   writeClientConfig,
   pruneLegacyServer,
+  buildProductFlags,
+  productCommandFrom,
+  writeProductConfig,
+  hasProductServer,
+  installProduct,
   suggestAliases,
   aliasError,
   toolVersion,
   CLIENTS,
   PROFILES,
   SERVER_NAME,
+  PRODUCT_SERVER_NAME,
   MIN_NODE_MAJOR,
 } = require("./setup");
+const {
+  PRODUCT_PACKAGE,
+  productRuntimeDir,
+  productDll,
+  installedProductVersion,
+  latestProductVersion,
+  dotnetSdkVersion,
+} = require("./product-mcp");
 const { credentialsPathFor, writeCredentialsFile } = require("./credentials");
 const { probeConnection } = require("./probe");
 const { allowMcpTools } = require("./permissions");
@@ -78,7 +92,44 @@ function detect(projectDir) {
       error,
     };
   });
-  return { root, files, defaultEnvironment: resolveEnvironment(undefined) };
+  return {
+    root,
+    files,
+    defaultEnvironment: resolveEnvironment(undefined),
+    // Con el MCP de producto ya registrado, la casilla viene marcada: asi una
+    // reinstalacion no lo retira por dejar la casilla como estaba, que es justo lo
+    // que haria si el valor por defecto fuera siempre "no".
+    hasProduct: hasProductServer(root),
+  };
+}
+
+/**
+ * Que se puede ofrecer del MCP de desarrollo de producto en ESTE equipo.
+ *
+ * Se consulta cuando se marca la casilla, y no al detectar el proyecto, porque
+ * implica una llamada al feed: quien no lo quiera no paga esa espera.
+ *
+ * Ninguno de los tres datos aborta nada por si mismo. Sin SDK todavia queda copiar
+ * una carpeta ya publicada, y sin feed —hay redes donde api.nuget.org no se
+ * alcanza— tambien.
+ */
+async function productStatus() {
+  const dir = productRuntimeDir();
+  const status = {
+    package: PRODUCT_PACKAGE,
+    serverName: PRODUCT_SERVER_NAME,
+    dotnet: dotnetSdkVersion(),
+    installed: installedProductVersion(dir),
+    dir,
+    latest: null,
+    feedError: null,
+  };
+  try {
+    status.latest = await latestProductVersion();
+  } catch (err) {
+    status.feedError = err.message;
+  }
+  return status;
 }
 
 /**
@@ -264,6 +315,70 @@ function write(payload, { install } = {}) {
   }
   if (written.length === 0) throw new Error("No se ha indicado ningun cliente MCP.");
 
+  // ── MCP de desarrollo de producto ──
+  //
+  // Segunda entrada del MISMO fichero, al lado de la de SQL: los dos servidores
+  // conviven en la sesion, con prefijos distintos (`mcp__ahora-sql__*` y
+  // `mcp__ahora-erp__ahora_*`), y ninguno sustituye al otro.
+  let productWritten = null;
+  let productError;
+  let productInstall = null;
+  // En produccion no se ofrece, por el mismo motivo que la escritura: `ahora-mcp` no
+  // tiene modo de solo lectura, asi que no hay forma de dejarlo configurado para que
+  // no pueda tocar el ERP en vivo.
+  const wantsProduct = Boolean(payload.product) && !profile.production;
+  if (wantsProduct) {
+    const pick = payload.productConnection;
+    if (!pick || !pick.name) {
+      throw new Error(
+        "Falta la base de datos del MCP de producto: ese servidor maneja una sola por " +
+          "proceso, asi que hay que elegir cual."
+      );
+    }
+    try {
+      productInstall = installProduct({
+        version: payload.productVersion,
+        folder: payload.productFolder,
+      });
+      const productEntry = productCommandFrom(
+        serverEntry,
+        buildProductFlags({
+          serverDll: productDll(productInstall.dir),
+          configFile: configFile ? resolveConfigFile(configFile) : undefined,
+          credentialsFile,
+          connectionName: pick.name,
+          db: pick.alias,
+          environment:
+            configFile && path.extname(configFile).toLowerCase() === ".json"
+              ? environment
+              : undefined,
+          production: profile.production,
+        })
+      );
+      productWritten = [];
+      for (const key of clients) {
+        const client = CLIENTS[key];
+        if (!client) continue;
+        productWritten.push({
+          ...writeProductConfig(client, root, productEntry),
+          client: key,
+        });
+      }
+    } catch (err) {
+      // No tumba la escritura: el MCP de SQL ya esta configurado, y perderlo por un
+      // fallo del segundo servidor seria peor que quedarse sin el segundo.
+      productError = err.message.split("\n")[0];
+      productInstall = null;
+      productWritten = null;
+    }
+  } else {
+    // Sin marcar, se retira la nuestra —y solo la nuestra—: si no, quien la desmarca
+    // en una reinstalacion se la encuentra igualmente registrada.
+    for (const key of Object.keys(CLIENTS)) {
+      writeProductConfig(CLIENTS[key], root, null);
+    }
+  }
+
   // En el fichero del cliente que NO se ha marcado, la entrada `mssql` vieja tambien
   // hay que retirarla: dejarla registrada mantiene el choque de nombres con la
   // extension nativa de VS Code y puede acabar levantando dos servidores identicos.
@@ -281,6 +396,10 @@ function write(payload, { install } = {}) {
     permissions = allowMcpTools(root, {
       // Las escrituras solo si se piden Y el perfil las admite.
       includeWrites: Boolean(payload.allowWriteRules) && allowWrites,
+      // Las del MCP de producto van aparte: sus herramientas no comparten vocabulario
+      // con las de aqui, asi que un comodin no cubre las dos.
+      product: Boolean(productWritten),
+      productWrites: Boolean(productWritten) && Boolean(payload.allowProductWriteRules),
     });
   }
 
@@ -297,6 +416,18 @@ function write(payload, { install } = {}) {
     dbKeys: connections.length > 0
       ? connections.map((c) => c.alias || "maindb")
       : manualConnections.map((c) => c.alias || "maindb"),
+    product: productWritten
+      ? {
+          serverName: PRODUCT_SERVER_NAME,
+          written: productWritten,
+          version: productInstall.version,
+          dir: productInstall.dir,
+          from: productInstall.from,
+          reused: productInstall.reused,
+          connection: payload.productConnection.name,
+        }
+      : null,
+    productError,
   };
 }
 
@@ -413,6 +544,8 @@ function startGui({
             return sendJson(res, 200, detect(body.projectDir));
           case "/api/validate":
             return sendJson(res, 200, { results: await validate(body) });
+          case "/api/product":
+            return sendJson(res, 200, await productStatus());
           case "/api/write":
             return sendJson(res, 200, write(body, { install }));
           case "/api/quit":
@@ -602,6 +735,44 @@ function renderPage(token, cwd = process.cwd()) {
         Permitir tambien las <strong>escrituras</strong> sin preguntar</label>
       <p class="hint" id="hintWriteRules" hidden>Solo en tu maquina. Si no lo marcas, cada
         escritura te pedira permiso, que es el freno que interesa conservar.</p>
+    </fieldset>
+
+    <fieldset id="productBox">
+      <legend>MCP de desarrollo de producto</legend>
+      <label><input type="checkbox" id="cProduct" style="width:auto">
+        Instalar tambien el MCP de producto (<code>ahora-mcp</code>)</label>
+      <p class="hint">Servidor del equipo de producto, con 98 herramientas para
+        personalizar el ERP (objetos, DDA, scripts de pantalla, campos configurables…).
+        Se anade <strong>al lado</strong> del de SQL, no en su lugar: los dos funcionan
+        en la misma sesion, con prefijos distintos
+        (<code>mcp__ahora-sql__*</code> y <code>mcp__ahora-erp__ahora_*</code>).
+        Se publica desde <code>nuget.ahorabh.com</code> y necesita el SDK de .NET 10.</p>
+      <div id="productOut"></div>
+      <div id="productPick" hidden>
+        <label for="productDb">Base de datos del ERP</label>
+        <select id="productDb"></select>
+        <p class="hint">Ese servidor maneja <strong>una sola</strong> base de datos por
+          proceso: su <code>ahora_connect</code> no entiende alias ni <code>dbKey</code>.
+          Para exponer otra hace falta otra entrada MCP.</p>
+      </div>
+      <div id="productFolderBox" hidden>
+        <label for="productFolder">Carpeta con el MCP ya publicado</label>
+        <input type="text" id="productFolder" placeholder="C:\\gitcode\\ahora-mcp">
+        <p class="hint">Sin SDK de .NET 10 no se puede publicar el paquete desde NuGet.
+          Indica una carpeta que contenga <code>ahora-mcp.dll</code> con sus dependencias
+          al lado y se copia tal cual, sin red.</p>
+      </div>
+      <div id="productWarn" class="banner warn" hidden>
+        Ese servidor <strong>siempre</strong> puede escribir en el ERP
+        (<code>ahora_ejecutar_dml</code>, <code>ahora_crear_*</code>,
+        <code>ahora_modificar_*</code>, <code>ahora_borrar_*</code>): no tiene modo de
+        solo lectura, asi que el unico freno son las reglas de permisos.
+        <label style="margin-top:8px"><input type="checkbox" id="cProductWriteRules"
+          style="width:auto"> Permitir sus <strong>escrituras</strong> sin preguntar</label>
+      </div>
+      <p class="hint" id="productProdWarn" hidden>En <strong>PRODUCCION</strong> no se
+        ofrece: al no tener modo de solo lectura, no hay forma de dejarlo configurado
+        para que no toque el ERP en vivo.</p>
     </fieldset>
     <div class="row" style="margin-top:18px">
       <div></div><button id="btnWrite">Escribir configuracion</button>
@@ -873,6 +1044,13 @@ $("btnValidate").onclick = async () => {
     validated = chosenFile
       ? { names: results.map((r) => ({ name: r.name, alias: r.alias })) }
       : { manual };
+    // El MCP de producto elige entre las conexiones que se acaban de validar, asi
+    // que su desplegable no puede rellenarse antes de este punto. Y si el proyecto
+    // ya lo tenia registrado, la casilla viene marcada: dejarla siempre en "no"
+    // haria que una reinstalacion lo retirase sin que nadie lo pidiera.
+    if (detected.hasProduct && !$("cProduct").disabled) $("cProduct").checked = true;
+    fillProductDb();
+    if ($("cProduct").checked) syncProduct();
     if (!noConecta) $("s3").hidden = false;
   } catch (e) {
     $("validateOut").innerHTML = '<p class="err">' + esc(e.message) + "</p>";
@@ -889,6 +1067,88 @@ function syncWriteRules() {
   if (!on) $("cWriteRules").checked = false;
 }
 
+// ── MCP de desarrollo de producto ───────────────────────────────────────────
+// Se consulta el estado del equipo (SDK, feed, version ya instalada) solo al marcar
+// la casilla: implica una llamada al feed, y quien no lo quiera no la paga.
+let productInfo = null;
+
+/**
+ * Las conexiones ya validadas, que son entre las que hay que elegir UNA.
+ *
+ * Con datos tecleados a mano se releen del formulario y no de lo validado, por el
+ * mismo motivo que hace la escritura del MCP de SQL: los alias se rellenan DESPUES
+ * de validar (los sugiere el servidor), asi que lo validado puede llevar uno viejo
+ * y el --db que se escribiria apuntaria a una conexion que ya no se llama asi.
+ */
+function validatedConnections() {
+  if (!validated) return [];
+  if (validated.names) return validated.names.map((n) => ({ name: n.name, alias: n.alias }));
+  return manualConnections().map((m) => ({ name: m.database, alias: m.alias }));
+}
+
+function fillProductDb() {
+  const conns = validatedConnections();
+  const previo = $("productDb").value;
+  $("productDb").innerHTML = conns
+    .map((c, i) => '<option value="' + i + '">' + esc(c.name) +
+      (c.alias ? " (alias " + esc(c.alias) + ")" : "") + "</option>")
+    .join("");
+  if (previo && $("productDb").querySelector('option[value="' + previo + '"]')) {
+    $("productDb").value = previo;
+  }
+  $("productPick").hidden = conns.length < 2;
+}
+
+async function syncProduct() {
+  const prodProfile = $("profile").selectedOptions[0].dataset.canwrite !== "true";
+  $("productProdWarn").hidden = !prodProfile;
+  if (prodProfile) {
+    $("cProduct").checked = false;
+    $("cProduct").disabled = true;
+  } else {
+    $("cProduct").disabled = false;
+  }
+
+  const on = $("cProduct").checked && !prodProfile;
+  $("productWarn").hidden = !on;
+  $("productPick").hidden = !on || validatedConnections().length < 2;
+  if (!on) {
+    $("productOut").innerHTML = "";
+    $("productFolderBox").hidden = true;
+    $("cProductWriteRules").checked = false;
+    return;
+  }
+
+  fillProductDb();
+  $("productOut").innerHTML = '<p class="hint">Comprobando el SDK de .NET y el feed…</p>';
+  try {
+    productInfo = await api("product");
+  } catch (e) {
+    $("productOut").innerHTML = '<p class="err">' + esc(e.message) + "</p>";
+    return;
+  }
+  let html = "<ul class=\\"list\\">";
+  html += "<li>" + (productInfo.dotnet
+    ? '<span class="ok">✓</span> SDK de .NET ' + esc(productInfo.dotnet)
+    : '<span class="err">✗</span> sin SDK de .NET 10 en este equipo') + "</li>";
+  html += "<li>" + (productInfo.latest
+    ? '<span class="ok">✓</span> feed: ultima version <strong>' + esc(productInfo.latest) + "</strong>"
+    : '<span class="err">✗</span> feed no alcanzable' +
+      (productInfo.feedError ? ' <span class="hint">' + esc(productInfo.feedError) + "</span>" : "")) + "</li>";
+  if (productInfo.installed) {
+    html += '<li><span class="ok">✓</span> ya instalado: <strong>' +
+      esc(productInfo.installed) + "</strong> en " + esc(productInfo.dir) + "</li>";
+  }
+  html += "</ul>";
+  $("productOut").innerHTML = html;
+  // Sin SDK, o sin feed, todavia queda copiar una carpeta ya publicada. Es la salida
+  // real en las redes donde api.nuget.org no se alcanza: el feed de AHORA solo
+  // hospeda ahora-mcp, no sus dependencias de Microsoft.
+  $("productFolderBox").hidden = Boolean(productInfo.dotnet && productInfo.latest);
+}
+
+$("cProduct").onchange = syncProduct;
+
 $("profile").onchange = () => {
   const opt = $("profile").selectedOptions[0];
   const canWrite = opt.dataset.canwrite === "true";
@@ -896,6 +1156,7 @@ $("profile").onchange = () => {
   $("prodWarn").hidden = canWrite;
   if (!canWrite) $("writes").checked = false;
   syncWriteRules();
+  syncProduct();
 };
 $("writes").onchange = syncWriteRules;
 
@@ -925,6 +1186,15 @@ $("btnWrite").onclick = async () => {
       allowWrites: $("writes").checked,
       allowRules: $("cRules").checked,
       allowWriteRules: $("cWriteRules").checked,
+      // MCP de producto: se manda la conexion ELEGIDA, no todas, porque ese servidor
+      // maneja una sola por proceso.
+      product: $("cProduct").checked,
+      productConnection: $("cProduct").checked
+        ? validatedConnections()[Number($("productDb").value) || 0]
+        : null,
+      productVersion: productInfo ? productInfo.latest : null,
+      productFolder: $("productFolderBox").hidden ? null : $("productFolder").value.trim() || null,
+      allowProductWriteRules: $("cProductWriteRules").checked,
       sqlDirs, clients,
     });
 
@@ -946,6 +1216,23 @@ $("btnWrite").onclick = async () => {
     if (res.credentialsFile) {
       html += "<p>Credenciales cifradas con tu cuenta de Windows, fuera del repositorio:</p><pre>" +
         esc(res.credentialsFile) + "</pre>";
+    }
+    if (res.product) {
+      html += '<div class="banner good">MCP de producto <code>' + esc(res.product.serverName) +
+        "</code> anadido <strong>junto a</strong> <code>" + ${JSON.stringify(SERVER_NAME)} +
+        "</code>, sobre la base de datos <strong>" + esc(res.product.connection) + "</strong>." +
+        (res.product.version ? " Version " + esc(res.product.version) + "." : "") +
+        (res.product.reused ? " Ya estaba publicado." : "") +
+        "<br>Los dos conviven en la misma sesion: <code>mcp__" + ${JSON.stringify(SERVER_NAME)} +
+        "__*</code> y <code>mcp__" + esc(res.product.serverName) + "__ahora_*</code>.</div>";
+      html += '<div class="banner warn">Ese servidor no tiene modo de solo lectura: ' +
+        "siempre puede escribir en el ERP. El unico freno son las reglas de permisos.</div>";
+    }
+    if (res.productError) {
+      html += '<div class="banner warn">No se ha podido instalar el MCP de producto (' +
+        esc(res.productError) + "). El de SQL ha quedado configurado igualmente. " +
+        "Vuelve a lanzar el instalador con el SDK de .NET 10 disponible, o indica una " +
+        "carpeta con el MCP de producto ya publicado.</div>";
     }
     if (res.permissions) {
       html += "<p>Reglas de permisos en <code>" + esc(res.permissions.target) + "</code>:</p>" +
@@ -991,6 +1278,7 @@ $("btnWrite").onclick = async () => {
 module.exports = {
   startGui,
   detect,
+  productStatus,
   validate,
   write,
   checkNodeOnMachine,
