@@ -34,10 +34,13 @@
  * `installProductFromFolder`: copia una carpeta ya publicada (la que se reparte
  * comprimida) y deja el mismo resultado sin tocar la red ni necesitar SDK.
  */
+const crypto = require("crypto");
 const fs = require("fs");
+const http = require("http");
 const https = require("https");
 const os = require("os");
 const path = require("path");
+const tls = require("tls");
 const { execFileSync } = require("child_process");
 
 const { toolVersion } = require("./tools");
@@ -140,25 +143,118 @@ function pickLatest(versions) {
  * equipo de quien instala, que es el sitio donde NO esta el problema.
  */
 function explainNetworkError(err, url) {
-  const tls = new Set([
+  // `erroresTls` y no `tls`: ese nombre tapaba el modulo `tls` del principio del
+  // fichero. Aqui no se usaba y por eso no rompia, pero es la clase de trampa que
+  // explota el dia que alguien anada una linea dentro de esta funcion.
+  const erroresTls = new Set([
     "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
     "UNABLE_TO_GET_ISSUER_CERT",
     "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
     "SELF_SIGNED_CERT_IN_CHAIN",
     "DEPTH_ZERO_SELF_SIGNED_CERT",
   ]);
-  if (err && tls.has(err.code)) {
+  if (err && erroresTls.has(err.code)) {
     return new Error(
       `${err.message} — el certificado de ${new URL(url).host} no se puede validar. ` +
-        "No es tu red: ese servidor sirve una cadena de certificados incompleta, y " +
-        "Node no completa la cadena sola como hacen Windows y el navegador (por eso " +
-        "curl y el navegador si entran). Se arregla en el servidor, instalando el " +
-        "intermedio correcto. Mientras tanto: si ya tienes el MCP de producto " +
-        "instalado se reutiliza esa version, y si no, indica una carpeta con el ya " +
-        "publicado."
+        "No es tu red: ese servidor sirve una cadena de certificados incompleta. El " +
+        "instalador intenta completarla solo, bajando el emisor que falta de donde el " +
+        "propio certificado dice (extension AIA) y comprobando que lo firme una raiz " +
+        "de confianza, que es lo que hacen Windows y el navegador; si has llegado a " +
+        "este mensaje es que tampoco eso ha funcionado. Se arregla de verdad en el " +
+        "servidor, instalando el intermedio correcto. Mientras tanto: si ya tienes el " +
+        "MCP de producto instalado se reutiliza esa version, y si no, indica una " +
+        "carpeta con el ya publicado."
     );
   }
   return err;
+}
+
+/**
+ * Completa la cadena que el servidor deja a medias, sin bajar la guardia.
+ *
+ * nuget.ahorabh.com no manda el intermedio que firma su certificado. Windows y los
+ * navegadores lo resuelven solos: el propio certificado publica en su extension AIA
+ * (Authority Information Access, campo "CA Issuers") la URL de donde bajarlo. Node no
+ * hace ese paso, y de ahi que curl entre y el instalador no.
+ *
+ * Aqui se hace ese paso a mano. Lo que NO se hace, y es la diferencia que importa, es
+ * desactivar la verificacion: `NODE_TLS_REJECT_UNAUTHORIZED=0` haria que el instalador
+ * se tragara CUALQUIER certificado de CUALQUIER servidor durante toda su ejecucion, que
+ * es cambiar un problema del servidor por un agujero en todas las maquinas del equipo.
+ *
+ * LA SALVAGUARDA. El intermedio se baja por HTTP PLANO -asi lo define AIA-, asi que
+ * quien pueda interceptar esa descarga podria devolver un certificado suyo. Y meterlo en
+ * `ca` no lo trata como un eslabon mas: lo convierte en ANCLA DE CONFIANZA, con lo que
+ * cualquier cosa firmada por el se daria por buena. Por eso antes de usarlo se comprueba
+ * que de verdad lo ha firmado una raiz de las que Node ya trae: si no encadena, se
+ * descarta y volvemos al camino de siempre. Un intermedio falsificado no supera esa
+ * comprobacion, porque el atacante tendria que firmarlo con una raiz publica.
+ *
+ * La conexion con `rejectUnauthorized: false` de aqui abajo se usa SOLO para leer el
+ * certificado que presenta el servidor, nunca para traer contenido: la peticion de
+ * verdad se reintenta despues con la verificacion entera puesta.
+ */
+async function fetchMissingIssuer(host, port = 443, { timeoutMs = 15000 } = {}) {
+  const leaf = await new Promise((resolve, reject) => {
+    const socket = tls.connect(
+      { host, port, servername: host, rejectUnauthorized: false, timeout: timeoutMs },
+      () => {
+        const cert = socket.getPeerX509Certificate();
+        socket.destroy();
+        resolve(cert);
+      }
+    );
+    socket.on("error", reject);
+    socket.on("timeout", () => {
+      socket.destroy();
+      reject(new Error(`${host} no responde`));
+    });
+  });
+
+  const aia = leaf && leaf.infoAccess;
+  const match = aia && aia.match(/CA Issuers - URI:(http:\/\/\S+)/);
+  if (!match) return null;
+
+  const der = await new Promise((resolve, reject) => {
+    const req = http.get(match[1], (res) => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`${match[1]} ha respondido ${res.statusCode}`));
+        return;
+      }
+      const trozos = [];
+      res.on("data", (c) => trozos.push(c));
+      res.on("end", () => resolve(Buffer.concat(trozos)));
+    });
+    req.on("error", reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`${match[1]} no responde`)));
+  });
+
+  return validateIssuer(der);
+}
+
+/**
+ * Devuelve el certificado en PEM solo si lo ha firmado una raiz de confianza.
+ *
+ * Esta aparte de `fetchMissingIssuer` para poder probarla sin red, que es donde esta el
+ * riesgo: es la unica linea entre "completar una cadena que el servidor deja a medias" y
+ * "aceptar el certificado que quiera darnos quien controle la descarga por HTTP".
+ *
+ * `roots` es inyectable por lo mismo: un test puede comprobar que con otras raices el
+ * mismo certificado se rechaza.
+ */
+function validateIssuer(der, roots = tls.rootCertificates) {
+  const issuer = new crypto.X509Certificate(der);
+  for (const pem of roots) {
+    const root = new crypto.X509Certificate(pem);
+    // Las dos comprobaciones hacen falta, y por separado: `checkIssued` casa emisor con
+    // sujeto -que es solo texto- y `verify` es la que comprueba la FIRMA. Sin la
+    // segunda, falsificar el intermedio seria copiar un nombre.
+    if (issuer.checkIssued(root) && issuer.verify(root.publicKey)) {
+      return issuer.toString();
+    }
+  }
+  return null;
 }
 
 /** GET de un JSON, con tiempo de espera: sin el, una red rara cuelga el instalador. */
@@ -190,9 +286,50 @@ function getJson(url, { timeoutMs = 15000, get = https.get } = {}) {
   });
 }
 
+/** ¿El fallo es "me falta un eslabon de la cadena" y no otra cosa? */
+function isMissingIssuerError(err) {
+  return Boolean(
+    err &&
+      (err.code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" ||
+        err.code === "UNABLE_TO_GET_ISSUER_CERT" ||
+        /unable to verify the first certificate|unable to get (local )?issuer certificate/i.test(
+          err.message || ""
+        ))
+  );
+}
+
+/**
+ * GET de un JSON que, si la cadena viene incompleta, la completa y reintenta.
+ *
+ * Primero se pide con la verificacion de serie. Solo si falla POR ESO -no por un
+ * certificado caducado, ni por un nombre que no casa, ni por una raiz desconocida- se
+ * intenta bajar el emisor que falta y se repite la peticion con la verificacion entera.
+ * Si el emisor no se puede conseguir o no encadena con una raiz de confianza, se propaga
+ * el error original: el instalador sigue teniendo su camino de la carpeta.
+ */
+async function getJsonCompletandoCadena(url, options = {}) {
+  try {
+    return await getJson(url, options);
+  } catch (err) {
+    if (!isMissingIssuerError(err) || options.get) throw err;
+    const { host, port } = new URL(url);
+    let issuer;
+    try {
+      issuer = await fetchMissingIssuer(host, port || 443, options);
+    } catch {
+      throw err;
+    }
+    if (!issuer) throw err;
+    return getJson(url, {
+      ...options,
+      get: (u, cb) => https.get(u, { ca: [...tls.rootCertificates, issuer] }, cb),
+    });
+  }
+}
+
 /** La ultima version estable publicada en el feed de AHORA. */
 async function latestProductVersion({ url = PRODUCT_VERSIONS_URL, ...options } = {}) {
-  const doc = await getJson(url, options);
+  const doc = await getJsonCompletandoCadena(url, options);
   const latest = pickLatest(doc && doc.versions);
   if (!latest) throw new Error(`El feed no publica ninguna version estable de ${PRODUCT_PACKAGE}.`);
   return latest;
@@ -445,6 +582,10 @@ module.exports = {
   compareVersions,
   pickLatest,
   latestProductVersion,
+  getJsonCompletandoCadena,
+  fetchMissingIssuer,
+  validateIssuer,
+  isMissingIssuerError,
   versionToInstall,
   explainNetworkError,
   dotnetSdkVersion,

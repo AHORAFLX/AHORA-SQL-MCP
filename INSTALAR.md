@@ -232,6 +232,7 @@ prefijos distintos, `mcp__ahora-sql__*` y `mcp__ahora-erp__ahora_*`, y la skill
 | | |
 |---|---|
 | **Requisitos** | SDK de .NET 10 y acceso a `nuget.ahorabh.com` **y** a `api.nuget.org` (el feed de AHORA solo hospeda `ahora-mcp`; sus dependencias de Microsoft vienen del feed público). Si no llegas a uno de los dos, el instalador te deja indicar una carpeta con el MCP ya publicado y la copia. |
+| **Certificado del feed** | `nuget.ahorabh.com` sirve una cadena incompleta, así que Node falla con *«unable to verify the first certificate»* donde el navegador entra sin problema. El instalador la completa solo, bajando el emisor que falta de donde el propio certificado dice y comprobando que lo firme una raíz de confianza. No tienes que configurar nada, y **no** hay que desactivar la verificación de certificados. |
 | **Dónde se instala** | `%LOCALAPPDATA%\ahora-mcp\app`, carpeta propia y **hermana** de la del MCP de SQL. Una sola vez por equipo, no en cada arranque. Están separadas a propósito: desinstalar el MCP de SQL borrando `%LOCALAPPDATA%\AHORA-SQL-MCP` no puede llevarse este por delante. |
 | **Base de datos** | **Una sola por proceso**: su `ahora_connect` no entiende alias ni `dbKey`. El instalador te hace elegir cuál de las conexiones ya validadas usa. |
 | **Credenciales** | Como en el MCP de SQL: en el `.mcp.json` queda **de dónde** sacar la conexión (`--config-file` + `--connection-name`, o `--credentials-file` + `--db`), nunca la cadena. La resuelve `start-ahora-mcp` en cada arranque. |

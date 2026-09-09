@@ -74865,10 +74865,13 @@ var require_tools = __commonJS({
 // installer/product-mcp.js
 var require_product_mcp = __commonJS({
   "installer/product-mcp.js"(exports2, module2) {
+    var crypto2 = require("crypto");
     var fs6 = require("fs");
+    var http = require("http");
     var https = require("https");
     var os2 = require("os");
     var path2 = require("path");
+    var tls = require("tls");
     var { execFileSync: execFileSync2 } = require("child_process");
     var { toolVersion } = require_tools();
     var PRODUCT_PACKAGE = "ahora-mcp";
@@ -74922,19 +74925,64 @@ var require_product_mcp = __commonJS({
       return stable.slice().sort(compareVersions).pop();
     }
     function explainNetworkError(err, url) {
-      const tls = /* @__PURE__ */ new Set([
+      const erroresTls = /* @__PURE__ */ new Set([
         "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
         "UNABLE_TO_GET_ISSUER_CERT",
         "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
         "SELF_SIGNED_CERT_IN_CHAIN",
         "DEPTH_ZERO_SELF_SIGNED_CERT"
       ]);
-      if (err && tls.has(err.code)) {
+      if (err && erroresTls.has(err.code)) {
         return new Error(
-          `${err.message} \u2014 el certificado de ${new URL(url).host} no se puede validar. No es tu red: ese servidor sirve una cadena de certificados incompleta, y Node no completa la cadena sola como hacen Windows y el navegador (por eso curl y el navegador si entran). Se arregla en el servidor, instalando el intermedio correcto. Mientras tanto: si ya tienes el MCP de producto instalado se reutiliza esa version, y si no, indica una carpeta con el ya publicado.`
+          `${err.message} \u2014 el certificado de ${new URL(url).host} no se puede validar. No es tu red: ese servidor sirve una cadena de certificados incompleta. El instalador intenta completarla solo, bajando el emisor que falta de donde el propio certificado dice (extension AIA) y comprobando que lo firme una raiz de confianza, que es lo que hacen Windows y el navegador; si has llegado a este mensaje es que tampoco eso ha funcionado. Se arregla de verdad en el servidor, instalando el intermedio correcto. Mientras tanto: si ya tienes el MCP de producto instalado se reutiliza esa version, y si no, indica una carpeta con el ya publicado.`
         );
       }
       return err;
+    }
+    async function fetchMissingIssuer(host, port = 443, { timeoutMs = 15e3 } = {}) {
+      const leaf = await new Promise((resolve, reject) => {
+        const socket = tls.connect(
+          { host, port, servername: host, rejectUnauthorized: false, timeout: timeoutMs },
+          () => {
+            const cert = socket.getPeerX509Certificate();
+            socket.destroy();
+            resolve(cert);
+          }
+        );
+        socket.on("error", reject);
+        socket.on("timeout", () => {
+          socket.destroy();
+          reject(new Error(`${host} no responde`));
+        });
+      });
+      const aia = leaf && leaf.infoAccess;
+      const match = aia && aia.match(/CA Issuers - URI:(http:\/\/\S+)/);
+      if (!match) return null;
+      const der = await new Promise((resolve, reject) => {
+        const req = http.get(match[1], (res) => {
+          if (res.statusCode !== 200) {
+            res.resume();
+            reject(new Error(`${match[1]} ha respondido ${res.statusCode}`));
+            return;
+          }
+          const trozos = [];
+          res.on("data", (c) => trozos.push(c));
+          res.on("end", () => resolve(Buffer.concat(trozos)));
+        });
+        req.on("error", reject);
+        req.setTimeout(timeoutMs, () => req.destroy(new Error(`${match[1]} no responde`)));
+      });
+      return validateIssuer(der);
+    }
+    function validateIssuer(der, roots = tls.rootCertificates) {
+      const issuer = new crypto2.X509Certificate(der);
+      for (const pem of roots) {
+        const root = new crypto2.X509Certificate(pem);
+        if (issuer.checkIssued(root) && issuer.verify(root.publicKey)) {
+          return issuer.toString();
+        }
+      }
+      return null;
     }
     function getJson(url, { timeoutMs = 15e3, get = https.get } = {}) {
       return new Promise((resolve, reject) => {
@@ -74963,8 +75011,34 @@ var require_product_mcp = __commonJS({
         });
       });
     }
+    function isMissingIssuerError(err) {
+      return Boolean(
+        err && (err.code === "UNABLE_TO_VERIFY_LEAF_SIGNATURE" || err.code === "UNABLE_TO_GET_ISSUER_CERT" || /unable to verify the first certificate|unable to get (local )?issuer certificate/i.test(
+          err.message || ""
+        ))
+      );
+    }
+    async function getJsonCompletandoCadena(url, options = {}) {
+      try {
+        return await getJson(url, options);
+      } catch (err) {
+        if (!isMissingIssuerError(err) || options.get) throw err;
+        const { host, port } = new URL(url);
+        let issuer;
+        try {
+          issuer = await fetchMissingIssuer(host, port || 443, options);
+        } catch {
+          throw err;
+        }
+        if (!issuer) throw err;
+        return getJson(url, {
+          ...options,
+          get: (u, cb) => https.get(u, { ca: [...tls.rootCertificates, issuer] }, cb)
+        });
+      }
+    }
     async function latestProductVersion({ url = PRODUCT_VERSIONS_URL, ...options } = {}) {
-      const doc = await getJson(url, options);
+      const doc = await getJsonCompletandoCadena(url, options);
       const latest = pickLatest(doc && doc.versions);
       if (!latest) throw new Error(`El feed no publica ninguna version estable de ${PRODUCT_PACKAGE}.`);
       return latest;
@@ -75144,6 +75218,10 @@ internal static class Host
       compareVersions,
       pickLatest,
       latestProductVersion,
+      getJsonCompletandoCadena,
+      fetchMissingIssuer,
+      validateIssuer,
+      isMissingIssuerError,
       versionToInstall,
       explainNetworkError,
       dotnetSdkVersion,

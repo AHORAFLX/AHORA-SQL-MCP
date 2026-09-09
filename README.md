@@ -476,6 +476,16 @@ ERP no acabe en un fichero que se commitea:
    forma que el propio paquete contempla en su `buildTransitive/ahora-mcp.targets`. Como esa
    restauración necesita `api.nuget.org` (el feed de AHORA solo hospeda `ahora-mcp`, no las
    dependencias de Microsoft), hay una segunda vía: copiar una carpeta ya publicada, sin red ni SDK.
+
+   Al consultar el feed **completa la cadena de certificados** si el servidor la deja a medias, que
+   es el caso de `nuget.ahorabh.com`: manda un intermedio que no firma su hoja y omite el bueno.
+   Windows y el navegador lo tapan solos —por eso `curl` entra y Node no—, así que el instalador
+   hace lo mismo: baja el emisor que falta de la URL que el propio certificado publica en su
+   extensión AIA y **comprueba que lo firme una raíz de confianza antes de usarlo**. Esa
+   comprobación no es opcional: la descarga es por HTTP plano y un certificado metido en `ca` pasa
+   a ser ancla de confianza, así que sin verificarlo quien interceptara esa descarga podría colar
+   el suyo. Nunca se desactiva la verificación (`NODE_TLS_REJECT_UNAUTHORIZED=0` cambiaría un
+   problema del servidor por un agujero en todas las máquinas del equipo).
 3. **Reglas de permisos propias.** Sus herramientas no comparten vocabulario con las de aquí
    (`ahora_leer_*` frente a `list_*`), así que un comodín no cubre las dos.
 

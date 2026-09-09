@@ -22,6 +22,8 @@ const {
   projectFiles,
   dotnetSdkVersion,
   versionToInstall,
+  validateIssuer,
+  isMissingIssuerError,
   explainNetworkError,
   PRODUCT_PACKAGE,
   PRODUCT_FEED,
@@ -428,4 +430,55 @@ test("el fallo de certificado se explica como lo que es, no como un fallo de red
   // Un fallo de red normal se deja pasar tal cual: envolverlo todo seria mentir.
   const red = Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" });
   assert.equal(explainNetworkError(red, "https://x/y"), red);
+});
+
+// ── Completar la cadena de certificados sin bajar la guardia ─────────────────
+
+const tls = require("node:tls");
+const crypto = require("node:crypto");
+
+/** El intermedio publico que nuget.ahorabh.com NO manda en su cadena. */
+const INTERMEDIO = fs.readFileSync(
+  path.join(__dirname, "fixtures", "sectigo-intermedio.pem"),
+  "utf8"
+);
+
+test("el intermedio que falta se acepta porque lo firma una raiz de confianza", () => {
+  // Es lo que hace que el feed vuelva a ser alcanzable: el servidor deja la cadena a
+  // medias y el certificado publica en su AIA de donde bajar el eslabon que falta.
+  const pem = validateIssuer(INTERMEDIO);
+  assert.ok(pem, "Node deberia traer la raiz Sectigo que firma este intermedio");
+  assert.match(pem, /BEGIN CERTIFICATE/);
+});
+
+test("un intermedio que NO encadena con una raiz de confianza se rechaza", () => {
+  // LA comprobacion de seguridad. El intermedio se baja por HTTP PLANO, asi lo define
+  // AIA, y meterlo en `ca` lo convierte en ANCLA DE CONFIANZA: sin esta barrera, quien
+  // pudiera interceptar esa descarga colaria un certificado suyo y el instalador daria
+  // por bueno cualquier servidor firmado por el.
+  //
+  // Se simula pasando TODAS las raices menos las que de verdad podrian haberlo emitido:
+  // el certificado es el mismo y sigue siendo valido, pero ninguna de las que se le dan
+  // lo ha firmado, asi que tiene que salir null. Se seleccionan con `checkIssued` y no
+  // por texto para que el test no dependa del orden del almacen de Node.
+  const cert = new crypto.X509Certificate(INTERMEDIO);
+  const ajenas = tls.rootCertificates.filter(
+    (pem) => !cert.checkIssued(new crypto.X509Certificate(pem))
+  );
+  assert.ok(ajenas.length > 100, "el almacen de Node deberia traer muchas raices");
+  assert.equal(validateIssuer(INTERMEDIO, ajenas), null);
+  assert.equal(validateIssuer(INTERMEDIO, []), null, "sin raices no se acepta nada");
+});
+
+test("el rescate de la cadena solo se dispara por el fallo que corresponde", () => {
+  // Un certificado caducado, un nombre que no casa o una raiz desconocida son problemas
+  // DISTINTOS, y bajarse un intermedio no los arregla: intentarlo solo serviria para
+  // acabar aceptando algo que no se debe.
+  assert.equal(isMissingIssuerError({ code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE" }), true);
+  assert.equal(isMissingIssuerError({ code: "UNABLE_TO_GET_ISSUER_CERT" }), true);
+  assert.equal(isMissingIssuerError({ code: "CERT_HAS_EXPIRED" }), false);
+  assert.equal(isMissingIssuerError({ code: "ERR_TLS_CERT_ALTNAME_INVALID" }), false);
+  assert.equal(isMissingIssuerError({ code: "SELF_SIGNED_CERT_IN_CHAIN" }), false);
+  assert.equal(isMissingIssuerError({ code: "ENOTFOUND" }), false);
+  assert.equal(isMissingIssuerError(null), false);
 });
