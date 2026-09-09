@@ -49,6 +49,7 @@ const {
   productDll,
   installedProductVersion,
   latestProductVersion,
+  versionToInstall,
   dotnetSdkVersion,
   installProductMcp,
   installProductFromFolder,
@@ -1062,13 +1063,27 @@ async function main() {
         let version;
         if (!product.folder) {
           say(`Consultando la ultima version de ${PRODUCT_PACKAGE} en el feed...`);
-          version = await latestProductVersion();
-          const ya = installedProductVersion(productRuntimeDir());
+          const instalada = installedProductVersion(productRuntimeDir());
+          let ultima = null;
+          try {
+            ultima = await latestProductVersion();
+          } catch (err) {
+            // Un feed caido no puede impedir seguir si ya hay una publicacion en
+            // disco: el feed sirve para SABER la version, no para instalar una que
+            // ya esta. Solo se aborta si ademas no hay nada instalado.
+            say(`⚠ ${err.message}`);
+            if (!instalada) throw err;
+          }
+          const elegida = versionToInstall({ latest: ultima, installed: instalada });
+          version = elegida.version;
           say(
-            ya === version
-              ? `✓ ${PRODUCT_PACKAGE} ${version} ya estaba publicado.`
+            instalada === version
+              ? `✓ ${PRODUCT_PACKAGE} ${version} ya estaba publicado — origen: ${elegida.origen}.`
               : `Publicando ${PRODUCT_PACKAGE} ${version} (una sola vez, no en cada arranque)…`
           );
+          if (!elegida.alDia) {
+            say("   No se ha podido comprobar si hay una version mas reciente.");
+          }
         }
         productInstalled = installProduct({ version, folder: product.folder });
         say(

@@ -1140,11 +1140,20 @@ async function syncProduct() {
       esc(productInfo.installed) + "</strong> en " + esc(productInfo.dir) + "</li>";
   }
   html += "</ul>";
+  // El feed sirve para SABER la version, no para instalar una que ya esta: si la
+  // publicacion existe en disco se reutiliza sin tocar la red. Asi que con el feed
+  // caido y algo instalado se puede seguir igual, y hay que decirlo — antes el
+  // formulario informaba de la version instalada y acto seguido se negaba a escribir.
+  const usable = productInfo.latest || productInfo.installed;
+  if (!productInfo.latest && productInfo.installed) {
+    html += '<div class="banner warn">El feed no responde, pero se usara la version ' +
+      "<strong>" + esc(productInfo.installed) + "</strong> que ya esta instalada en este " +
+      "equipo. No se comprueba si hay una mas reciente.</div>";
+  }
   $("productOut").innerHTML = html;
-  // Sin SDK, o sin feed, todavia queda copiar una carpeta ya publicada. Es la salida
-  // real en las redes donde api.nuget.org no se alcanza: el feed de AHORA solo
-  // hospeda ahora-mcp, no sus dependencias de Microsoft.
-  $("productFolderBox").hidden = Boolean(productInfo.dotnet && productInfo.latest);
+  // Sin SDK, sin feed y sin nada instalado, la unica salida es copiar una carpeta ya
+  // publicada.
+  $("productFolderBox").hidden = Boolean(productInfo.dotnet && usable);
 }
 
 $("cProduct").onchange = syncProduct;
@@ -1192,7 +1201,9 @@ $("btnWrite").onclick = async () => {
       productConnection: $("cProduct").checked
         ? validatedConnections()[Number($("productDb").value) || 0]
         : null,
-      productVersion: productInfo ? productInfo.latest : null,
+      // La del feed si se ha podido consultar; si no, la que ya esta instalada, que se
+      // reutiliza sin red. Sin ninguna de las dos queda la carpeta.
+      productVersion: productInfo ? productInfo.latest || productInfo.installed : null,
       productFolder: $("productFolderBox").hidden ? null : $("productFolder").value.trim() || null,
       allowProductWriteRules: $("cProductWriteRules").checked,
       sqlDirs, clients,

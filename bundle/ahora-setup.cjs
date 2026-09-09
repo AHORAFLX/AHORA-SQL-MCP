@@ -74882,13 +74882,11 @@ var require_product_mcp = __commonJS({
       if (platform2 === "win32") {
         return path2.join(
           env.LOCALAPPDATA || path2.join(homeDir, "AppData", "Local"),
-          "AHORA-SQL-MCP",
           PRODUCT_PACKAGE
         );
       }
       return path2.join(
         env.XDG_DATA_HOME || path2.join(homeDir, ".local", "share"),
-        "ahora-sql-mcp",
         PRODUCT_PACKAGE
       );
     }
@@ -74923,6 +74921,21 @@ var require_product_mcp = __commonJS({
       if (stable.length === 0) return null;
       return stable.slice().sort(compareVersions).pop();
     }
+    function explainNetworkError(err, url) {
+      const tls = /* @__PURE__ */ new Set([
+        "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+        "UNABLE_TO_GET_ISSUER_CERT",
+        "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+        "SELF_SIGNED_CERT_IN_CHAIN",
+        "DEPTH_ZERO_SELF_SIGNED_CERT"
+      ]);
+      if (err && tls.has(err.code)) {
+        return new Error(
+          `${err.message} \u2014 el certificado de ${new URL(url).host} no se puede validar. No es tu red: ese servidor sirve una cadena de certificados incompleta, y Node no completa la cadena sola como hacen Windows y el navegador (por eso curl y el navegador si entran). Se arregla en el servidor, instalando el intermedio correcto. Mientras tanto: si ya tienes el MCP de producto instalado se reutiliza esa version, y si no, indica una carpeta con el ya publicado.`
+        );
+      }
+      return err;
+    }
     function getJson(url, { timeoutMs = 15e3, get = https.get } = {}) {
       return new Promise((resolve, reject) => {
         const req = get(url, (res) => {
@@ -74944,7 +74957,7 @@ var require_product_mcp = __commonJS({
             }
           });
         });
-        req.on("error", reject);
+        req.on("error", (err) => reject(explainNetworkError(err, url)));
         req.setTimeout(timeoutMs, () => {
           req.destroy(new Error(`${url} no responde (${timeoutMs} ms)`));
         });
@@ -75101,6 +75114,23 @@ internal static class Host
         return null;
       }
     }
+    function versionToInstall({ latest = null, installed = null } = {}) {
+      if (latest) {
+        return {
+          version: latest,
+          origen: installed === latest ? "feed (ya estaba publicada)" : "feed",
+          alDia: true
+        };
+      }
+      if (installed) {
+        return {
+          version: installed,
+          origen: "la ya instalada en este equipo (el feed no responde)",
+          alDia: false
+        };
+      }
+      return { version: null, origen: null, alDia: false };
+    }
     module2.exports = {
       PRODUCT_PACKAGE,
       PRODUCT_FEED,
@@ -75114,6 +75144,8 @@ internal static class Host
       compareVersions,
       pickLatest,
       latestProductVersion,
+      versionToInstall,
+      explainNetworkError,
       dotnetSdkVersion,
       checkDotnetSdk,
       projectFiles,
@@ -76185,11 +76217,20 @@ async function syncProduct() {
       esc(productInfo.installed) + "</strong> en " + esc(productInfo.dir) + "</li>";
   }
   html += "</ul>";
+  // El feed sirve para SABER la version, no para instalar una que ya esta: si la
+  // publicacion existe en disco se reutiliza sin tocar la red. Asi que con el feed
+  // caido y algo instalado se puede seguir igual, y hay que decirlo \u2014 antes el
+  // formulario informaba de la version instalada y acto seguido se negaba a escribir.
+  const usable = productInfo.latest || productInfo.installed;
+  if (!productInfo.latest && productInfo.installed) {
+    html += '<div class="banner warn">El feed no responde, pero se usara la version ' +
+      "<strong>" + esc(productInfo.installed) + "</strong> que ya esta instalada en este " +
+      "equipo. No se comprueba si hay una mas reciente.</div>";
+  }
   $("productOut").innerHTML = html;
-  // Sin SDK, o sin feed, todavia queda copiar una carpeta ya publicada. Es la salida
-  // real en las redes donde api.nuget.org no se alcanza: el feed de AHORA solo
-  // hospeda ahora-mcp, no sus dependencias de Microsoft.
-  $("productFolderBox").hidden = Boolean(productInfo.dotnet && productInfo.latest);
+  // Sin SDK, sin feed y sin nada instalado, la unica salida es copiar una carpeta ya
+  // publicada.
+  $("productFolderBox").hidden = Boolean(productInfo.dotnet && usable);
 }
 
 $("cProduct").onchange = syncProduct;
@@ -76237,7 +76278,9 @@ $("btnWrite").onclick = async () => {
       productConnection: $("cProduct").checked
         ? validatedConnections()[Number($("productDb").value) || 0]
         : null,
-      productVersion: productInfo ? productInfo.latest : null,
+      // La del feed si se ha podido consultar; si no, la que ya esta instalada, que se
+      // reutiliza sin red. Sin ninguna de las dos queda la carpeta.
+      productVersion: productInfo ? productInfo.latest || productInfo.installed : null,
       productFolder: $("productFolderBox").hidden ? null : $("productFolder").value.trim() || null,
       allowProductWriteRules: $("cProductWriteRules").checked,
       sqlDirs, clients,
@@ -76366,6 +76409,7 @@ var require_setup = __commonJS({
       productDll,
       installedProductVersion,
       latestProductVersion,
+      versionToInstall,
       dotnetSdkVersion,
       installProductMcp,
       installProductFromFolder
@@ -77095,11 +77139,22 @@ var require_setup = __commonJS({
             let version;
             if (!product.folder) {
               say(`Consultando la ultima version de ${PRODUCT_PACKAGE} en el feed...`);
-              version = await latestProductVersion();
-              const ya = installedProductVersion(productRuntimeDir());
+              const instalada = installedProductVersion(productRuntimeDir());
+              let ultima = null;
+              try {
+                ultima = await latestProductVersion();
+              } catch (err) {
+                say(`\u26A0 ${err.message}`);
+                if (!instalada) throw err;
+              }
+              const elegida = versionToInstall({ latest: ultima, installed: instalada });
+              version = elegida.version;
               say(
-                ya === version ? `\u2713 ${PRODUCT_PACKAGE} ${version} ya estaba publicado.` : `Publicando ${PRODUCT_PACKAGE} ${version} (una sola vez, no en cada arranque)\u2026`
+                instalada === version ? `\u2713 ${PRODUCT_PACKAGE} ${version} ya estaba publicado \u2014 origen: ${elegida.origen}.` : `Publicando ${PRODUCT_PACKAGE} ${version} (una sola vez, no en cada arranque)\u2026`
               );
+              if (!elegida.alDia) {
+                say("   No se ha podido comprobar si hay una version mas reciente.");
+              }
             }
             productInstalled = installProduct({ version, folder: product.folder });
             say(

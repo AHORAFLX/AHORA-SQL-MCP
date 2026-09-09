@@ -21,6 +21,8 @@ const {
   installedProductVersion,
   projectFiles,
   dotnetSdkVersion,
+  versionToInstall,
+  explainNetworkError,
   PRODUCT_PACKAGE,
   PRODUCT_FEED,
 } = require("../installer/product-mcp");
@@ -77,8 +79,24 @@ test("el MCP de producto se instala en LOCALAPPDATA, no en el proyecto", () => {
     platform: "win32",
     env: { LOCALAPPDATA: "C:\\Users\\x\\AppData\\Local" },
   });
-  assert.equal(dir, path.join("C:\\Users\\x\\AppData\\Local", "AHORA-SQL-MCP", "ahora-mcp"));
+  assert.equal(dir, path.join("C:\\Users\\x\\AppData\\Local", "ahora-mcp"));
   assert.match(productDll(dir), /app[\\/]ahora-mcp\.dll$/);
+});
+
+test("no cuelga de la carpeta del MCP de SQL", () => {
+  // Colgaba de ella, y era una trampa: el gesto natural para desinstalar el MCP de SQL
+  // es borrar `%LOCALAPPDATA%\AHORA-SQL-MCP`, y eso se llevaba por delante el MCP de
+  // producto sin avisar, dejando la entrada `ahora-erp` del .mcp.json apuntando a un
+  // .dll que ya no existe. Ademas esa carpeta se llama como otro producto.
+  const dir = productRuntimeDir({
+    platform: "win32",
+    env: { LOCALAPPDATA: "C:\\Users\\x\\AppData\\Local" },
+  });
+  assert.equal(
+    dir.includes("AHORA-SQL-MCP"),
+    false,
+    "el MCP de producto no puede vivir dentro de la carpeta del de SQL"
+  );
 });
 
 test("installedProductVersion no da por instalada una carpeta sin el dll", () => {
@@ -365,4 +383,49 @@ test("las reglas de lectura del MCP de producto salen del tools/list real", () =
     "ninguna regla puede estar en PascalCase"
   );
   assert.equal(PRODUCT_PACKAGE, "ahora-mcp");
+});
+
+// ── Feed caido: lo que fallaba de verdad ─────────────────────────────────────
+
+test("con el feed caido y una version ya instalada, se usa esa", () => {
+  // Este es el fallo que reporto quien lo instalo: el formulario decia
+  // "✓ ya instalado: 0.64.0" y acto seguido se negaba a escribir la configuracion
+  // con "Falta la version del paquete a instalar". El feed sirve para SABER cual es
+  // la ultima, no para instalar una que ya esta en disco: installProductMcp la
+  // reutiliza sin tocar la red. Un feed inalcanzable no puede bloquear eso.
+  const elegida = versionToInstall({ latest: null, installed: "0.64.0" });
+  assert.equal(elegida.version, "0.64.0");
+  assert.equal(elegida.alDia, false, "hay que poder decir que no se comprobo si hay una mas nueva");
+});
+
+test("con feed, manda el feed aunque haya otra instalada", () => {
+  assert.deepEqual(versionToInstall({ latest: "0.65.0", installed: "0.64.0" }), {
+    version: "0.65.0",
+    origen: "feed",
+    alDia: true,
+  });
+});
+
+test("sin feed y sin nada instalado no hay version que instalar", () => {
+  // Aqui si es un callejon sin salida, y el instalador tiene que ofrecer la carpeta.
+  assert.equal(versionToInstall({ latest: null, installed: null }).version, null);
+  assert.equal(versionToInstall().version, null);
+});
+
+test("el fallo de certificado se explica como lo que es, no como un fallo de red", () => {
+  // nuget.ahorabh.com sirve una cadena incompleta: manda un intermedio que no firma su
+  // hoja. Windows y el navegador lo tapan descargando el que falta por AIA; Node no.
+  // El mensaje pelado de Node ("unable to verify the first certificate") hace pensar
+  // que el problema esta en el equipo de quien instala, que es donde NO esta.
+  const err = Object.assign(new Error("unable to verify the first certificate"), {
+    code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  });
+  const explicado = explainNetworkError(err, "https://nuget.ahorabh.com/v3/index.json");
+  assert.match(explicado.message, /nuget\.ahorabh\.com/);
+  assert.match(explicado.message, /No es tu red/);
+  assert.match(explicado.message, /cadena de certificados incompleta/);
+
+  // Un fallo de red normal se deja pasar tal cual: envolverlo todo seria mentir.
+  const red = Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" });
+  assert.equal(explainNetworkError(red, "https://x/y"), red);
 });

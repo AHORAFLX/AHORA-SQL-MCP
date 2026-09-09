@@ -470,7 +470,9 @@ ERP no acabe en un fichero que se commitea:
 2. **`installer/product-mcp.js`**, la instalación. El paquete no es un `dotnet tool`: es un
    `lib/net10.0-windows7.0` con el `.dll` y sus dependencias declaradas como dependencias NuGet
    normales. Se publica con un proyecto mínimo generado al vuelo en
-   `%LOCALAPPDATA%\AHORA-SQL-MCP\ahora-mcp`, y se arranca con `dotnet exec ahora-mcp.dll` — la
+   `%LOCALAPPDATA%\ahora-mcp` —carpeta propia y hermana de la del MCP de SQL, para que
+   desinstalar aquel borrando su carpeta no se lleve este por delante—, y se arranca con
+   `dotnet exec ahora-mcp.dll`: la
    forma que el propio paquete contempla en su `buildTransitive/ahora-mcp.targets`. Como esa
    restauración necesita `api.nuget.org` (el feed de AHORA solo hospeda `ahora-mcp`, no las
    dependencias de Microsoft), hay una segunda vía: copiar una carpeta ya publicada, sin red ni SDK.

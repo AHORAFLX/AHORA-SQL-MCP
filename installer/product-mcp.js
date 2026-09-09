@@ -56,23 +56,28 @@ const PRODUCT_DLL = `${PRODUCT_PACKAGE}.dll`;
 /**
  * Carpeta estable donde queda instalado el MCP de producto.
  *
- * Cuelga de la misma raiz que el servidor de SQL (installer/runtime.js) y por los
- * mismos motivos: `%LOCALAPPDATA%` es por usuario, no se sincroniza con el perfil de
- * dominio y no pide elevacion. En una subcarpeta propia para que desinstalar uno no
- * se lleve el otro por delante.
+ * HERMANA de la del servidor de SQL, no dentro. `%LOCALAPPDATA%` por lo mismo que en
+ * installer/runtime.js: es por usuario, no se sincroniza con el perfil de dominio y no
+ * pide elevacion.
+ *
+ * Estuvo colgando de `%LOCALAPPDATA%\AHORA-SQL-MCP\` con la idea de reunir bajo una
+ * raiz todo lo que deja este instalador. Era peor por dos motivos. Uno, esa carpeta se
+ * llama como OTRO producto, con otro equipo y otro ciclo de versiones detras. Y dos, el
+ * gesto natural para desinstalar el MCP de SQL es borrar su carpeta: eso se llevaba por
+ * delante el MCP de producto sin decir nada, y la entrada `ahora-erp` del .mcp.json
+ * quedaba apuntando a un .dll inexistente — un fallo que no aparece al desinstalar, sino
+ * al abrir la sesion siguiente.
  */
 function productRuntimeDir({ platform = process.platform, env = process.env, home } = {}) {
   const homeDir = home || os.homedir();
   if (platform === "win32") {
     return path.join(
       env.LOCALAPPDATA || path.join(homeDir, "AppData", "Local"),
-      "AHORA-SQL-MCP",
       PRODUCT_PACKAGE
     );
   }
   return path.join(
     env.XDG_DATA_HOME || path.join(homeDir, ".local", "share"),
-    "ahora-sql-mcp",
     PRODUCT_PACKAGE
   );
 }
@@ -122,6 +127,40 @@ function pickLatest(versions) {
   return stable.slice().sort(compareVersions).pop();
 }
 
+/**
+ * Traduce el fallo de red a algo accionable.
+ *
+ * El caso real, y no es de red: nuget.ahorabh.com sirve una CADENA DE CERTIFICADOS
+ * INCOMPLETA. Manda como intermedio "Sectigo RSA Domain Validation Secure Server CA",
+ * que no es quien firma su hoja -la firma "Sectigo Public Server Authentication CA DV
+ * R36"-, y ese intermedio no viaja. Windows y los navegadores lo disimulan porque
+ * descargan el intermedio que falta por la extension AIA del certificado; Node no lo
+ * hace, asi que aqui sale `UNABLE_TO_VERIFY_LEAF_SIGNATURE` mientras `curl` y el
+ * navegador van bien. Sin esta explicacion, el mensaje de Node parece un problema del
+ * equipo de quien instala, que es el sitio donde NO esta el problema.
+ */
+function explainNetworkError(err, url) {
+  const tls = new Set([
+    "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+    "UNABLE_TO_GET_ISSUER_CERT",
+    "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+    "SELF_SIGNED_CERT_IN_CHAIN",
+    "DEPTH_ZERO_SELF_SIGNED_CERT",
+  ]);
+  if (err && tls.has(err.code)) {
+    return new Error(
+      `${err.message} — el certificado de ${new URL(url).host} no se puede validar. ` +
+        "No es tu red: ese servidor sirve una cadena de certificados incompleta, y " +
+        "Node no completa la cadena sola como hacen Windows y el navegador (por eso " +
+        "curl y el navegador si entran). Se arregla en el servidor, instalando el " +
+        "intermedio correcto. Mientras tanto: si ya tienes el MCP de producto " +
+        "instalado se reutiliza esa version, y si no, indica una carpeta con el ya " +
+        "publicado."
+    );
+  }
+  return err;
+}
+
 /** GET de un JSON, con tiempo de espera: sin el, una red rara cuelga el instalador. */
 function getJson(url, { timeoutMs = 15000, get = https.get } = {}) {
   return new Promise((resolve, reject) => {
@@ -144,7 +183,7 @@ function getJson(url, { timeoutMs = 15000, get = https.get } = {}) {
         }
       });
     });
-    req.on("error", reject);
+    req.on("error", (err) => reject(explainNetworkError(err, url)));
     req.setTimeout(timeoutMs, () => {
       req.destroy(new Error(`${url} no responde (${timeoutMs} ms)`));
     });
@@ -363,6 +402,36 @@ function readAssemblyVersion(dll, exec = execFileSync) {
   }
 }
 
+/**
+ * Que version se va a instalar, dado lo que se sabe del equipo.
+ *
+ * El feed sirve para SABER la version, no para instalar una que ya esta: si la
+ * publicacion ya existe en disco, `installProductMcp` la reutiliza sin tocar la red.
+ * Por eso un feed caido no puede impedir seguir cuando hay algo instalado — que es lo
+ * que pasaba: el formulario decia "ya instalado 0.64.0" y acto seguido se negaba a
+ * escribir la configuracion por no haber podido preguntar cual es la ultima.
+ *
+ * Devuelve tambien POR QUE, para poder decirlo en pantalla en lugar de instalar algo
+ * distinto de lo que el usuario cree.
+ */
+function versionToInstall({ latest = null, installed = null } = {}) {
+  if (latest) {
+    return {
+      version: latest,
+      origen: installed === latest ? "feed (ya estaba publicada)" : "feed",
+      alDia: true,
+    };
+  }
+  if (installed) {
+    return {
+      version: installed,
+      origen: "la ya instalada en este equipo (el feed no responde)",
+      alDia: false,
+    };
+  }
+  return { version: null, origen: null, alDia: false };
+}
+
 module.exports = {
   PRODUCT_PACKAGE,
   PRODUCT_FEED,
@@ -376,6 +445,8 @@ module.exports = {
   compareVersions,
   pickLatest,
   latestProductVersion,
+  versionToInstall,
+  explainNetworkError,
   dotnetSdkVersion,
   checkDotnetSdk,
   projectFiles,

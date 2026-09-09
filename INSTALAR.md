@@ -232,7 +232,7 @@ prefijos distintos, `mcp__ahora-sql__*` y `mcp__ahora-erp__ahora_*`, y la skill
 | | |
 |---|---|
 | **Requisitos** | SDK de .NET 10 y acceso a `nuget.ahorabh.com` **y** a `api.nuget.org` (el feed de AHORA solo hospeda `ahora-mcp`; sus dependencias de Microsoft vienen del feed público). Si no llegas a uno de los dos, el instalador te deja indicar una carpeta con el MCP ya publicado y la copia. |
-| **Dónde se instala** | `%LOCALAPPDATA%\AHORA-SQL-MCP\ahora-mcp\app`. Una sola vez por equipo, no en cada arranque. |
+| **Dónde se instala** | `%LOCALAPPDATA%\ahora-mcp\app`, carpeta propia y **hermana** de la del MCP de SQL. Una sola vez por equipo, no en cada arranque. Están separadas a propósito: desinstalar el MCP de SQL borrando `%LOCALAPPDATA%\AHORA-SQL-MCP` no puede llevarse este por delante. |
 | **Base de datos** | **Una sola por proceso**: su `ahora_connect` no entiende alias ni `dbKey`. El instalador te hace elegir cuál de las conexiones ya validadas usa. |
 | **Credenciales** | Como en el MCP de SQL: en el `.mcp.json` queda **de dónde** sacar la conexión (`--config-file` + `--connection-name`, o `--credentials-file` + `--db`), nunca la cadena. La resuelve `start-ahora-mcp` en cada arranque. |
 | **Producción** | **No se ofrece.** Ese servidor no tiene modo de solo lectura —ningún flag desactiva `ahora_ejecutar_dml` ni `ahora_crear_*`/`ahora_modificar_*`/`ahora_borrar_*`—, así que no hay forma de dejarlo configurado para que no toque el ERP en vivo. |
@@ -244,7 +244,7 @@ La entrada que se escribe tiene esta forma:
   "command": "node",
   "args": [
     "C:/Users/<tu-usuario>/AppData/Local/AHORA-SQL-MCP/node_modules/@ahoraflx/sql-mcp/bundle/start-ahora-mcp.cjs",
-    "--server-dll", "C:/Users/<tu-usuario>/AppData/Local/AHORA-SQL-MCP/ahora-mcp/app/ahora-mcp.dll",
+    "--server-dll", "C:/Users/<tu-usuario>/AppData/Local/ahora-mcp/app/ahora-mcp.dll",
     "--config-file", "C:/ruta/al/proyecto/Web.config",
     "--connection-name", "DataConnectionString"
   ]
