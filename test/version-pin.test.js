@@ -29,6 +29,23 @@ function pines(rel) {
   return [...texto.matchAll(/#v(\d+\.\d+\.\d+)/g)].map((m) => m[1]);
 }
 
+/**
+ * Cada `--branch vX.Y.Z`, que es la OTRA forma de fijar la version.
+ *
+ * Se escapo de la comprobacion durante cuatro versiones: el README decia
+ * `git clone --branch v1.9.0` mientras el repositorio iba por v1.12.1, y quien siguiera
+ * la instalacion manual se llevaba un clon anterior al MCP de producto entero. No lo
+ * cazaba nadie porque el patron `#vX.Y.Z` no aparece en esa linea.
+ *
+ * Se busca `--branch` y no cualquier `vX.Y.Z` a proposito: hay menciones historicas
+ * legitimas -"Antes (v1.8.3)" en la tabla de tiempos- que no son pines y que un patron
+ * mas amplio convertiria en un test que hay que ir apagando.
+ */
+function pinesDeClonado(rel) {
+  const texto = fs.readFileSync(path.join(ROOT, rel), "utf8");
+  return [...texto.matchAll(/--branch\s+v(\d+\.\d+\.\d+)/g)].map((m) => m[1]);
+}
+
 test("el .cmd de arranque instala la version de este repositorio", () => {
   const encontrados = pines("installer/INSTALAR-AHORA.cmd");
   assert.ok(encontrados.length > 0, "el .cmd deberia llevar un pin de version");
@@ -48,6 +65,20 @@ test("los comandos de instalacion de la documentacion van a esta version", () =>
         p,
         version,
         `${doc} apunta a v${p} pero el repositorio va por v${version}`
+      );
+    }
+  }
+});
+
+test("los `git clone --branch` de la documentacion traen esta version", () => {
+  // Es la instalacion manual del README: un pin viejo aqui clona un arbol anterior, y
+  // el sintoma no es un error sino un repositorio al que le faltan cosas.
+  for (const doc of ["README.md", "INSTALAR.md"]) {
+    for (const p of pinesDeClonado(doc)) {
+      assert.equal(
+        p,
+        version,
+        `${doc} clona v${p} pero el repositorio va por v${version}`
       );
     }
   }

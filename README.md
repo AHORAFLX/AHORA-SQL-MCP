@@ -28,7 +28,7 @@ configuración en proyectos de AHORA.
 Requiere Node 18 o superior.
 
 ```bash
-git clone --branch v1.9.0 --depth 1 https://github.com/AHORAFLX/AHORA-SQL-MCP.git
+git clone --branch v1.12.1 --depth 1 https://github.com/AHORAFLX/AHORA-SQL-MCP.git
 cd AHORA-SQL-MCP
 npm ci
 npm run build
