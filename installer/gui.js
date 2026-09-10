@@ -43,6 +43,11 @@ const {
   writeProductConfig,
   hasProductServer,
   installProduct,
+  buildPlaywrightFlags,
+  playwrightCommand,
+  writePlaywrightConfig,
+  hasPlaywrightServer,
+  installPlaywright,
   suggestAliases,
   aliasError,
   toolVersion,
@@ -50,6 +55,7 @@ const {
   PROFILES,
   SERVER_NAME,
   PRODUCT_SERVER_NAME,
+  PLAYWRIGHT_SERVER_NAME,
   MIN_NODE_MAJOR,
 } = require("./setup");
 const {
@@ -60,6 +66,12 @@ const {
   latestProductVersion,
   dotnetSdkVersion,
 } = require("./product-mcp");
+const {
+  PLAYWRIGHT_PACKAGE,
+  playwrightRuntimeDir,
+  installedPlaywrightVersion,
+  detectBrowserChannel,
+} = require("./playwright-mcp");
 const { credentialsPathFor, writeCredentialsFile } = require("./credentials");
 const { probeConnection } = require("./probe");
 const { allowMcpTools } = require("./permissions");
@@ -100,6 +112,26 @@ function detect(projectDir) {
     // reinstalacion no lo retira por dejar la casilla como estaba, que es justo lo
     // que haria si el valor por defecto fuera siempre "no".
     hasProduct: hasProductServer(root),
+    // Lo mismo para el de Playwright, y contando tambien el puesto a mano: si ya hay
+    // uno registrado, dejar la casilla en "no" haria que reinstalar lo retirase.
+    hasPlaywright: hasPlaywrightServer(root),
+  };
+}
+
+/**
+ * Que se puede ofrecer del MCP de navegador en ESTE equipo.
+ *
+ * Barato, al contrario que el del MCP de producto: no consulta ningun feed, solo mira
+ * si hay Chrome o Edge en las rutas de siempre y que version quedo instalada.
+ */
+function playwrightStatus() {
+  const dir = playwrightRuntimeDir();
+  return {
+    package: PLAYWRIGHT_PACKAGE,
+    serverName: PLAYWRIGHT_SERVER_NAME,
+    channel: detectBrowserChannel(),
+    installed: installedPlaywrightVersion(dir),
+    dir,
   };
 }
 
@@ -379,6 +411,44 @@ function write(payload, { install } = {}) {
     }
   }
 
+  // ── MCP de automatizacion de navegador ──
+  //
+  // Tercera entrada del mismo fichero. No se condiciona al perfil, al contrario que
+  // la del MCP de producto: conduce un navegador, no toca la base de datos, asi que
+  // en produccion es igual de valido — y mas util, porque es donde se mira sin tocar.
+  let playwrightWritten = null;
+  let playwrightError;
+  let playwrightInstall = null;
+  if (payload.playwright) {
+    try {
+      playwrightInstall = installPlaywright();
+      const playwrightEntry = playwrightCommand(
+        playwrightInstall.entry,
+        buildPlaywrightFlags({ channel: playwrightInstall.channel })
+      );
+      playwrightWritten = [];
+      for (const key of clients) {
+        const client = CLIENTS[key];
+        if (!client) continue;
+        playwrightWritten.push({
+          ...writePlaywrightConfig(client, root, playwrightEntry),
+          client: key,
+        });
+      }
+    } catch (err) {
+      // Mismo criterio que con el MCP de producto: no tumba lo ya escrito.
+      playwrightError = err.message.split("\n")[0];
+      playwrightInstall = null;
+      playwrightWritten = null;
+    }
+  } else {
+    // Sin marcar se retira la nuestra, y SOLO la nuestra: un `npx @playwright/mcp`
+    // puesto a mano funciona y no lo escribio este instalador.
+    for (const key of Object.keys(CLIENTS)) {
+      writePlaywrightConfig(CLIENTS[key], root, null);
+    }
+  }
+
   // En el fichero del cliente que NO se ha marcado, la entrada `mssql` vieja tambien
   // hay que retirarla: dejarla registrada mantiene el choque de nombres con la
   // extension nativa de VS Code y puede acabar levantando dos servidores identicos.
@@ -400,6 +470,11 @@ function write(payload, { install } = {}) {
       // con las de aqui, asi que un comodin no cubre las dos.
       product: Boolean(productWritten),
       productWrites: Boolean(productWritten) && Boolean(payload.allowProductWriteRules),
+      // Y las del navegador otra vez aparte: `browser_*` no lo cubre ningun comodin
+      // de los anteriores, y el clic se pide por separado del mirar.
+      playwright: Boolean(playwrightWritten),
+      playwrightActions:
+        Boolean(playwrightWritten) && Boolean(payload.allowPlaywrightActionRules),
     });
   }
 
@@ -428,6 +503,19 @@ function write(payload, { install } = {}) {
         }
       : null,
     productError,
+    playwright: playwrightWritten
+      ? {
+          serverName: PLAYWRIGHT_SERVER_NAME,
+          written: playwrightWritten,
+          version: playwrightInstall.version,
+          dir: playwrightInstall.dir,
+          channel: playwrightInstall.channel,
+          chromium: playwrightInstall.chromium,
+          reused: playwrightInstall.reused,
+          offline: playwrightInstall.offline,
+        }
+      : null,
+    playwrightError,
   };
 }
 
@@ -546,6 +634,8 @@ function startGui({
             return sendJson(res, 200, { results: await validate(body) });
           case "/api/product":
             return sendJson(res, 200, await productStatus());
+          case "/api/playwright":
+            return sendJson(res, 200, playwrightStatus());
           case "/api/write":
             return sendJson(res, 200, write(body, { install }));
           case "/api/quit":
@@ -773,6 +863,29 @@ function renderPage(token, cwd = process.cwd()) {
       <p class="hint" id="productProdWarn" hidden>En <strong>PRODUCCION</strong> no se
         ofrece: al no tener modo de solo lectura, no hay forma de dejarlo configurado
         para que no toque el ERP en vivo.</p>
+    </fieldset>
+
+    <fieldset id="playwrightBox">
+      <legend>Automatizacion de navegador (Playwright)</legend>
+      <label><input type="checkbox" id="cPlaywright" style="width:auto">
+        Instalar tambien el MCP de Playwright (<code>@playwright/mcp</code>)</label>
+      <p class="hint">Servidor de Microsoft que conduce un navegador. Sirve para abrir
+        la pantalla del ERP y <strong>comprobar</strong> que lo que se acaba de cambiar
+        en la base de datos se ve como toca. Se anade <strong>al lado</strong> de los
+        otros, con sus herramientas <code>mcp__playwright__browser_*</code>.
+        Se instala una vez desde npm, no se resuelve en cada arranque.</p>
+      <div id="playwrightOut"></div>
+      <div id="playwrightWarn" class="banner warn" hidden>
+        Un <strong>clic</strong> en una pantalla del ERP ejecuta lo que haya detras del
+        boton, y eso puede acabar en un INSERT que no pasa por las reglas del MCP de
+        SQL. Por eso mirar (abrir, capturar, leer la consola) y tocar se piden aparte.
+        <label style="margin-top:8px"><input type="checkbox" id="cPlaywrightActionRules"
+          style="width:auto"> Permitir que haga <strong>clic y escriba</strong> sin
+          preguntar</label>
+        <p class="hint" style="margin-bottom:0">Ejecutar JavaScript en la pagina
+          (<code>browser_evaluate</code>, <code>browser_run_code_unsafe</code>) pedira
+          permiso siempre: una regla para eso autorizaria cualquier cosa.</p>
+      </div>
     </fieldset>
     <div class="row" style="margin-top:18px">
       <div></div><button id="btnWrite">Escribir configuracion</button>
@@ -1051,6 +1164,13 @@ $("btnValidate").onclick = async () => {
     if (detected.hasProduct && !$("cProduct").disabled) $("cProduct").checked = true;
     fillProductDb();
     if ($("cProduct").checked) syncProduct();
+    // El de navegador no depende de la conexion, pero su casilla vive en el paso 3,
+    // que hasta aqui no se ve. Y por lo mismo que el otro: si el proyecto ya lo tenia
+    // registrado, viene marcada.
+    if (detected.hasPlaywright && !$("cPlaywright").checked) {
+      $("cPlaywright").checked = true;
+      syncPlaywright();
+    }
     if (!noConecta) $("s3").hidden = false;
   } catch (e) {
     $("validateOut").innerHTML = '<p class="err">' + esc(e.message) + "</p>";
@@ -1158,6 +1278,44 @@ async function syncProduct() {
 
 $("cProduct").onchange = syncProduct;
 
+// ── MCP de automatizacion de navegador ──────────────────────────────────────
+// Sin depender del perfil: no toca la base de datos. Y el estado se consulta al
+// marcar la casilla igual que el otro, aunque aqui sea barato (mirar dos rutas de
+// disco), para que el formulario no haga trabajo que nadie ha pedido.
+let playwrightInfo = null;
+
+async function syncPlaywright() {
+  const on = $("cPlaywright").checked;
+  $("playwrightWarn").hidden = !on;
+  if (!on) {
+    $("playwrightOut").innerHTML = "";
+    $("cPlaywrightActionRules").checked = false;
+    return;
+  }
+  $("playwrightOut").innerHTML = '<p class="hint">Buscando el navegador…</p>';
+  try {
+    playwrightInfo = await api("playwright");
+  } catch (e) {
+    $("playwrightOut").innerHTML = '<p class="err">' + esc(e.message) + "</p>";
+    return;
+  }
+  let html = "<ul class=\\"list\\">";
+  html += "<li>" + (playwrightInfo.channel
+    ? '<span class="ok">✓</span> usara el <strong>' +
+      (playwrightInfo.channel === "chrome" ? "Chrome" : "Edge") +
+      "</strong> que ya tienes instalado"
+    : '<span class="err">✗</span> no hay Chrome ni Edge en este equipo: habra que bajar ' +
+      "Chromium (unos cientos de megas, solo la primera vez)") + "</li>";
+  if (playwrightInfo.installed) {
+    html += '<li><span class="ok">✓</span> ya instalado: <strong>' +
+      esc(playwrightInfo.installed) + "</strong> en " + esc(playwrightInfo.dir) + "</li>";
+  }
+  html += "</ul>";
+  $("playwrightOut").innerHTML = html;
+}
+
+$("cPlaywright").onchange = syncPlaywright;
+
 $("profile").onchange = () => {
   const opt = $("profile").selectedOptions[0];
   const canWrite = opt.dataset.canwrite === "true";
@@ -1206,6 +1364,10 @@ $("btnWrite").onclick = async () => {
       productVersion: productInfo ? productInfo.latest || productInfo.installed : null,
       productFolder: $("productFolderBox").hidden ? null : $("productFolder").value.trim() || null,
       allowProductWriteRules: $("cProductWriteRules").checked,
+      // MCP de navegador: no necesita conexion ni version, se resuelve en la
+      // instalacion. Solo si se quiere y si sus acciones van sin preguntar.
+      playwright: $("cPlaywright").checked,
+      allowPlaywrightActionRules: $("cPlaywrightActionRules").checked,
       sqlDirs, clients,
     });
 
@@ -1244,6 +1406,34 @@ $("btnWrite").onclick = async () => {
         esc(res.productError) + "). El de SQL ha quedado configurado igualmente. " +
         "Vuelve a lanzar el instalador con el SDK de .NET 10 disponible, o indica una " +
         "carpeta con el MCP de producto ya publicado.</div>";
+    }
+    if (res.playwright) {
+      const kept = res.playwright.written.filter((w) => w.kept);
+      html += '<div class="banner good">MCP de navegador <code>' + esc(res.playwright.serverName) +
+        "</code> anadido" +
+        (res.playwright.version ? ", version " + esc(res.playwright.version) : "") +
+        (res.playwright.reused ? " (ya estaba instalado)" : "") + ". " +
+        (res.playwright.channel
+          ? "Conducira el <strong>" + esc(res.playwright.channel) + "</strong> de este equipo."
+          : "Conducira el Chromium que ha bajado Playwright, no tu navegador.") +
+        "<br>Sus herramientas salen como <code>mcp__" + esc(res.playwright.serverName) +
+        "__browser_*</code>.</div>";
+      if (res.playwright.offline) {
+        html += '<div class="banner warn">No se ha podido comprobar si hay una version mas ' +
+          "reciente (" + esc(res.playwright.offline) + "): se ha dejado la que ya estaba " +
+          "instalada.</div>";
+      }
+      if (kept.length > 0) {
+        html += '<div class="banner warn">En ' +
+          kept.map((w) => "<code>" + esc(w.target) + "</code>").join(" y ") +
+          " ya habia un <code>" + esc(res.playwright.serverName) + "</code> puesto a mano: " +
+          "se ha dejado tal cual, para no llevarse por delante los flags que tenga. " +
+          "Si quieres el nuestro, borra esa entrada y vuelve a lanzar el instalador.</div>";
+      }
+    }
+    if (res.playwrightError) {
+      html += '<div class="banner warn">No se ha podido instalar el MCP de navegador (' +
+        esc(res.playwrightError) + "). El resto ha quedado configurado igualmente.</div>";
     }
     if (res.permissions) {
       html += "<p>Reglas de permisos en <code>" + esc(res.permissions.target) + "</code>:</p>" +
@@ -1290,6 +1480,7 @@ module.exports = {
   startGui,
   detect,
   productStatus,
+  playwrightStatus,
   validate,
   write,
   checkNodeOnMachine,

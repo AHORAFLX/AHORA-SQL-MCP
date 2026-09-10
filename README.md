@@ -500,6 +500,46 @@ Dos límites que conviene tener presentes, y ninguno se puede arreglar desde aqu
 
 ---
 
+## El MCP de navegador (`playwright`), también al lado
+
+Tercera casilla del instalador, y tercera entrada del mismo fichero de cliente: el
+[MCP de Playwright](https://www.npmjs.com/package/@playwright/mcp) de Microsoft. Cierra el círculo
+de una personalización — se cambia la configuración en la base de datos con `ahora-sql` o
+`ahora-erp`, y se **abre la pantalla** para comprobar que se ve como toca. Los tres prefijos son
+distintos (`mcp__ahora-sql__*`, `mcp__ahora-erp__ahora_*`, `mcp__playwright__browser_*`), así que
+ninguno tapa a los demás.
+
+Es un paquete de un tercero y aquí no se mantiene. Lo que aporta este repositorio
+(`installer/playwright-mcp.js`) son tres decisiones, y las tres tienen su motivo:
+
+1. **Se instala, no se resuelve en cada arranque.** La forma que documenta Microsoft es
+   `npx @playwright/mcp@latest`, que es exactamente el patrón que este repositorio se quitó de
+   encima para su propio servidor con los números de más abajo: npx resuelve el paquete cada vez
+   que el cliente levanta el MCP, y al agotarse los 30 segundos el servidor entero se descarta.
+   Aquí queda instalado en `%LOCALAPPDATA%\playwright-mcp` —hermana de las otras dos, por lo mismo
+   que aquellas— y la configuración apunta a su `cli.js`. Si npm no se alcanza y ya había una
+   versión instalada, se reutiliza esa en lugar de dejar al instalador sin poder terminar.
+2. **No se bajan los navegadores de Playwright.** El `postinstall` de `playwright` baja Chromium,
+   Firefox y WebKit: del orden de medio giga desde su CDN, dentro de un `npm install` que parecía
+   ir de otra cosa. No hace falta: `--browser chrome|msedge` conduce el navegador que ya está en la
+   máquina, y en Windows 11 Edge está siempre. La instalación va con
+   `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` y el canal se detecta mirando las rutas de siempre (ni
+   Chrome ni Edge se añaden al `PATH`, así que `where chrome` no encuentra un Chrome que sí está).
+   Solo si no hay ninguno de los dos se baja **Chromium**, y se baja aparte, con su propio aviso.
+3. **Reglas de permisos que separan mirar de tocar.** De serie entran las de mirar —navegar,
+   capturar, leer DOM, consola y red—; el clic y el teclado se piden aparte, porque un clic en una
+   pantalla del ERP ejecuta lo que haya detrás del botón y eso puede acabar en un `INSERT` que no
+   pasa por ninguna regla del MCP de SQL. `browser_evaluate` y `browser_run_code_unsafe` **no
+   reciben regla en ningún caso**: ejecutan el código que se les pase dentro de la página, así que
+   autorizarlas de antemano equivale a autorizar cualquier cosa. Los nombres salen del `tools/list`
+   real del servidor, no de su documentación.
+
+Y una cosa que **no** hace: pisar un `playwright` que no escribió él. Quien lo tenga configurado a
+mano con sus propios flags se lo encuentra igual al marcar la casilla (se avisa y no se sustituye)
+y al desmarcarla (se retira solo la entrada que apunta a nuestra instalación).
+
+---
+
 ## Por qué esto no puede tardar
 
 El cliente MCP arranca el servidor y espera el saludo `initialize`. Si no llega a tiempo

@@ -74609,6 +74609,7 @@ var require_server_name = __commonJS({
     var SERVER_NAME = "ahora-sql";
     var LEGACY_SERVER_NAME = "mssql";
     var PRODUCT_SERVER_NAME = "ahora-erp";
+    var PLAYWRIGHT_SERVER_NAME = "playwright";
     function isOurServerEntry(entry) {
       if (!entry || typeof entry !== "object") return false;
       const args = Array.isArray(entry.args) ? entry.args : [];
@@ -74621,12 +74622,32 @@ var require_server_name = __commonJS({
       const args = Array.isArray(entry.args) ? entry.args : [];
       return args.some((a) => typeof a === "string" && a.includes("start-ahora-mcp"));
     }
+    function isPlaywrightEntry(entry) {
+      if (!entry || typeof entry !== "object") return false;
+      const args = Array.isArray(entry.args) ? entry.args : [];
+      const command = typeof entry.command === "string" ? entry.command : "";
+      const busca = (texto) => {
+        const limpio = texto.replace(/\\/g, "/");
+        return limpio.includes("@playwright/mcp") || limpio.includes("playwright-mcp");
+      };
+      return busca(command) || args.some((a) => typeof a === "string" && busca(a));
+    }
+    function isOurPlaywrightEntry(entry) {
+      if (!isPlaywrightEntry(entry)) return false;
+      const args = Array.isArray(entry.args) ? entry.args : [];
+      return args.some(
+        (a) => typeof a === "string" && a.replace(/\\/g, "/").includes("/playwright-mcp/node_modules/@playwright/mcp/cli.js")
+      );
+    }
     module2.exports = {
       SERVER_NAME,
       LEGACY_SERVER_NAME,
       PRODUCT_SERVER_NAME,
+      PLAYWRIGHT_SERVER_NAME,
       isOurServerEntry,
-      isOurProductEntry
+      isOurProductEntry,
+      isPlaywrightEntry,
+      isOurPlaywrightEntry
     };
   }
 });
@@ -74636,7 +74657,12 @@ var require_permissions = __commonJS({
   "installer/permissions.js"(exports2, module2) {
     var fs6 = require("fs");
     var path2 = require("path");
-    var { SERVER_NAME, LEGACY_SERVER_NAME, PRODUCT_SERVER_NAME } = require_server_name();
+    var {
+      SERVER_NAME,
+      LEGACY_SERVER_NAME,
+      PRODUCT_SERVER_NAME,
+      PLAYWRIGHT_SERVER_NAME
+    } = require_server_name();
     function readRules(serverName = SERVER_NAME) {
       return [
         `mcp__${serverName}__list_*`,
@@ -74683,6 +74709,36 @@ var require_permissions = __commonJS({
         `mcp__${serverName}__ahora_ejecutar_dml`
       ];
     }
+    function playwrightReadRules(serverName = PLAYWRIGHT_SERVER_NAME) {
+      return [
+        `mcp__${serverName}__browser_navigate`,
+        `mcp__${serverName}__browser_navigate_back`,
+        `mcp__${serverName}__browser_snapshot`,
+        `mcp__${serverName}__browser_take_screenshot`,
+        `mcp__${serverName}__browser_console_messages`,
+        `mcp__${serverName}__browser_network_requests`,
+        `mcp__${serverName}__browser_network_request`,
+        `mcp__${serverName}__browser_find`,
+        `mcp__${serverName}__browser_wait_for`,
+        `mcp__${serverName}__browser_resize`,
+        `mcp__${serverName}__browser_tabs`,
+        `mcp__${serverName}__browser_hover`,
+        `mcp__${serverName}__browser_close`
+      ];
+    }
+    function playwrightActionRules(serverName = PLAYWRIGHT_SERVER_NAME) {
+      return [
+        `mcp__${serverName}__browser_click`,
+        `mcp__${serverName}__browser_type`,
+        `mcp__${serverName}__browser_fill_form`,
+        `mcp__${serverName}__browser_press_key`,
+        `mcp__${serverName}__browser_select_option`,
+        `mcp__${serverName}__browser_drag`,
+        `mcp__${serverName}__browser_drop`,
+        `mcp__${serverName}__browser_file_upload`,
+        `mcp__${serverName}__browser_handle_dialog`
+      ];
+    }
     function gitRootOf(dir) {
       let current = path2.resolve(dir);
       while (true) {
@@ -74700,14 +74756,19 @@ var require_permissions = __commonJS({
       serverName = SERVER_NAME,
       product = false,
       productWrites = false,
-      productServerName = PRODUCT_SERVER_NAME
+      productServerName = PRODUCT_SERVER_NAME,
+      playwright = false,
+      playwrightActions = false,
+      playwrightServerName = PLAYWRIGHT_SERVER_NAME
     } = {}) {
       const target = permissionsPath(projectDir);
       const wanted = [
         ...readRules(serverName),
         ...includeWrites ? writeRules(serverName) : [],
         ...product ? productReadRules(productServerName) : [],
-        ...product && productWrites ? productWriteRules(productServerName) : []
+        ...product && productWrites ? productWriteRules(productServerName) : [],
+        ...playwright ? playwrightReadRules(playwrightServerName) : [],
+        ...playwright && playwrightActions ? playwrightActionRules(playwrightServerName) : []
       ];
       const stale = serverName === SERVER_NAME ? /* @__PURE__ */ new Set([...readRules(LEGACY_SERVER_NAME), ...writeRules(LEGACY_SERVER_NAME)]) : /* @__PURE__ */ new Set();
       let doc = {};
@@ -74741,9 +74802,12 @@ var require_permissions = __commonJS({
       writeRules,
       productReadRules,
       productWriteRules,
+      playwrightReadRules,
+      playwrightActionRules,
       SERVER_NAME,
       LEGACY_SERVER_NAME,
-      PRODUCT_SERVER_NAME
+      PRODUCT_SERVER_NAME,
+      PLAYWRIGHT_SERVER_NAME
     };
   }
 });
@@ -75234,6 +75298,187 @@ internal static class Host
   }
 });
 
+// installer/playwright-mcp.js
+var require_playwright_mcp = __commonJS({
+  "installer/playwright-mcp.js"(exports2, module2) {
+    var fs6 = require("fs");
+    var os2 = require("os");
+    var path2 = require("path");
+    var { execFileSync: execFileSync2 } = require("child_process");
+    var { npmCommand } = require_runtime();
+    var PLAYWRIGHT_PACKAGE = "@playwright/mcp";
+    var PLAYWRIGHT_SPEC = `${PLAYWRIGHT_PACKAGE}@latest`;
+    function playwrightRuntimeDir({ platform: platform2 = process.platform, env = process.env, home } = {}) {
+      const homeDir = home || os2.homedir();
+      if (platform2 === "win32") {
+        return path2.join(
+          env.LOCALAPPDATA || path2.join(homeDir, "AppData", "Local"),
+          "playwright-mcp"
+        );
+      }
+      return path2.join(
+        env.XDG_DATA_HOME || path2.join(homeDir, ".local", "share"),
+        "playwright-mcp"
+      );
+    }
+    function playwrightEntry(dir) {
+      return path2.join(dir, "node_modules", "@playwright", "mcp", "cli.js");
+    }
+    function playwrightCli(dir) {
+      return path2.join(dir, "node_modules", "playwright", "cli.js");
+    }
+    function installedPlaywrightVersion(dir) {
+      try {
+        const manifest = path2.join(dir, "node_modules", "@playwright", "mcp", "package.json");
+        const version = JSON.parse(fs6.readFileSync(manifest, "utf8")).version || null;
+        return fs6.existsSync(playwrightEntry(dir)) ? version : null;
+      } catch {
+        return null;
+      }
+    }
+    function browserCandidates({ platform: platform2 = process.platform, env = process.env } = {}) {
+      if (platform2 === "win32") {
+        const pf = env.ProgramFiles || "C:\\Program Files";
+        const pf86 = env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+        const local = env.LOCALAPPDATA || path2.join(os2.homedir(), "AppData", "Local");
+        return [
+          { channel: "chrome", file: path2.join(pf, "Google", "Chrome", "Application", "chrome.exe") },
+          { channel: "chrome", file: path2.join(pf86, "Google", "Chrome", "Application", "chrome.exe") },
+          { channel: "chrome", file: path2.join(local, "Google", "Chrome", "Application", "chrome.exe") },
+          { channel: "msedge", file: path2.join(pf86, "Microsoft", "Edge", "Application", "msedge.exe") },
+          { channel: "msedge", file: path2.join(pf, "Microsoft", "Edge", "Application", "msedge.exe") }
+        ];
+      }
+      if (platform2 === "darwin") {
+        return [
+          {
+            channel: "chrome",
+            file: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+          },
+          {
+            channel: "msedge",
+            file: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
+          }
+        ];
+      }
+      return [
+        { channel: "chrome", file: "/usr/bin/google-chrome" },
+        { channel: "chrome", file: "/opt/google/chrome/chrome" },
+        { channel: "msedge", file: "/usr/bin/microsoft-edge" }
+      ];
+    }
+    function detectBrowserChannel({
+      platform: platform2 = process.platform,
+      env = process.env,
+      exists = fs6.existsSync
+    } = {}) {
+      for (const { channel, file } of browserCandidates({ platform: platform2, env })) {
+        if (exists(file)) return channel;
+      }
+      return null;
+    }
+    function installChromium({ dir = playwrightRuntimeDir(), exec = execFileSync2 } = {}) {
+      const cli = playwrightCli(dir);
+      if (!fs6.existsSync(cli)) {
+        throw new Error(
+          `No aparece ${cli}: el paquete ${PLAYWRIGHT_PACKAGE} no ha quedado instalado del todo.`
+        );
+      }
+      exec(process.execPath, [cli, "install", "chromium"], {
+        cwd: dir,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 9e5
+      });
+    }
+    function installPlaywrightMcp({
+      spec = PLAYWRIGHT_SPEC,
+      dir = playwrightRuntimeDir(),
+      exec = execFileSync2,
+      platform: platform2 = process.platform,
+      env = process.env,
+      exists = fs6.existsSync,
+      channel,
+      force = false
+    } = {}) {
+      const entry = playwrightEntry(dir);
+      const previa = installedPlaywrightVersion(dir);
+      const pedida = spec.startsWith(`${PLAYWRIGHT_PACKAGE}@`) ? spec.slice(PLAYWRIGHT_PACKAGE.length + 1) : null;
+      let reused = false;
+      let offline = null;
+      if (!force && previa && pedida && pedida === previa) {
+        reused = true;
+      } else {
+        fs6.mkdirSync(dir, { recursive: true });
+        const manifest = path2.join(dir, "package.json");
+        if (!fs6.existsSync(manifest)) {
+          fs6.writeFileSync(
+            manifest,
+            `${JSON.stringify({ name: "playwright-mcp-runtime", version: "0.0.0", private: true }, null, 2)}
+`,
+            "utf8"
+          );
+        }
+        try {
+          exec(
+            npmCommand(platform2),
+            ["install", "--no-audit", "--no-fund", "--loglevel=error", spec],
+            {
+              // Por `cwd` y no por `--prefix`, y con `shell` solo en Windows, por lo que
+              // documenta installer/runtime.js: npm ahi es un .cmd que Node no lanza sin
+              // shell, y con shell una ruta con espacios se partiria si viajara en la
+              // linea de comandos.
+              cwd: dir,
+              shell: platform2 === "win32",
+              encoding: "utf8",
+              stdio: ["ignore", "pipe", "pipe"],
+              timeout: 6e5,
+              // Los navegadores no se bajan aqui: ver la cabecera del fichero.
+              env: { ...env, PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1" }
+            }
+          );
+        } catch (err) {
+          if (!previa || !fs6.existsSync(entry)) throw err;
+          reused = true;
+          offline = err.message.split("\n")[0];
+        }
+      }
+      if (!fs6.existsSync(entry)) {
+        throw new Error(
+          `La instalacion termino sin errores pero no aparece ${entry}. Revisa que el paquete se llame ${PLAYWRIGHT_PACKAGE}.`
+        );
+      }
+      const canal = channel === void 0 ? detectBrowserChannel({ platform: platform2, env, exists }) : channel;
+      let chromium = false;
+      if (!canal) {
+        installChromium({ dir, exec });
+        chromium = true;
+      }
+      return {
+        entry,
+        dir,
+        version: installedPlaywrightVersion(dir),
+        channel: canal,
+        chromium,
+        reused,
+        offline
+      };
+    }
+    module2.exports = {
+      PLAYWRIGHT_PACKAGE,
+      PLAYWRIGHT_SPEC,
+      playwrightRuntimeDir,
+      playwrightEntry,
+      playwrightCli,
+      installedPlaywrightVersion,
+      browserCandidates,
+      detectBrowserChannel,
+      installChromium,
+      installPlaywrightMcp
+    };
+  }
+});
+
 // package.json
 var require_package2 = __commonJS({
   "package.json"(exports2, module2) {
@@ -75329,6 +75574,11 @@ var require_gui = __commonJS({
       writeProductConfig,
       hasProductServer,
       installProduct,
+      buildPlaywrightFlags,
+      playwrightCommand,
+      writePlaywrightConfig,
+      hasPlaywrightServer,
+      installPlaywright,
       suggestAliases,
       aliasError,
       toolVersion,
@@ -75336,6 +75586,7 @@ var require_gui = __commonJS({
       PROFILES,
       SERVER_NAME,
       PRODUCT_SERVER_NAME,
+      PLAYWRIGHT_SERVER_NAME,
       MIN_NODE_MAJOR
     } = require_setup();
     var {
@@ -75346,6 +75597,12 @@ var require_gui = __commonJS({
       latestProductVersion,
       dotnetSdkVersion
     } = require_product_mcp();
+    var {
+      PLAYWRIGHT_PACKAGE,
+      playwrightRuntimeDir,
+      installedPlaywrightVersion,
+      detectBrowserChannel
+    } = require_playwright_mcp();
     var { credentialsPathFor, writeCredentialsFile } = require_credentials();
     var { probeConnection } = require_probe();
     var { allowMcpTools } = require_permissions();
@@ -75381,7 +75638,20 @@ var require_gui = __commonJS({
         // Con el MCP de producto ya registrado, la casilla viene marcada: asi una
         // reinstalacion no lo retira por dejar la casilla como estaba, que es justo lo
         // que haria si el valor por defecto fuera siempre "no".
-        hasProduct: hasProductServer(root)
+        hasProduct: hasProductServer(root),
+        // Lo mismo para el de Playwright, y contando tambien el puesto a mano: si ya hay
+        // uno registrado, dejar la casilla en "no" haria que reinstalar lo retirase.
+        hasPlaywright: hasPlaywrightServer(root)
+      };
+    }
+    function playwrightStatus() {
+      const dir = playwrightRuntimeDir();
+      return {
+        package: PLAYWRIGHT_PACKAGE,
+        serverName: PLAYWRIGHT_SERVER_NAME,
+        channel: detectBrowserChannel(),
+        installed: installedPlaywrightVersion(dir),
+        dir
       };
     }
     async function productStatus() {
@@ -75576,6 +75846,35 @@ var require_gui = __commonJS({
           writeProductConfig(CLIENTS[key], root, null);
         }
       }
+      let playwrightWritten = null;
+      let playwrightError;
+      let playwrightInstall = null;
+      if (payload.playwright) {
+        try {
+          playwrightInstall = installPlaywright();
+          const playwrightEntry = playwrightCommand(
+            playwrightInstall.entry,
+            buildPlaywrightFlags({ channel: playwrightInstall.channel })
+          );
+          playwrightWritten = [];
+          for (const key of clients) {
+            const client = CLIENTS[key];
+            if (!client) continue;
+            playwrightWritten.push({
+              ...writePlaywrightConfig(client, root, playwrightEntry),
+              client: key
+            });
+          }
+        } catch (err) {
+          playwrightError = err.message.split("\n")[0];
+          playwrightInstall = null;
+          playwrightWritten = null;
+        }
+      } else {
+        for (const key of Object.keys(CLIENTS)) {
+          writePlaywrightConfig(CLIENTS[key], root, null);
+        }
+      }
       const pruned = [];
       for (const key of Object.keys(CLIENTS)) {
         if (clients.includes(key)) continue;
@@ -75590,7 +75889,11 @@ var require_gui = __commonJS({
           // Las del MCP de producto van aparte: sus herramientas no comparten vocabulario
           // con las de aqui, asi que un comodin no cubre las dos.
           product: Boolean(productWritten),
-          productWrites: Boolean(productWritten) && Boolean(payload.allowProductWriteRules)
+          productWrites: Boolean(productWritten) && Boolean(payload.allowProductWriteRules),
+          // Y las del navegador otra vez aparte: `browser_*` no lo cubre ningun comodin
+          // de los anteriores, y el clic se pide por separado del mirar.
+          playwright: Boolean(playwrightWritten),
+          playwrightActions: Boolean(playwrightWritten) && Boolean(payload.allowPlaywrightActionRules)
         });
       }
       return {
@@ -75613,7 +75916,18 @@ var require_gui = __commonJS({
           reused: productInstall.reused,
           connection: payload.productConnection.name
         } : null,
-        productError
+        productError,
+        playwright: playwrightWritten ? {
+          serverName: PLAYWRIGHT_SERVER_NAME,
+          written: playwrightWritten,
+          version: playwrightInstall.version,
+          dir: playwrightInstall.dir,
+          channel: playwrightInstall.channel,
+          chromium: playwrightInstall.chromium,
+          reused: playwrightInstall.reused,
+          offline: playwrightInstall.offline
+        } : null,
+        playwrightError
       };
     }
     function openBrowser(url) {
@@ -75711,6 +76025,8 @@ var require_gui = __commonJS({
                 return sendJson(res, 200, { results: await validate(body) });
               case "/api/product":
                 return sendJson(res, 200, await productStatus());
+              case "/api/playwright":
+                return sendJson(res, 200, playwrightStatus());
               case "/api/write":
                 return sendJson(res, 200, write(body, { install }));
               case "/api/quit":
@@ -75928,6 +76244,29 @@ Instalador AHORA-SQL-MCP v${PKG_VERSION}`);
       <p class="hint" id="productProdWarn" hidden>En <strong>PRODUCCION</strong> no se
         ofrece: al no tener modo de solo lectura, no hay forma de dejarlo configurado
         para que no toque el ERP en vivo.</p>
+    </fieldset>
+
+    <fieldset id="playwrightBox">
+      <legend>Automatizacion de navegador (Playwright)</legend>
+      <label><input type="checkbox" id="cPlaywright" style="width:auto">
+        Instalar tambien el MCP de Playwright (<code>@playwright/mcp</code>)</label>
+      <p class="hint">Servidor de Microsoft que conduce un navegador. Sirve para abrir
+        la pantalla del ERP y <strong>comprobar</strong> que lo que se acaba de cambiar
+        en la base de datos se ve como toca. Se anade <strong>al lado</strong> de los
+        otros, con sus herramientas <code>mcp__playwright__browser_*</code>.
+        Se instala una vez desde npm, no se resuelve en cada arranque.</p>
+      <div id="playwrightOut"></div>
+      <div id="playwrightWarn" class="banner warn" hidden>
+        Un <strong>clic</strong> en una pantalla del ERP ejecuta lo que haya detras del
+        boton, y eso puede acabar en un INSERT que no pasa por las reglas del MCP de
+        SQL. Por eso mirar (abrir, capturar, leer la consola) y tocar se piden aparte.
+        <label style="margin-top:8px"><input type="checkbox" id="cPlaywrightActionRules"
+          style="width:auto"> Permitir que haga <strong>clic y escriba</strong> sin
+          preguntar</label>
+        <p class="hint" style="margin-bottom:0">Ejecutar JavaScript en la pagina
+          (<code>browser_evaluate</code>, <code>browser_run_code_unsafe</code>) pedira
+          permiso siempre: una regla para eso autorizaria cualquier cosa.</p>
+      </div>
     </fieldset>
     <div class="row" style="margin-top:18px">
       <div></div><button id="btnWrite">Escribir configuracion</button>
@@ -76206,6 +76545,13 @@ $("btnValidate").onclick = async () => {
     if (detected.hasProduct && !$("cProduct").disabled) $("cProduct").checked = true;
     fillProductDb();
     if ($("cProduct").checked) syncProduct();
+    // El de navegador no depende de la conexion, pero su casilla vive en el paso 3,
+    // que hasta aqui no se ve. Y por lo mismo que el otro: si el proyecto ya lo tenia
+    // registrado, viene marcada.
+    if (detected.hasPlaywright && !$("cPlaywright").checked) {
+      $("cPlaywright").checked = true;
+      syncPlaywright();
+    }
     if (!noConecta) $("s3").hidden = false;
   } catch (e) {
     $("validateOut").innerHTML = '<p class="err">' + esc(e.message) + "</p>";
@@ -76313,6 +76659,44 @@ async function syncProduct() {
 
 $("cProduct").onchange = syncProduct;
 
+// \u2500\u2500 MCP de automatizacion de navegador \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// Sin depender del perfil: no toca la base de datos. Y el estado se consulta al
+// marcar la casilla igual que el otro, aunque aqui sea barato (mirar dos rutas de
+// disco), para que el formulario no haga trabajo que nadie ha pedido.
+let playwrightInfo = null;
+
+async function syncPlaywright() {
+  const on = $("cPlaywright").checked;
+  $("playwrightWarn").hidden = !on;
+  if (!on) {
+    $("playwrightOut").innerHTML = "";
+    $("cPlaywrightActionRules").checked = false;
+    return;
+  }
+  $("playwrightOut").innerHTML = '<p class="hint">Buscando el navegador\u2026</p>';
+  try {
+    playwrightInfo = await api("playwright");
+  } catch (e) {
+    $("playwrightOut").innerHTML = '<p class="err">' + esc(e.message) + "</p>";
+    return;
+  }
+  let html = "<ul class=\\"list\\">";
+  html += "<li>" + (playwrightInfo.channel
+    ? '<span class="ok">\u2713</span> usara el <strong>' +
+      (playwrightInfo.channel === "chrome" ? "Chrome" : "Edge") +
+      "</strong> que ya tienes instalado"
+    : '<span class="err">\u2717</span> no hay Chrome ni Edge en este equipo: habra que bajar ' +
+      "Chromium (unos cientos de megas, solo la primera vez)") + "</li>";
+  if (playwrightInfo.installed) {
+    html += '<li><span class="ok">\u2713</span> ya instalado: <strong>' +
+      esc(playwrightInfo.installed) + "</strong> en " + esc(playwrightInfo.dir) + "</li>";
+  }
+  html += "</ul>";
+  $("playwrightOut").innerHTML = html;
+}
+
+$("cPlaywright").onchange = syncPlaywright;
+
 $("profile").onchange = () => {
   const opt = $("profile").selectedOptions[0];
   const canWrite = opt.dataset.canwrite === "true";
@@ -76361,6 +76745,10 @@ $("btnWrite").onclick = async () => {
       productVersion: productInfo ? productInfo.latest || productInfo.installed : null,
       productFolder: $("productFolderBox").hidden ? null : $("productFolder").value.trim() || null,
       allowProductWriteRules: $("cProductWriteRules").checked,
+      // MCP de navegador: no necesita conexion ni version, se resuelve en la
+      // instalacion. Solo si se quiere y si sus acciones van sin preguntar.
+      playwright: $("cPlaywright").checked,
+      allowPlaywrightActionRules: $("cPlaywrightActionRules").checked,
       sqlDirs, clients,
     });
 
@@ -76399,6 +76787,34 @@ $("btnWrite").onclick = async () => {
         esc(res.productError) + "). El de SQL ha quedado configurado igualmente. " +
         "Vuelve a lanzar el instalador con el SDK de .NET 10 disponible, o indica una " +
         "carpeta con el MCP de producto ya publicado.</div>";
+    }
+    if (res.playwright) {
+      const kept = res.playwright.written.filter((w) => w.kept);
+      html += '<div class="banner good">MCP de navegador <code>' + esc(res.playwright.serverName) +
+        "</code> anadido" +
+        (res.playwright.version ? ", version " + esc(res.playwright.version) : "") +
+        (res.playwright.reused ? " (ya estaba instalado)" : "") + ". " +
+        (res.playwright.channel
+          ? "Conducira el <strong>" + esc(res.playwright.channel) + "</strong> de este equipo."
+          : "Conducira el Chromium que ha bajado Playwright, no tu navegador.") +
+        "<br>Sus herramientas salen como <code>mcp__" + esc(res.playwright.serverName) +
+        "__browser_*</code>.</div>";
+      if (res.playwright.offline) {
+        html += '<div class="banner warn">No se ha podido comprobar si hay una version mas ' +
+          "reciente (" + esc(res.playwright.offline) + "): se ha dejado la que ya estaba " +
+          "instalada.</div>";
+      }
+      if (kept.length > 0) {
+        html += '<div class="banner warn">En ' +
+          kept.map((w) => "<code>" + esc(w.target) + "</code>").join(" y ") +
+          " ya habia un <code>" + esc(res.playwright.serverName) + "</code> puesto a mano: " +
+          "se ha dejado tal cual, para no llevarse por delante los flags que tenga. " +
+          "Si quieres el nuestro, borra esa entrada y vuelve a lanzar el instalador.</div>";
+      }
+    }
+    if (res.playwrightError) {
+      html += '<div class="banner warn">No se ha podido instalar el MCP de navegador (' +
+        esc(res.playwrightError) + "). El resto ha quedado configurado igualmente.</div>";
     }
     if (res.permissions) {
       html += "<p>Reglas de permisos en <code>" + esc(res.permissions.target) + "</code>:</p>" +
@@ -76444,6 +76860,7 @@ $("btnWrite").onclick = async () => {
       startGui,
       detect,
       productStatus,
+      playwrightStatus,
       validate,
       write,
       checkNodeOnMachine,
@@ -76476,8 +76893,11 @@ var require_setup = __commonJS({
       SERVER_NAME,
       LEGACY_SERVER_NAME,
       PRODUCT_SERVER_NAME,
+      PLAYWRIGHT_SERVER_NAME,
       isOurServerEntry,
-      isOurProductEntry
+      isOurProductEntry,
+      isPlaywrightEntry,
+      isOurPlaywrightEntry
     } = require_server_name();
     var { installRuntime } = require_runtime();
     var { toolVersion } = require_tools();
@@ -76492,6 +76912,13 @@ var require_setup = __commonJS({
       installProductMcp,
       installProductFromFolder
     } = require_product_mcp();
+    var {
+      PLAYWRIGHT_PACKAGE,
+      playwrightRuntimeDir,
+      installedPlaywrightVersion,
+      detectBrowserChannel,
+      installPlaywrightMcp
+    } = require_playwright_mcp();
     var PKG_VERSION = require_package2().version;
     var PKG_SPEC = `github:AHORAFLX/AHORA-SQL-MCP#v${PKG_VERSION}`;
     var MIN_NODE_MAJOR = 18;
@@ -76867,6 +77294,51 @@ var require_setup = __commonJS({
       }
       return { ...installProductMcp({ version, dir }), from: "feed" };
     }
+    function buildPlaywrightFlags({ channel } = {}) {
+      return channel ? ["--browser", channel] : [];
+    }
+    function playwrightCommand(entry, flags = []) {
+      return { command: "node", args: [entry.replace(/\\/g, "/"), ...flags] };
+    }
+    function writePlaywrightConfig(client, root, entry) {
+      const target = client.file(root);
+      const existing = readJsonIfExists(target);
+      const doc = existing && typeof existing === "object" ? existing : {};
+      if (entry === null) {
+        const servers2 = doc[client.key];
+        if (!servers2 || typeof servers2 !== "object") return null;
+        if (!isOurPlaywrightEntry(servers2[PLAYWRIGHT_SERVER_NAME])) return null;
+        delete servers2[PLAYWRIGHT_SERVER_NAME];
+        fs6.writeFileSync(target, `${JSON.stringify(doc, null, 2)}
+`, "utf8");
+        return { target, removed: true };
+      }
+      const previa = doc[client.key] ? doc[client.key][PLAYWRIGHT_SERVER_NAME] : null;
+      if (previa && !isOurPlaywrightEntry(previa)) {
+        return { target, kept: true, removed: false, replaced: false };
+      }
+      fs6.mkdirSync(path2.dirname(target), { recursive: true });
+      doc[client.key] = doc[client.key] && typeof doc[client.key] === "object" ? doc[client.key] : {};
+      const servers = doc[client.key];
+      const replaced = Boolean(servers[PLAYWRIGHT_SERVER_NAME]);
+      servers[PLAYWRIGHT_SERVER_NAME] = { command: entry.command, args: entry.args };
+      fs6.writeFileSync(target, `${JSON.stringify(doc, null, 2)}
+`, "utf8");
+      return { target, replaced, removed: false, kept: false };
+    }
+    function hasPlaywrightServer(root) {
+      for (const client of Object.values(CLIENTS)) {
+        const doc = readJsonIfExists(client.file(root));
+        const servers = doc && typeof doc === "object" ? doc[client.key] : null;
+        if (servers && typeof servers === "object" && isPlaywrightEntry(servers[PLAYWRIGHT_SERVER_NAME])) {
+          return true;
+        }
+      }
+      return false;
+    }
+    function installPlaywright(options = {}) {
+      return installPlaywrightMcp(options);
+    }
     function pruneLegacyServer(client, root) {
       const target = client.file(root);
       const doc = readJsonIfExists(target);
@@ -77159,6 +77631,26 @@ var require_setup = __commonJS({
             }
           }
         }
+        const playwright = { install: false };
+        say();
+        say(`Automatizacion de navegador (${PLAYWRIGHT_PACKAGE}), de Microsoft.`);
+        say("Se anade AL LADO de los otros, con sus herramientas `browser_*`: sirve para");
+        say("abrir la pantalla del ERP y comprobar que lo que se acaba de cambiar en la");
+        say("base de datos se ve como toca.");
+        const canal = detectBrowserChannel();
+        const yaInstalado = installedPlaywrightVersion(playwrightRuntimeDir());
+        if (canal) {
+          say(`Usara el ${canal === "chrome" ? "Chrome" : "Edge"} que ya tienes instalado.`);
+        } else {
+          say("No he encontrado Chrome ni Edge, asi que habria que bajar Chromium (unos");
+          say("cientos de megas la primera vez).");
+        }
+        if (yaInstalado) say(`Ya esta instalado en este equipo: ${yaInstalado}.`);
+        playwright.install = await askYesNo(
+          rl,
+          "\xBFInstalo tambien el MCP de Playwright?",
+          hasPlaywrightServer(root)
+        );
         const clientKeys = [];
         say();
         say("\xBFQue cliente usas?");
@@ -77272,6 +77764,50 @@ var require_setup = __commonJS({
             if (result) say(`\u2713 ${result.target}   (retirado el '${PRODUCT_SERVER_NAME}' anterior)`);
           }
         }
+        let playwrightInstalled = null;
+        if (playwright.install) {
+          say();
+          say(`Instalando ${PLAYWRIGHT_PACKAGE} (una sola vez, no en cada arranque)\u2026`);
+          try {
+            playwrightInstalled = installPlaywright();
+            say(
+              `\u2713 ${PLAYWRIGHT_PACKAGE}${playwrightInstalled.version ? ` ${playwrightInstalled.version}` : ""} en ${playwrightInstalled.dir}${playwrightInstalled.reused ? "   (ya estaba)" : ""}`
+            );
+            if (playwrightInstalled.offline) {
+              say(`   No se ha podido comprobar si hay una version mas reciente: ${playwrightInstalled.offline}`);
+            }
+            if (playwrightInstalled.channel) {
+              say(`   Navegador: el ${playwrightInstalled.channel} que ya tienes instalado.`);
+            } else if (playwrightInstalled.chromium) {
+              say("   Navegador: Chromium bajado por Playwright (no habia Chrome ni Edge).");
+            }
+          } catch (err) {
+            say(`\u26A0 No se ha podido instalar el MCP de Playwright: ${err.message.split("\n")[0]}`);
+            say("   El resto queda configurado igualmente.");
+            playwright.install = false;
+          }
+        }
+        if (playwrightInstalled) {
+          const playwrightEntryCmd = playwrightCommand(
+            playwrightInstalled.entry,
+            buildPlaywrightFlags({ channel: playwrightInstalled.channel })
+          );
+          for (const key of clientKeys) {
+            const result = writePlaywrightConfig(CLIENTS[key], root, playwrightEntryCmd);
+            if (result.kept) {
+              say(`\u2713 ${result.target}   (ya tenia un '${PLAYWRIGHT_SERVER_NAME}' puesto a mano: se deja tal cual)`);
+            } else {
+              say(
+                `\u2713 ${result.target}   (servidor '${PLAYWRIGHT_SERVER_NAME}' ${result.replaced ? "actualizado" : "anadido"}, junto a '${SERVER_NAME}')`
+              );
+            }
+          }
+        } else if (!playwright.install) {
+          for (const key of Object.keys(CLIENTS)) {
+            const result = writePlaywrightConfig(CLIENTS[key], root, null);
+            if (result) say(`\u2713 ${result.target}   (retirado el '${PLAYWRIGHT_SERVER_NAME}' anterior)`);
+          }
+        }
         for (const key of Object.keys(CLIENTS)) {
           if (clientKeys.includes(key)) continue;
           const pruned = pruneLegacyServer(CLIENTS[key], root);
@@ -77301,10 +77837,20 @@ var require_setup = __commonJS({
                 false
               );
             }
+            let playwrightActions = false;
+            if (playwrightInstalled) {
+              playwrightActions = await askYesNo(
+                rl,
+                "   \xBFPermitir que el navegador haga CLIC y ESCRIBA sin preguntar?",
+                false
+              );
+            }
             const perms = allowMcpTools(root, {
               includeWrites,
               product: Boolean(productInstalled),
-              productWrites
+              productWrites,
+              playwright: Boolean(playwrightInstalled),
+              playwrightActions
             });
             say(`\u2713 ${perms.target}`);
             if (perms.alreadyHadAll) say("   (ya estaban todas)");
@@ -77335,6 +77881,14 @@ var require_setup = __commonJS({
           say(`Los dos servidores conviven: '${SERVER_NAME}' expone sus tools como`);
           say(`mcp__${SERVER_NAME}__* y '${PRODUCT_SERVER_NAME}' las suyas como`);
           say(`mcp__${PRODUCT_SERVER_NAME}__ahora_*. No se pisan.`);
+        }
+        if (playwrightInstalled) {
+          say();
+          say(`Y el navegador: pide \xABabre <una url> y hazme una captura\xBB (tools`);
+          say(`mcp__${PLAYWRIGHT_SERVER_NAME}__browser_* de '${PLAYWRIGHT_SERVER_NAME}').`);
+          if (!playwrightInstalled.channel && playwrightInstalled.chromium) {
+            say("Abrira el Chromium que ha bajado Playwright, no tu navegador.");
+          }
         }
         say();
         say("Si no aparece ninguna herramienta de SQL, casi siempre es una de dos:");
@@ -77389,6 +77943,11 @@ var require_setup = __commonJS({
       writeProductConfig,
       hasProductServer,
       installProduct,
+      buildPlaywrightFlags,
+      playwrightCommand,
+      writePlaywrightConfig,
+      hasPlaywrightServer,
+      installPlaywright,
       pickManyFromList,
       aliasFromName,
       suggestAliases,
@@ -77399,6 +77958,7 @@ var require_setup = __commonJS({
       SERVER_NAME,
       LEGACY_SERVER_NAME,
       PRODUCT_SERVER_NAME,
+      PLAYWRIGHT_SERVER_NAME,
       MIN_NODE_MAJOR
     };
     if (require.main === module2) run();

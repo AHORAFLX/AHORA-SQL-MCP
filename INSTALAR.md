@@ -259,6 +259,50 @@ añaden. Al no haber modo de solo lectura, son el único freno que queda.
 
 ---
 
+## 2 ter. MCP de navegador (`@playwright/mcp`), opcional
+
+Otra casilla, **«Instalar también el MCP de Playwright»**. Registra un **tercer** servidor,
+`playwright`, en el mismo fichero: es el
+[MCP de Playwright](https://www.npmjs.com/package/@playwright/mcp) de Microsoft, que conduce un
+navegador. Sirve para cerrar el círculo de una personalización: cambias la configuración en la
+base de datos con `ahora-sql` o `ahora-erp`, y **abres la pantalla y compruebas** que se ve como
+toca, sin salir de la sesión.
+
+Las tres entradas conviven, con prefijos distintos: `mcp__ahora-sql__*`,
+`mcp__ahora-erp__ahora_*` y `mcp__playwright__browser_*`.
+
+| | |
+|---|---|
+| **Requisitos** | Los mismos que el resto: Node 18 y acceso a npm. **No** hace falta .NET, ni el feed de AHORA, ni conexión a base de datos. |
+| **Navegador** | Usa el **Chrome o Edge que ya tienes** (`--browser chrome` / `--browser msedge`), así que no se baja nada más. Solo si no encuentra ninguno de los dos —fuera de Windows, básicamente— baja Chromium, y te lo dice antes. |
+| **Dónde se instala** | `%LOCALAPPDATA%\playwright-mcp`, carpeta propia y **hermana** de las otras dos, por lo mismo: desinstalar el MCP de SQL borrando su carpeta no puede llevarse este por delante. |
+| **Por qué se instala, y no `npx`** | La forma que documenta Microsoft es `npx @playwright/mcp@latest`, que resuelve el paquete **en cada arranque**. Es exactamente el problema que este instalador ya se quitó de encima para su propio servidor: el cliente MCP corta a los 30 s y descarta el servidor entero, así que sus herramientas no aparecen y el síntoma que llega es *«el MCP va inestable»*. Aquí se instala una vez y la configuración apunta a un fichero en disco. |
+| **Producción** | Se ofrece igual. No toca la base de datos, así que el perfil de entorno no le aplica. |
+| **Si ya lo tenías a mano** | Si en el `.mcp.json` ya hay un `playwright` que no escribió este instalador (un `npx @playwright/mcp@latest` con tus flags), **no se toca**: ni se sustituye al marcar la casilla ni se retira al desmarcarla. Te lo dice al terminar. |
+
+La entrada que se escribe tiene esta forma:
+
+```jsonc
+"playwright": {
+  "command": "node",
+  "args": [
+    "C:/Users/<tu-usuario>/AppData/Local/playwright-mcp/node_modules/@playwright/mcp/cli.js",
+    "--browser", "chrome"
+  ]
+}
+```
+
+Para comprobarlo, pide al agente *«abre <una url> y hazme una captura»*.
+
+⚠️ **Mirar y tocar se piden aparte.** Las reglas de permisos que se añaden de serie son las de
+mirar: abrir una URL, capturar la pantalla, leer el DOM, la consola y la red. Que haga **clic o
+escriba** es otra casilla y por defecto **no**: un clic en una pantalla del ERP ejecuta lo que
+haya detrás del botón, y eso puede acabar en un `INSERT` que no pasa por ninguna regla del MCP de
+SQL. Ejecutar JavaScript en la página (`browser_evaluate`, `browser_run_code_unsafe`) **nunca**
+recibe regla: una para eso autorizaría cualquier cosa.
+
+---
+
 ## 3. Comprobar que funciona
 
 1. **Abre una sesión nueva sobre esa carpeta.** La configuración se lee al arrancar la sesión y es

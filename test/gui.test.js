@@ -755,3 +755,76 @@ test("tocar los datos de una conexion a mano deshace la validacion", () => {
   assert.match(html, /oninput = invalidateManual/);
   assert.match(html, /if \(!validated\) throw new Error/);
 });
+
+test("la pagina trae la casilla del MCP de navegador, desmarcada", () => {
+  // Desmarcada a proposito: es un servidor de un tercero y no todo el mundo lo quiere.
+  // Se premarca sola en el paso 3 si el proyecto ya lo tenia registrado.
+  const html = gui.renderPage("t0ken");
+  assert.match(html, /id="cPlaywright" style/);
+  assert.ok(!/id="cPlaywright" checked/.test(html), "no puede venir marcada");
+  assert.match(
+    html,
+    /id="playwrightWarn"[^>]*\shidden/,
+    "el aviso del clic sale al marcarla, no antes"
+  );
+  assert.match(html, /id="cPlaywrightActionRules"/);
+});
+
+test("el estado del navegador se consulta sin tocar la red", async () => {
+  await withGui(async ({ call, origin }) => {
+    const r = await call("/api/playwright", { origin, body: {} });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.serverName, "playwright");
+    assert.ok(
+      r.json.channel === null || ["chrome", "msedge"].includes(r.json.channel),
+      "el canal es uno de los dos que Playwright entiende, o ninguno"
+    );
+    assert.ok(r.json.dir.includes("playwright-mcp"));
+  });
+});
+
+test("detect dice si el proyecto ya tiene un Playwright MCP registrado", async () => {
+  const root = coreProject();
+  await withGui(async ({ call, origin }) => {
+    const sin = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+    assert.equal(sin.hasPlaywright, false);
+
+    const mcp = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8"));
+    mcp.mcpServers.playwright = { command: "npx", args: ["-y", "@playwright/mcp@latest"] };
+    fs.writeFileSync(path.join(root, ".mcp.json"), JSON.stringify(mcp), "utf8");
+
+    const con = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+    assert.equal(con.hasPlaywright, true, "si no, reinstalar lo retiraria sin pedirlo");
+  });
+});
+
+test("write sin la casilla del navegador no toca un playwright puesto a mano", async () => {
+  // La rama de "retirar" corre siempre que la casilla venga desmarcada, asi que es la
+  // que puede romperle la configuracion a quien lo puso el mismo.
+  const root = coreProject();
+  const aMano = { command: "npx", args: ["-y", "@playwright/mcp@latest", "--headless"] };
+  const mcp = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8"));
+  mcp.mcpServers.playwright = aMano;
+  fs.writeFileSync(path.join(root, ".mcp.json"), JSON.stringify(mcp), "utf8");
+
+  await withGui(async ({ call, origin }) => {
+    const det = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+    const core = det.files.find((f) => f.type === "core");
+    const r = await call("/api/write", {
+      origin,
+      body: {
+        projectDir: root,
+        configFile: core.path,
+        environment: det.defaultEnvironment,
+        connections: [{ name: "DataConnectionString", alias: "data" }],
+        profileKey: "local",
+        clients: ["claude"],
+        playwright: false,
+      },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.playwright, null);
+    const despues = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8"));
+    assert.deepEqual(despues.mcpServers.playwright, aMano);
+  });
+});

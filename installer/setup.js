@@ -38,8 +38,11 @@ const {
   SERVER_NAME,
   LEGACY_SERVER_NAME,
   PRODUCT_SERVER_NAME,
+  PLAYWRIGHT_SERVER_NAME,
   isOurServerEntry,
   isOurProductEntry,
+  isPlaywrightEntry,
+  isOurPlaywrightEntry,
 } = require("./server-name");
 const { installRuntime } = require("./runtime");
 const { toolVersion } = require("./tools");
@@ -54,6 +57,13 @@ const {
   installProductMcp,
   installProductFromFolder,
 } = require("./product-mcp");
+const {
+  PLAYWRIGHT_PACKAGE,
+  playwrightRuntimeDir,
+  installedPlaywrightVersion,
+  detectBrowserChannel,
+  installPlaywrightMcp,
+} = require("./playwright-mcp");
 
 const PKG_VERSION = require("../package.json").version;
 const PKG_SPEC = `github:AHORAFLX/AHORA-SQL-MCP#v${PKG_VERSION}`;
@@ -602,6 +612,100 @@ function installProduct({ version, folder, dir = productRuntimeDir() } = {}) {
   return { ...installProductMcp({ version, dir }), from: "feed" };
 }
 
+// ── MCP de automatizacion de navegador (`@playwright/mcp`) ───────────────────
+
+/**
+ * Los argumentos del MCP de Playwright.
+ *
+ * `--browser` con el canal detectado hace que conduzca el navegador que YA esta en la
+ * maquina. Sin ese flag, Playwright busca su propio Chromium, que este instalador no
+ * baja salvo que no haya ninguno (ver installer/playwright-mcp.js): escribir la
+ * entrada sin `--browser` teniendo Chrome delante es dejarla arrancando con un error
+ * de "browser not installed" que no menciona nada de esto.
+ */
+function buildPlaywrightFlags({ channel } = {}) {
+  return channel ? ["--browser", channel] : [];
+}
+
+/**
+ * Como se lanza el MCP de Playwright: `node <cli.js de la instalacion>`.
+ *
+ * No hay forma npx de reserva, al contrario que con el servidor de SQL. Ahi la
+ * reserva vale porque el paquete es nuestro y la alternativa era no dejar nada; aqui
+ * `npx @playwright/mcp@latest` es justo el arranque que resuelve contra la red cada
+ * vez y agota la espera del cliente MCP, asi que escribirlo seria dejar registrado un
+ * servidor que a veces no aparece. Si la instalacion falla, no se escribe la entrada y
+ * se dice por que.
+ */
+function playwrightCommand(entry, flags = []) {
+  return { command: "node", args: [entry.replace(/\\/g, "/"), ...flags] };
+}
+
+/**
+ * Escribe (o retira) la entrada del MCP de Playwright en un fichero de cliente.
+ *
+ * SUMA, como la del MCP de producto: las tres entradas conviven en la misma sesion con
+ * prefijos distintos (`mcp__ahora-sql__*`, `mcp__ahora-erp__ahora_*` y
+ * `mcp__playwright__browser_*`).
+ *
+ * Y NO PISA UNA CONFIGURADA A MANO. El paquete no es nuestro y la forma que documenta
+ * Microsoft (`npx @playwright/mcp@latest`, quiza con sus propios flags) funciona: si
+ * ya hay una asi, se deja tal cual y se avisa, en lugar de reemplazarla en silencio
+ * por la nuestra y llevarse por delante los flags que alguien puso a mano.
+ *
+ * Con `entry` a null se retira, y solo si es la que dejo este instalador.
+ */
+function writePlaywrightConfig(client, root, entry) {
+  const target = client.file(root);
+  const existing = readJsonIfExists(target);
+  const doc = existing && typeof existing === "object" ? existing : {};
+
+  if (entry === null) {
+    const servers = doc[client.key];
+    if (!servers || typeof servers !== "object") return null;
+    if (!isOurPlaywrightEntry(servers[PLAYWRIGHT_SERVER_NAME])) return null;
+    delete servers[PLAYWRIGHT_SERVER_NAME];
+    fs.writeFileSync(target, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
+    return { target, removed: true };
+  }
+
+  const previa = doc[client.key] ? doc[client.key][PLAYWRIGHT_SERVER_NAME] : null;
+  if (previa && !isOurPlaywrightEntry(previa)) {
+    return { target, kept: true, removed: false, replaced: false };
+  }
+
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  doc[client.key] = doc[client.key] && typeof doc[client.key] === "object" ? doc[client.key] : {};
+  const servers = doc[client.key];
+  const replaced = Boolean(servers[PLAYWRIGHT_SERVER_NAME]);
+  servers[PLAYWRIGHT_SERVER_NAME] = { command: entry.command, args: entry.args };
+
+  fs.writeFileSync(target, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
+  return { target, replaced, removed: false, kept: false };
+}
+
+/**
+ * ¿Este proyecto ya tiene un Playwright MCP registrado?
+ *
+ * Cuenta CUALQUIERA, no solo el nuestro: sirve para premarcar la casilla, y quien lo
+ * tiene configurado a mano tampoco quiere que una reinstalacion se lo retire.
+ */
+function hasPlaywrightServer(root) {
+  for (const client of Object.values(CLIENTS)) {
+    const doc = readJsonIfExists(client.file(root));
+    const servers = doc && typeof doc === "object" ? doc[client.key] : null;
+    if (servers && typeof servers === "object" && isPlaywrightEntry(servers[PLAYWRIGHT_SERVER_NAME])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Deja el MCP de Playwright instalado y devuelve con que arrancarlo. */
+function installPlaywright(options = {}) {
+  return installPlaywrightMcp(options);
+}
+
 /**
  * Retira la entrada `mssql` nuestra de un fichero de cliente que NO se esta
  * configurando.
@@ -989,6 +1093,31 @@ async function main() {
       }
     }
 
+    // ── MCP de automatizacion de navegador ──
+    //
+    // Independiente del entorno, al contrario que el de producto: no toca la base de
+    // datos ni el ERP, conduce un navegador. Por eso se ofrece tambien en PRODUCCION.
+    const playwright = { install: false };
+    say();
+    say(`Automatizacion de navegador (${PLAYWRIGHT_PACKAGE}), de Microsoft.`);
+    say("Se anade AL LADO de los otros, con sus herramientas `browser_*`: sirve para");
+    say("abrir la pantalla del ERP y comprobar que lo que se acaba de cambiar en la");
+    say("base de datos se ve como toca.");
+    const canal = detectBrowserChannel();
+    const yaInstalado = installedPlaywrightVersion(playwrightRuntimeDir());
+    if (canal) {
+      say(`Usara el ${canal === "chrome" ? "Chrome" : "Edge"} que ya tienes instalado.`);
+    } else {
+      say("No he encontrado Chrome ni Edge, asi que habria que bajar Chromium (unos");
+      say("cientos de megas la primera vez).");
+    }
+    if (yaInstalado) say(`Ya esta instalado en este equipo: ${yaInstalado}.`);
+    playwright.install = await askYesNo(
+      rl,
+      "¿Instalo tambien el MCP de Playwright?",
+      hasPlaywrightServer(root)
+    );
+
     const clientKeys = [];
     say();
     say("¿Que cliente usas?");
@@ -1133,6 +1262,60 @@ async function main() {
       }
     }
 
+    // ── MCP de Playwright, como TERCERA entrada del mismo fichero ──
+    let playwrightInstalled = null;
+    if (playwright.install) {
+      say();
+      say(`Instalando ${PLAYWRIGHT_PACKAGE} (una sola vez, no en cada arranque)…`);
+      try {
+        playwrightInstalled = installPlaywright();
+        say(
+          `✓ ${PLAYWRIGHT_PACKAGE}${playwrightInstalled.version ? ` ${playwrightInstalled.version}` : ""}` +
+            ` en ${playwrightInstalled.dir}${playwrightInstalled.reused ? "   (ya estaba)" : ""}`
+        );
+        if (playwrightInstalled.offline) {
+          say(`   No se ha podido comprobar si hay una version mas reciente: ${playwrightInstalled.offline}`);
+        }
+        if (playwrightInstalled.channel) {
+          say(`   Navegador: el ${playwrightInstalled.channel} que ya tienes instalado.`);
+        } else if (playwrightInstalled.chromium) {
+          say("   Navegador: Chromium bajado por Playwright (no habia Chrome ni Edge).");
+        }
+      } catch (err) {
+        // No aborta nada, por lo mismo que el MCP de producto: lo de SQL ya esta
+        // escrito y funcionando.
+        say(`⚠ No se ha podido instalar el MCP de Playwright: ${err.message.split("\n")[0]}`);
+        say("   El resto queda configurado igualmente.");
+        playwright.install = false;
+      }
+    }
+
+    if (playwrightInstalled) {
+      const playwrightEntryCmd = playwrightCommand(
+        playwrightInstalled.entry,
+        buildPlaywrightFlags({ channel: playwrightInstalled.channel })
+      );
+      for (const key of clientKeys) {
+        const result = writePlaywrightConfig(CLIENTS[key], root, playwrightEntryCmd);
+        if (result.kept) {
+          say(`✓ ${result.target}   (ya tenia un '${PLAYWRIGHT_SERVER_NAME}' puesto a mano: se deja tal cual)`);
+        } else {
+          say(
+            `✓ ${result.target}   (servidor '${PLAYWRIGHT_SERVER_NAME}' ${
+              result.replaced ? "actualizado" : "anadido"
+            }, junto a '${SERVER_NAME}')`
+          );
+        }
+      }
+    } else if (!playwright.install) {
+      // Se retira SOLO la que dejo este instalador: un `npx @playwright/mcp` puesto a
+      // mano funciona y no lo pusimos nosotros.
+      for (const key of Object.keys(CLIENTS)) {
+        const result = writePlaywrightConfig(CLIENTS[key], root, null);
+        if (result) say(`✓ ${result.target}   (retirado el '${PLAYWRIGHT_SERVER_NAME}' anterior)`);
+      }
+    }
+
     // Y en los ficheros del cliente que NO se ha configurado, la entrada vieja tambien
     // hay que retirarla: dejarla registrada mantiene el choque de nombres y puede
     // acabar levantando dos servidores identicos.
@@ -1175,10 +1358,23 @@ async function main() {
             false
           );
         }
+        // Y las del navegador aparte otra vez: mirar una pantalla es una cosa, y un
+        // clic en ella ejecuta lo que haya detras del boton — que puede acabar en un
+        // INSERT que no pasa por ninguna regla de SQL.
+        let playwrightActions = false;
+        if (playwrightInstalled) {
+          playwrightActions = await askYesNo(
+            rl,
+            "   ¿Permitir que el navegador haga CLIC y ESCRIBA sin preguntar?",
+            false
+          );
+        }
         const perms = allowMcpTools(root, {
           includeWrites,
           product: Boolean(productInstalled),
           productWrites,
+          playwright: Boolean(playwrightInstalled),
+          playwrightActions,
         });
         say(`✓ ${perms.target}`);
         if (perms.alreadyHadAll) say("   (ya estaban todas)");
@@ -1219,6 +1415,14 @@ async function main() {
       say(`Los dos servidores conviven: '${SERVER_NAME}' expone sus tools como`);
       say(`mcp__${SERVER_NAME}__* y '${PRODUCT_SERVER_NAME}' las suyas como`);
       say(`mcp__${PRODUCT_SERVER_NAME}__ahora_*. No se pisan.`);
+    }
+    if (playwrightInstalled) {
+      say();
+      say(`Y el navegador: pide «abre <una url> y hazme una captura» (tools`);
+      say(`mcp__${PLAYWRIGHT_SERVER_NAME}__browser_* de '${PLAYWRIGHT_SERVER_NAME}').`);
+      if (!playwrightInstalled.channel && playwrightInstalled.chromium) {
+        say("Abrira el Chromium que ha bajado Playwright, no tu navegador.");
+      }
     }
     say();
     say("Si no aparece ninguna herramienta de SQL, casi siempre es una de dos:");
@@ -1286,6 +1490,11 @@ module.exports = {
   writeProductConfig,
   hasProductServer,
   installProduct,
+  buildPlaywrightFlags,
+  playwrightCommand,
+  writePlaywrightConfig,
+  hasPlaywrightServer,
+  installPlaywright,
   pickManyFromList,
   aliasFromName,
   suggestAliases,
@@ -1296,6 +1505,7 @@ module.exports = {
   SERVER_NAME,
   LEGACY_SERVER_NAME,
   PRODUCT_SERVER_NAME,
+  PLAYWRIGHT_SERVER_NAME,
   MIN_NODE_MAJOR,
 };
 

@@ -14,7 +14,12 @@
  */
 const fs = require("fs");
 const path = require("path");
-const { SERVER_NAME, LEGACY_SERVER_NAME, PRODUCT_SERVER_NAME } = require("./server-name");
+const {
+  SERVER_NAME,
+  LEGACY_SERVER_NAME,
+  PRODUCT_SERVER_NAME,
+  PLAYWRIGHT_SERVER_NAME,
+} = require("./server-name");
 
 /** Solo introspeccion y consulta. Las escrituras se dejan preguntando a proposito. */
 function readRules(serverName = SERVER_NAME) {
@@ -88,6 +93,61 @@ function productWriteRules(serverName = PRODUCT_SERVER_NAME) {
 }
 
 /**
+ * Mirar con el navegador: abrir una URL y leer lo que hay.
+ *
+ * Nombres tomados del `tools/list` real de `@playwright/mcp`, no de su documentacion.
+ * Todos son enteros y no comodines a proposito: `browser_*` de golpe se llevaria por
+ * delante la separacion que viene justo debajo, y la familia crece con cada version.
+ *
+ * `browser_navigate` entra aqui aunque abra lo que se le pida: es el equivalente a
+ * mirar una pagina, algo que el agente ya puede hacer por otras vias, y sin ella cada
+ * paso de una comprobacion de pantalla se detiene a preguntar.
+ */
+function playwrightReadRules(serverName = PLAYWRIGHT_SERVER_NAME) {
+  return [
+    `mcp__${serverName}__browser_navigate`,
+    `mcp__${serverName}__browser_navigate_back`,
+    `mcp__${serverName}__browser_snapshot`,
+    `mcp__${serverName}__browser_take_screenshot`,
+    `mcp__${serverName}__browser_console_messages`,
+    `mcp__${serverName}__browser_network_requests`,
+    `mcp__${serverName}__browser_network_request`,
+    `mcp__${serverName}__browser_find`,
+    `mcp__${serverName}__browser_wait_for`,
+    `mcp__${serverName}__browser_resize`,
+    `mcp__${serverName}__browser_tabs`,
+    `mcp__${serverName}__browser_hover`,
+    `mcp__${serverName}__browser_close`,
+  ];
+}
+
+/**
+ * Tocar con el navegador: clic, teclado, formularios.
+ *
+ * Van aparte de la lectura por el mismo motivo que las escrituras de SQL: un clic en
+ * la pantalla del ERP ejecuta lo que haya detras del boton, y eso puede acabar en un
+ * INSERT que no pasa por ninguna de las reglas de este fichero. Solo se anaden
+ * pidiendolas a proposito.
+ *
+ * `browser_evaluate` y `browser_run_code_unsafe` NO estan, y no es un olvido: ejecutan
+ * el codigo que les pasen dentro de la pagina, asi que una regla para ellas autoriza
+ * cualquier cosa que se pueda escribir en JavaScript. Esas siguen preguntando siempre.
+ */
+function playwrightActionRules(serverName = PLAYWRIGHT_SERVER_NAME) {
+  return [
+    `mcp__${serverName}__browser_click`,
+    `mcp__${serverName}__browser_type`,
+    `mcp__${serverName}__browser_fill_form`,
+    `mcp__${serverName}__browser_press_key`,
+    `mcp__${serverName}__browser_select_option`,
+    `mcp__${serverName}__browser_drag`,
+    `mcp__${serverName}__browser_drop`,
+    `mcp__${serverName}__browser_file_upload`,
+    `mcp__${serverName}__browser_handle_dialog`,
+  ];
+}
+
+/**
  * Raiz del repositorio git que contiene `dir`, o `dir` si no esta en uno.
  *
  * Importa: Claude Code carga `.claude/settings.local.json` desde la RAIZ del
@@ -122,6 +182,9 @@ function allowMcpTools(
     product = false,
     productWrites = false,
     productServerName = PRODUCT_SERVER_NAME,
+    playwright = false,
+    playwrightActions = false,
+    playwrightServerName = PLAYWRIGHT_SERVER_NAME,
   } = {}
 ) {
   const target = permissionsPath(projectDir);
@@ -134,6 +197,8 @@ function allowMcpTools(
     ...(includeWrites ? writeRules(serverName) : []),
     ...(product ? productReadRules(productServerName) : []),
     ...(product && productWrites ? productWriteRules(productServerName) : []),
+    ...(playwright ? playwrightReadRules(playwrightServerName) : []),
+    ...(playwright && playwrightActions ? playwrightActionRules(playwrightServerName) : []),
   ];
   // Reglas del nombre anterior. Se retiran SOLO las que escribimos nosotros, nunca
   // un `mcp__mssql__*` cualquiera: puede ser de otra herramienta del equipo. Si no
@@ -179,7 +244,10 @@ module.exports = {
   writeRules,
   productReadRules,
   productWriteRules,
+  playwrightReadRules,
+  playwrightActionRules,
   SERVER_NAME,
   LEGACY_SERVER_NAME,
   PRODUCT_SERVER_NAME,
+  PLAYWRIGHT_SERVER_NAME,
 };

@@ -34,6 +34,21 @@ const LEGACY_SERVER_NAME = "mssql";
 const PRODUCT_SERVER_NAME = "ahora-erp";
 
 /**
+ * El MCP de automatizacion de navegador de Microsoft (el paquete npm
+ * `@playwright/mcp`).
+ *
+ * Tampoco es una variante de este: no toca la base de datos ni el ERP, conduce un
+ * navegador para poder comprobar en la pantalla lo que se acaba de cambiar en la
+ * configuracion. Se registra al lado de los otros dos en el mismo fichero.
+ *
+ * `playwright` a secas, que es el nombre con el que lo documenta Microsoft y el que
+ * ya tienen escrito quienes lo configuraron a mano: cambiarlo por uno nuestro dejaria
+ * dos entradas con el mismo servidor detras y duplicaria sus herramientas en el
+ * selector. Sus tools son `browser_*`, asi que no choca con nada de aqui.
+ */
+const PLAYWRIGHT_SERVER_NAME = "playwright";
+
+/**
  * ¿Esta entrada de servidor MCP la escribimos nosotros?
  *
  * Importa para la migracion: una entrada `mssql` puede ser la nuestra de una
@@ -69,10 +84,60 @@ function isOurProductEntry(entry) {
   return args.some((a) => typeof a === "string" && a.includes("start-ahora-mcp"));
 }
 
+/**
+ * ¿Esta entrada es un Playwright MCP, lo haya escrito quien lo haya escrito?
+ *
+ * Se reconoce por el paquete, que es lo unico comun a las dos formas que hay por ahi:
+ * la que documenta Microsoft (`npx @playwright/mcp@latest`) y la nuestra, que apunta
+ * al `cli.js` ya instalado.
+ */
+function isPlaywrightEntry(entry) {
+  if (!entry || typeof entry !== "object") return false;
+  const args = Array.isArray(entry.args) ? entry.args : [];
+  const command = typeof entry.command === "string" ? entry.command : "";
+  // Las barras se normalizan antes de comparar: la ruta del cli.js puede estar escrita
+  // con las invertidas de Windows, y entonces el nombre del paquete aparece como
+  // `@playwright\mcp`. Sin esto, esa entrada no se reconoceria como Playwright y
+  // desmarcar la casilla no retiraria nada.
+  const busca = (texto) => {
+    const limpio = texto.replace(/\\/g, "/");
+    // `playwright-mcp` es el nombre del ejecutable del paquete, que es la forma que
+    // queda si alguien lo instalo global.
+    return limpio.includes("@playwright/mcp") || limpio.includes("playwright-mcp");
+  };
+  return busca(command) || args.some((a) => typeof a === "string" && busca(a));
+}
+
+/**
+ * ¿Es el Playwright MCP que dejo escrito ESTE instalador?
+ *
+ * La distincion importa al desmarcar la casilla. El paquete no es nuestro, asi que
+ * aqui no vale el criterio del MCP de producto ("lo nuestro arranca por
+ * start-ahora-mcp"): quien lo configuro a mano siguiendo la documentacion de
+ * Microsoft tiene un `npx @playwright/mcp@latest` que funciona, y retirarselo porque
+ * la casilla venga desmarcada seria romperle algo que el instalador no puso.
+ *
+ * Lo nuestro se reconoce por la instalacion a la que apunta: el `cli.js` de dentro de
+ * la carpeta que crea `installer/playwright-mcp.js`. Cualquier otra forma se deja
+ * donde esta.
+ */
+function isOurPlaywrightEntry(entry) {
+  if (!isPlaywrightEntry(entry)) return false;
+  const args = Array.isArray(entry.args) ? entry.args : [];
+  return args.some(
+    (a) =>
+      typeof a === "string" &&
+      a.replace(/\\/g, "/").includes("/playwright-mcp/node_modules/@playwright/mcp/cli.js")
+  );
+}
+
 module.exports = {
   SERVER_NAME,
   LEGACY_SERVER_NAME,
   PRODUCT_SERVER_NAME,
+  PLAYWRIGHT_SERVER_NAME,
   isOurServerEntry,
   isOurProductEntry,
+  isPlaywrightEntry,
+  isOurPlaywrightEntry,
 };
