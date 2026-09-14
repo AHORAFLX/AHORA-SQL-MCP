@@ -476,11 +476,22 @@ src/
   Identifiers with spaces or non-ASCII characters aren't supported by the introspection tools; use
   `execute_read_query` with raw SQL for those.
 - **Cancellation** — tool handlers honor the MCP request `AbortSignal`; an aborted request fires
-  `request.cancel()` on the underlying mssql request. The cancellation is then **waited for**, with a
-  5 s bound, before the `ROLLBACK` is attempted: `request.cancel()` only sends an ATTENTION packet,
-  and tedious serialises requests per connection, so a `ROLLBACK` issued while the cancelled request
-  is still in flight cannot even be sent. That was the bug: it failed with `EREQINPROG` into an empty
-  `catch`, and the connection went back into the pool with `@@TRANCOUNT = 1`.
+  `request.cancel()` on the underlying mssql request. Before the `ROLLBACK` is attempted the request is
+  then **always waited for**, with a 5 s bound, until mssql hands the connection back to the
+  transaction — cancelled or not. Two separate things make a request outlive its own failure:
+  `request.cancel()` only sends an ATTENTION packet and tedious serialises requests per connection;
+  and in stream mode mssql reports the error long before it releases the connection (see below). A
+  `ROLLBACK` issued inside either window cannot even be sent. That was the bug: it failed with
+  `EREQINPROG` into an empty `catch`, and the connection went back into the pool with
+  `@@TRANCOUNT = 1`.
+- **Streaming reads end on `done`, never on `error`** — `execute_read_query` runs in mssql's stream
+  mode, which emits `error` the instant the server's error token arrives: the request is still in
+  flight and the connection is still borrowed from the transaction. `done` is what marks the real
+  end, emitted from the very callback that calls `Transaction#release()`, so `streamRead` records the
+  error and settles there (bounded by 2 s in case a `done` never arrives). Settling on `error`
+  instead is what turned every plain SQL error — an invalid column name, say — into a `ROLLBACK` that
+  failed with `EREQINPROG`, an `ETXNABANDONED` wrapped around the real message, and a healthy
+  connection destroyed for nothing.
 - **Connection hygiene** — two layers, in `db/connections.js`:
   - *On acquire*, a tarn `validate` (installed through `config.pool.validate`, which mssql merges
     after its own) resets the connection with tedious's TDS connection reset: the server rolls back

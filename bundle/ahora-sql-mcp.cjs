@@ -102349,6 +102349,7 @@ var require_safety = __commonJS({
     } = require_connections();
     var { splitBatches, previewOf } = require_batches();
     var CANCEL_GRACE_MS = 5e3;
+    var DONE_GRACE_MS = 2e3;
     var TRANCOUNT_PROBE_MS = 5e3;
     var SETTLE_POLL_MS = 25;
     var TRANCOUNT_SQL = "SELECT @@TRANCOUNT AS trancount";
@@ -102444,27 +102445,28 @@ var require_safety = __commonJS({
       probeTimeoutMs = TRANCOUNT_PROBE_MS
     } = {}) {
       const connection = acquiredConnection(transaction);
-      const cancelLanded = aborted ? await waitForRequestToSettle(transaction, cancelGraceMs) : true;
+      const requestSettled = await waitForRequestToSettle(transaction, cancelGraceMs);
       let rollbackError = null;
       try {
         await transaction.rollback();
       } catch (err) {
         rollbackError = err;
       }
-      if (cancelLanded && !rollbackError) {
-        return { ok: true, cancelLanded, rollbackError: null };
+      if (requestSettled && !rollbackError) {
+        return { ok: true, requestSettled, aborted, rollbackError: null };
       }
       const probe = await probeTrancount(transaction, connection, {
         mssql,
         timeoutMs: probeTimeoutMs
       });
       if (probe.trancount === 0) {
-        return { ok: true, cancelLanded, rollbackError, trancount: 0 };
+        return { ok: true, requestSettled, aborted, rollbackError, trancount: 0 };
       }
       await destroyConnection(pool, connection);
       return {
         ok: false,
-        cancelLanded,
+        requestSettled,
+        aborted,
         rollbackError,
         trancount: probe.trancount ?? null,
         probeError: probe.error || null
@@ -102474,9 +102476,9 @@ var require_safety = __commonJS({
       const parts = [
         "The transaction on the connection that ran this statement could not be closed."
       ];
-      if (!cleanup.cancelLanded) {
+      if (!cleanup.requestSettled) {
         parts.push(
-          `The cancellation did not complete within ${CANCEL_GRACE_MS}ms, so the request was still in flight and the ROLLBACK could not even be sent.`
+          cleanup.aborted ? `The cancellation did not complete within ${CANCEL_GRACE_MS}ms, so the request was still in flight and the ROLLBACK could not even be sent.` : `The request still had not released the connection ${CANCEL_GRACE_MS}ms after it reported failure, so the ROLLBACK could not even be sent.`
         );
       }
       if (cleanup.rollbackError) {
@@ -102530,6 +102532,7 @@ var require_safety = __commonJS({
       mssql = loadDriver(),
       signal,
       timeoutMs,
+      doneGraceMs = DONE_GRACE_MS,
       ...cleanupOptions
     } = {}) {
       if (signal?.aborted) throw new Error("Request aborted");
@@ -102548,10 +102551,17 @@ var require_safety = __commonJS({
           let truncated = false;
           let canceled = false;
           let settled = false;
+          let streamError = null;
+          let doneTimer = null;
           const settle = (fn, value) => {
             if (settled) return;
             settled = true;
+            if (doneTimer) clearTimeout(doneTimer);
             fn(value);
+          };
+          const finish = () => {
+            if (streamError && !canceled) settle(reject, streamError);
+            else settle(resolve, { rows, totalSeen, truncated });
           };
           request.on("row", (row) => {
             totalSeen++;
@@ -102569,15 +102579,11 @@ var require_safety = __commonJS({
             }
           });
           request.on("error", (err) => {
-            if (canceled) {
-              settle(resolve, { rows, totalSeen, truncated });
-            } else {
-              settle(reject, err);
-            }
+            if (!streamError) streamError = err;
+            if (doneTimer) return;
+            doneTimer = setTimeout(finish, doneGraceMs);
           });
-          request.on("done", () => {
-            settle(resolve, { rows, totalSeen, truncated });
-          });
+          request.on("done", finish);
           try {
             request.query(query);
           } catch (err) {
@@ -102756,6 +102762,7 @@ var require_safety = __commonJS({
       runWrite,
       streamRead,
       CANCEL_GRACE_MS,
+      DONE_GRACE_MS,
       TRANCOUNT_PROBE_MS,
       NON_TRANSACTIONAL_STATEMENTS
     };

@@ -231,6 +231,7 @@ function streamingMssqlFactory({ rows, errorOnRowIndex = null }) {
               if (canceled) break;
               if (errorOnRowIndex !== null && i === errorOnRowIndex) {
                 listeners.error?.(new Error("simulated stream error"));
+                listeners.done?.({});
                 return;
               }
               listeners.row?.(rows[i]);
@@ -239,9 +240,8 @@ function streamingMssqlFactory({ rows, errorOnRowIndex = null }) {
               listeners.error?.(
                 Object.assign(new Error("cancelled"), { code: "ECANCEL" })
               );
-            } else {
-              listeners.done?.({});
             }
+            listeners.done?.({});
           } catch (err) {
             listeners.error?.(err);
           }
@@ -593,6 +593,7 @@ test("streamRead: the row cutoff still works, and cleans up through the same pat
       process.nextTick(() => {
         for (let i = 1; i <= 5; i++) listeners.row?.({ id: i });
         listeners.error?.(Object.assign(new Error("cancelled"), { code: "ECANCEL" }));
+        listeners.done?.({});
       });
     };
   };
@@ -611,6 +612,112 @@ test("streamRead: the row cutoff still works, and cleans up through the same pat
   assert.ok(mssql.events.some((e) => e[0] === "cancel"));
   assert.ok(mssql.events.some((e) => e[0] === "rollback"));
   assert.deepEqual(mssql.released, [], "una lectura truncada normal no quema conexiones");
+});
+
+test("streamRead: un error del servidor no cierra la lectura hasta que mssql suelta la conexion", async () => {
+  // El fallo reportado: en modo stream mssql emite `error` en cuanto llega el token de
+  // error del servidor, con el request todavia en vuelo y la conexion aun prestada a la
+  // transaccion. Cerrar ahi hacia que el ROLLBACK saliera con "There is a request in
+  // progress" y que un simple "Invalid column name" llegara al usuario convertido en un
+  // error de transaccion abandonada, con la conexion destruida de paso.
+  const connection = fakeConnection({ inTransaction: true });
+  const events = [];
+  const released = [];
+  const pool = { release: (c) => released.push(c) };
+  const listeners = {};
+  let doneEmitted = false;
+  let transaction;
+
+  const mssql = {
+    ISOLATION_LEVEL: { READ_COMMITTED: 4 },
+    Transaction: function Transaction() {
+      transaction = this;
+      this._acquiredConnection = connection;
+      this._activeRequest = null;
+      this.on = () => this;
+      this.begin = async () => {};
+      this.commit = async () => {};
+      this.rollback = async () => {
+        // Transaction#_rollback de mssql, tal cual: mientras haya request vivo, no sale.
+        if (this._activeRequest) {
+          throw Object.assign(
+            new Error("Can't rollback transaction. There is a request in progress."),
+            { code: "EREQINPROG" }
+          );
+        }
+        events.push(["rollback"]);
+        connection.inTransaction = false;
+        this._acquiredConnection = null;
+      };
+    },
+    Request: function Request() {
+      this.stream = false;
+      this.cancel = () => events.push(["cancel"]);
+      this.on = (event, fn) => {
+        listeners[event] = fn;
+      };
+      this._setCurrentRequest = () => this;
+      this.query = () => {
+        transaction._activeRequest = this;
+        process.nextTick(() => {
+          listeners.error?.(new Error("Invalid column name 'Enabled'."));
+          // Y solo despues mssql suelta la conexion y emite `done`.
+          setTimeout(() => {
+            transaction._activeRequest = null;
+            doneEmitted = true;
+            listeners.done?.({});
+          }, 30);
+        });
+      };
+    },
+  };
+
+  await assert.rejects(
+    () => streamRead(pool, "SELECT Enabled FROM t", { offset: 0, limit: 10, mssql }),
+    (err) => {
+      assert.equal(doneEmitted, true, "la lectura se cierra en el done, no en el error");
+      assert.match(err.message, /Invalid column name 'Enabled'/);
+      assert.doesNotMatch(
+        err.message,
+        /could not be closed/,
+        "el error del servidor se propaga tal cual, sin envolverlo"
+      );
+      return true;
+    }
+  );
+  assert.ok(
+    events.some((e) => e[0] === "rollback"),
+    "el ROLLBACK llega a enviarse"
+  );
+  assert.equal(connection.closed, false, "y no se quema una conexion que estaba sana");
+  assert.deepEqual(released, []);
+});
+
+test("streamRead: si el done no llegara nunca, el error se propaga igual tras la espera", async () => {
+  const connection = fakeConnection({ inTransaction: true });
+  const mssql = poolAwareMssql({ connection, trancount: 0 });
+  const listeners = {};
+  mssql.Request = function Request() {
+    this.stream = false;
+    this.cancel = () => mssql.events.push(["cancel"]);
+    this.on = (event, fn) => {
+      listeners[event] = fn;
+    };
+    this._setCurrentRequest = () => this;
+    this.query = () => {
+      process.nextTick(() => listeners.error?.(new Error("boom sin done")));
+    };
+  };
+  await assert.rejects(
+    () =>
+      streamRead(mssql.pool, "SELECT 1", {
+        offset: 0,
+        limit: 10,
+        mssql,
+        doneGraceMs: 30,
+      }),
+    /boom sin done/
+  );
 });
 
 test("waitForRequestToSettle returns as soon as the request lets go of the connection", async () => {

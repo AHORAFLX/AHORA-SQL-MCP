@@ -19,6 +19,17 @@ const { splitBatches, previewOf } = require("../sql/batches");
  */
 const CANCEL_GRACE_MS = 5000;
 
+/**
+ * How long we wait for mssql's `done` once the server has already reported an error.
+ *
+ * In stream mode mssql emits `error` the instant the server's error token arrives, which
+ * is BEFORE tedious has finished the request and before mssql hands the connection back to
+ * the transaction. `done` is what marks the real end: it is emitted from the very callback
+ * that calls `Transaction#release()`, so only once it has fired can a ROLLBACK be sent at
+ * all. This bound exists solely so that a `done` that never arrives cannot hang the call.
+ */
+const DONE_GRACE_MS = 2000;
+
 /** How long we wait for the `SELECT @@TRANCOUNT` probe on a suspect connection. */
 const TRANCOUNT_PROBE_MS = 5000;
 
@@ -195,8 +206,8 @@ async function probeTrancount(
  *
  * The order is the fix, not an implementation detail:
  *
- *  1. If a cancel was fired, wait (bounded) for the request to settle. Skipping this is
- *     what made the ROLLBACK fail with EREQINPROG in the first place.
+ *  1. Wait (bounded) for the request to let go of the connection - always, not only after
+ *     a cancel. Skipping this is what made the ROLLBACK fail with EREQINPROG.
  *  2. ROLLBACK, keeping the error instead of swallowing it.
  *  3. If anything went wrong - the cancel never landed, the ROLLBACK failed, or the
  *     server still reports a transaction - ask THAT connection for its @@TRANCOUNT. Zero
@@ -219,9 +230,13 @@ async function rollbackAndCheck(
   } = {}
 ) {
   const connection = acquiredConnection(transaction);
-  const cancelLanded = aborted
-    ? await waitForRequestToSettle(transaction, cancelGraceMs)
-    : true;
+  // Se espera siempre, no solo cuando ha habido un cancel. Un request puede seguir en vuelo
+  // sin que nadie lo haya cancelado: en modo stream mssql avisa del error en cuanto llega el
+  // token del servidor, bastante antes de soltar la conexion, y por eso un simple "Invalid
+  // column name" bastaba para que el ROLLBACK saliera con EREQINPROG y la conexion acabara
+  // destruida sin necesidad. Cuando el request ya ha terminado -el caso normal- esto no
+  // cuesta nada: waitForRequestToSettle vuelve en el acto.
+  const requestSettled = await waitForRequestToSettle(transaction, cancelGraceMs);
 
   let rollbackError = null;
   try {
@@ -235,8 +250,8 @@ async function rollbackAndCheck(
   // que comprobar. Y comprobarlo seria ademas incorrecto: el rollback ya ha devuelto la
   // conexion al pool, asi que mirarle el estado es mirar una conexion que puede ser ya de
   // otra llamada.
-  if (cancelLanded && !rollbackError) {
-    return { ok: true, cancelLanded, rollbackError: null };
+  if (requestSettled && !rollbackError) {
+    return { ok: true, requestSettled, aborted, rollbackError: null };
   }
 
   const probe = await probeTrancount(transaction, connection, {
@@ -244,13 +259,14 @@ async function rollbackAndCheck(
     timeoutMs: probeTimeoutMs,
   });
   if (probe.trancount === 0) {
-    return { ok: true, cancelLanded, rollbackError, trancount: 0 };
+    return { ok: true, requestSettled, aborted, rollbackError, trancount: 0 };
   }
 
   await destroyConnection(pool, connection);
   return {
     ok: false,
-    cancelLanded,
+    requestSettled,
+    aborted,
     rollbackError,
     trancount: probe.trancount ?? null,
     probeError: probe.error || null,
@@ -269,9 +285,11 @@ function abandonedTransactionError(cleanup, cause) {
   const parts = [
     "The transaction on the connection that ran this statement could not be closed.",
   ];
-  if (!cleanup.cancelLanded) {
+  if (!cleanup.requestSettled) {
     parts.push(
-      `The cancellation did not complete within ${CANCEL_GRACE_MS}ms, so the request was still in flight and the ROLLBACK could not even be sent.`
+      cleanup.aborted
+        ? `The cancellation did not complete within ${CANCEL_GRACE_MS}ms, so the request was still in flight and the ROLLBACK could not even be sent.`
+        : `The request still had not released the connection ${CANCEL_GRACE_MS}ms after it reported failure, so the ROLLBACK could not even be sent.`
     );
   }
   if (cleanup.rollbackError) {
@@ -361,6 +379,13 @@ async function runRead(
  * wait-then-check cleanup: on the happy path the request has already settled by the time
  * we get here and the wait costs nothing, and on the bad path the connection is not
  * handed back dirty.
+ *
+ * What ends the read is `done`, never `error`. mssql emits `error` in stream mode as soon
+ * as the server's error token arrives - the request is still in flight and the connection
+ * is still borrowed from the transaction - while `done` comes from the same callback that
+ * releases it. Settling on `error` is what turned every plain SQL error into a failed
+ * ROLLBACK ("There is a request in progress"), an abandoned-transaction error and a
+ * needlessly destroyed connection.
  */
 async function streamRead(
   pool,
@@ -371,6 +396,7 @@ async function streamRead(
     mssql = loadDriver(),
     signal,
     timeoutMs,
+    doneGraceMs = DONE_GRACE_MS,
     ...cleanupOptions
   } = {}
 ) {
@@ -392,11 +418,21 @@ async function streamRead(
       let truncated = false;
       let canceled = false;
       let settled = false;
+      let streamError = null;
+      let doneTimer = null;
 
       const settle = (fn, value) => {
         if (settled) return;
         settled = true;
+        if (doneTimer) clearTimeout(doneTimer);
         fn(value);
+      };
+
+      // El unico cierre legitimo. Si el corte por filas fue nuestro, la lectura es un exito
+      // truncado aunque el servidor haya mandado un ECANCEL detras; si no, manda el error.
+      const finish = () => {
+        if (streamError && !canceled) settle(reject, streamError);
+        else settle(resolve, { rows, totalSeen, truncated });
       };
 
       request.on("row", (row) => {
@@ -415,16 +451,19 @@ async function streamRead(
           }
         }
       });
+      // Un `error` anota, pero NO cierra: llega con el request todavia en vuelo y la
+      // conexion aun sin devolver, asi que cerrar aqui condenaba al ROLLBACK a fallar con
+      // EREQINPROG. Se espera a `done`, que es lo que mssql emite ya con la conexion suelta.
       request.on("error", (err) => {
-        if (canceled) {
-          settle(resolve, { rows, totalSeen, truncated });
-        } else {
-          settle(reject, err);
-        }
+        if (!streamError) streamError = err;
+        if (doneTimer) return;
+        // Red de seguridad por si ese `done` no llegara nunca: no nos quedamos colgados.
+        // Sin unref() a proposito: el timer vive solo mientras ya estamos esperando a la
+        // query, y unref'ado no llegaria a disparar si no queda nada mas en el loop, que es
+        // exactamente el caso en el que hace falta.
+        doneTimer = setTimeout(finish, doneGraceMs);
       });
-      request.on("done", () => {
-        settle(resolve, { rows, totalSeen, truncated });
-      });
+      request.on("done", finish);
 
       try {
         request.query(query);
@@ -675,6 +714,7 @@ module.exports = {
   runWrite,
   streamRead,
   CANCEL_GRACE_MS,
+  DONE_GRACE_MS,
   TRANCOUNT_PROBE_MS,
   NON_TRANSACTIONAL_STATEMENTS,
 };
