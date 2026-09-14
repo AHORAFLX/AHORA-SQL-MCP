@@ -4,7 +4,11 @@ const { loadDriver } = require("../db/driver");
 
 const { getConfig } = require("../config");
 const { getPool } = require("../db/pools");
-const { attachAbort, writesEnabled } = require("../db/safety");
+const {
+  applyRequestTimeout,
+  attachAbort,
+  writesEnabled,
+} = require("../db/safety");
 const {
   decodeSqlBuffer,
   splitBatches,
@@ -14,10 +18,14 @@ const {
 const { resolveSqlFile, readSqlFile } = require("../sql/files");
 const {
   dbKeyShape,
+  sqlFileTimeoutMsShape,
   sqlFilePath,
   MAX_LIMIT,
   MAX_BATCHES,
   MAX_BATCH_REPEAT,
+  MIN_TIMEOUT_MS,
+  MAX_TIMEOUT_MS,
+  SQL_FILE_TIMEOUT_MS,
 } = require("../validation");
 
 const MAX_MESSAGES = 100;
@@ -64,6 +72,7 @@ const inputShape = {
       `Rows to return from each batch's first recordset (0..${MAX_LIMIT}). Default 0: only row counts, ` +
         "which is what a deployment script needs."
     ),
+  ...sqlFileTimeoutMsShape,
 };
 
 const batchShape = z.object({
@@ -164,7 +173,13 @@ function respond(structured) {
 }
 
 async function handler(
-  { path: filePath, dbKey, dryRun = false, maxRowsPerBatch = 0 },
+  {
+    path: filePath,
+    dbKey,
+    dryRun = false,
+    maxRowsPerBatch = 0,
+    timeoutMs = SQL_FILE_TIMEOUT_MS,
+  },
   extra
 ) {
   const sqlLib = loadDriver();
@@ -258,7 +273,14 @@ async function handler(
       let last = null;
       for (let run = 0; run < batch.repeat; run++) {
         if (signal?.aborted) throw new Error("Request aborted");
-        const request = new sqlLib.Request(transaction);
+        // El timeout va estampado en la peticion de tedious, no en el pool: el
+        // `requestTimeout` del pool es de 30 s y lo comparten todas las tools, y
+        // subirselo a todas para que quepa un despliegue tambien le quitaria el freno
+        // a un SELECT desbocado. Ver applyRequestTimeout en db/safety.js.
+        const request = applyRequestTimeout(
+          new sqlLib.Request(transaction),
+          timeoutMs
+        );
         attachAbort(request, signal);
         request.on("info", (info) => {
           if (messages.length < MAX_MESSAGES) {
@@ -274,7 +296,10 @@ async function handler(
       results.push(summarizeBatch(batch, last, maxRowsPerBatch));
     }
 
-    await new sqlLib.Request(transaction).batch(RESTORE_SESSION_DEFAULTS);
+    await applyRequestTimeout(
+      new sqlLib.Request(transaction),
+      timeoutMs
+    ).batch(RESTORE_SESSION_DEFAULTS);
     await transaction.commit();
   } catch (err) {
     if (!serverRolledBack) {
@@ -313,7 +338,10 @@ module.exports = {
       "All batches run in ONE transaction on ONE connection: the deployment is all-or-nothing, and on failure the " +
       "error names the failing line of the file. Statements that cannot run inside a transaction " +
       "(CREATE/ALTER DATABASE, BACKUP, CREATE FULLTEXT INDEX) are therefore not supported, and a leading `USE` is " +
-      "rejected - select the database with `dbKey`.",
+      "rejected - select the database with `dbKey`. " +
+      `\`timeoutMs\` (${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS}, default ${SQL_FILE_TIMEOUT_MS}) is the budget for ` +
+      "EACH batch, not for the whole script, so a long script is not penalised for being long. " +
+      "Raise it for a script with a heavy index rebuild or data migration in it.",
     inputSchema: inputShape,
     outputSchema: outputShape,
     annotations: {

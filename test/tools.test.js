@@ -143,6 +143,34 @@ test("execute_read_query and execute_write_query take a bounded per-call timeout
   }
 });
 
+test("execute_sql_file has its own per-batch timeoutMs, defaulted well above 30 s", () => {
+  const {
+    MIN_TIMEOUT_MS,
+    MAX_TIMEOUT_MS,
+    SQL_FILE_TIMEOUT_MS,
+  } = require("../src/validation");
+  const { config } = require("../src/tools/execute-sql-file");
+  const shape = config.inputSchema.timeoutMs;
+  assert.ok(shape, "execute_sql_file must accept timeoutMs");
+  // Omitirlo NO cae en el requestTimeout de 30 s del pool: un despliegue se pasa de
+  // ahi en el CREATE INDEX y se lleva por delante toda la transaccion.
+  assert.equal(shape.parse(undefined), SQL_FILE_TIMEOUT_MS);
+  assert.ok(
+    SQL_FILE_TIMEOUT_MS > 30000,
+    "el defecto tiene que superar el requestTimeout del pool"
+  );
+  assert.equal(shape.safeParse(MIN_TIMEOUT_MS).success, true);
+  assert.equal(shape.safeParse(MAX_TIMEOUT_MS).success, true);
+  assert.equal(shape.safeParse(MIN_TIMEOUT_MS - 1).success, false);
+  assert.equal(shape.safeParse(MAX_TIMEOUT_MS + 1).success, false);
+  assert.equal(shape.safeParse(0).success, false);
+  assert.equal(shape.safeParse(1500.5).success, false, "milisegundos enteros");
+  assert.match(config.description, /timeoutMs/);
+  // Que es POR BATCH y no por script es justo lo que evita que alguien lo suba a
+  // ciegas creyendo que un script de 200 batches necesita 200 veces mas.
+  assert.match(config.description, /EACH batch/);
+});
+
 test("execute_write_query is transactional by default and documents the opt-out", () => {
   const { config } = require("../src/tools/execute-write-query");
   assert.equal(config.inputSchema.transactional.parse(undefined), true);

@@ -102789,6 +102789,12 @@ var require_validation2 = __commonJS({
         `Per-call request timeout in milliseconds (${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS}). Omit to use the server-wide default of 30000. Raise it for a statement that is legitimately slow (a cascading DELETE, a large index rebuild) rather than letting it be cancelled halfway.`
       )
     };
+    var SQL_FILE_TIMEOUT_MS = 9e4;
+    var sqlFileTimeoutMsShape = {
+      timeoutMs: z.number().int().min(MIN_TIMEOUT_MS).max(MAX_TIMEOUT_MS).default(SQL_FILE_TIMEOUT_MS).describe(
+        `Per-batch request timeout in milliseconds (${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS}). Default ${SQL_FILE_TIMEOUT_MS}. It applies to EACH batch, not to the script as a whole, so a long script is not penalised for being long - only a single slow batch is. Raise it for a script with a heavy index rebuild or data migration.`
+      )
+    };
     var paginationShape = {
       limit: z.number().int().positive().max(MAX_LIMIT).default(DEFAULT_LIMIT).describe(`Max rows to return (1..${MAX_LIMIT}).`),
       offset: z.number().int().nonnegative().default(0).describe("Row offset for pagination.")
@@ -102808,6 +102814,7 @@ var require_validation2 = __commonJS({
       dbKeyShape,
       paginationShape,
       timeoutMsShape,
+      sqlFileTimeoutMsShape,
       queryString,
       sqlFilePath,
       resourceUri,
@@ -102815,6 +102822,7 @@ var require_validation2 = __commonJS({
       DEFAULT_LIMIT,
       MIN_TIMEOUT_MS,
       MAX_TIMEOUT_MS,
+      SQL_FILE_TIMEOUT_MS,
       MAX_QUERY_LEN,
       MAX_SQL_FILE_BYTES,
       MAX_BATCHES,
@@ -103105,7 +103113,11 @@ var require_execute_sql_file = __commonJS({
     var { loadDriver } = require_driver();
     var { getConfig } = require_config();
     var { getPool } = require_pools();
-    var { attachAbort, writesEnabled } = require_safety();
+    var {
+      applyRequestTimeout,
+      attachAbort,
+      writesEnabled
+    } = require_safety();
     var {
       decodeSqlBuffer,
       splitBatches,
@@ -103115,10 +103127,14 @@ var require_execute_sql_file = __commonJS({
     var { resolveSqlFile, readSqlFile } = require_files();
     var {
       dbKeyShape,
+      sqlFileTimeoutMsShape,
       sqlFilePath,
       MAX_LIMIT,
       MAX_BATCHES,
-      MAX_BATCH_REPEAT
+      MAX_BATCH_REPEAT,
+      MIN_TIMEOUT_MS,
+      MAX_TIMEOUT_MS,
+      SQL_FILE_TIMEOUT_MS
     } = require_validation2();
     var MAX_MESSAGES = 100;
     var RESTORE_SESSION_DEFAULTS = [
@@ -103141,7 +103157,8 @@ var require_execute_sql_file = __commonJS({
       ),
       maxRowsPerBatch: z.number().int().min(0).max(MAX_LIMIT).default(0).describe(
         `Rows to return from each batch's first recordset (0..${MAX_LIMIT}). Default 0: only row counts, which is what a deployment script needs.`
-      )
+      ),
+      ...sqlFileTimeoutMsShape
     };
     var batchShape = z.object({
       index: z.number().int().nonnegative(),
@@ -103227,7 +103244,13 @@ var require_execute_sql_file = __commonJS({
         structuredContent: structured
       };
     }
-    async function handler({ path: filePath, dbKey, dryRun = false, maxRowsPerBatch = 0 }, extra) {
+    async function handler({
+      path: filePath,
+      dbKey,
+      dryRun = false,
+      maxRowsPerBatch = 0,
+      timeoutMs = SQL_FILE_TIMEOUT_MS
+    }, extra) {
       const sqlLib = loadDriver();
       if (!dryRun && !writesEnabled(process.env, dbKey)) {
         throw new Error(
@@ -103295,7 +103318,10 @@ var require_execute_sql_file = __commonJS({
           let last = null;
           for (let run = 0; run < batch.repeat; run++) {
             if (signal?.aborted) throw new Error("Request aborted");
-            const request = new sqlLib.Request(transaction);
+            const request = applyRequestTimeout(
+              new sqlLib.Request(transaction),
+              timeoutMs
+            );
             attachAbort(request, signal);
             request.on("info", (info) => {
               if (messages.length < MAX_MESSAGES) {
@@ -103310,7 +103336,10 @@ var require_execute_sql_file = __commonJS({
           }
           results.push(summarizeBatch(batch, last, maxRowsPerBatch));
         }
-        await new sqlLib.Request(transaction).batch(RESTORE_SESSION_DEFAULTS);
+        await applyRequestTimeout(
+          new sqlLib.Request(transaction),
+          timeoutMs
+        ).batch(RESTORE_SESSION_DEFAULTS);
         await transaction.commit();
       } catch (err) {
         if (!serverRolledBack) {
@@ -103335,7 +103364,7 @@ var require_execute_sql_file = __commonJS({
       name: "execute_sql_file",
       config: {
         title: "Execute SQL File",
-        description: "Execute a .sql file from disk against a configured database - the equivalent of `sqlcmd -i file.sql`. Use this instead of retyping a script into `execute_write_query`: there is no 10k character limit and `GO` separators are handled, so SSMS-style CREATE PROCEDURE scripts work as-is. The file must live inside the project folder or a folder passed to --allow-sql-dir. DISABLED unless MSSQL_ENABLE_WRITES=true (all databases) or MSSQL_<DBKEY>_ENABLE_WRITES=true (just that `dbKey`), except for `dryRun:true`, which parses the file and lists the batches without executing anything. All batches run in ONE transaction on ONE connection: the deployment is all-or-nothing, and on failure the error names the failing line of the file. Statements that cannot run inside a transaction (CREATE/ALTER DATABASE, BACKUP, CREATE FULLTEXT INDEX) are therefore not supported, and a leading `USE` is rejected - select the database with `dbKey`.",
+        description: `Execute a .sql file from disk against a configured database - the equivalent of \`sqlcmd -i file.sql\`. Use this instead of retyping a script into \`execute_write_query\`: there is no 10k character limit and \`GO\` separators are handled, so SSMS-style CREATE PROCEDURE scripts work as-is. The file must live inside the project folder or a folder passed to --allow-sql-dir. DISABLED unless MSSQL_ENABLE_WRITES=true (all databases) or MSSQL_<DBKEY>_ENABLE_WRITES=true (just that \`dbKey\`), except for \`dryRun:true\`, which parses the file and lists the batches without executing anything. All batches run in ONE transaction on ONE connection: the deployment is all-or-nothing, and on failure the error names the failing line of the file. Statements that cannot run inside a transaction (CREATE/ALTER DATABASE, BACKUP, CREATE FULLTEXT INDEX) are therefore not supported, and a leading \`USE\` is rejected - select the database with \`dbKey\`. \`timeoutMs\` (${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS}, default ${SQL_FILE_TIMEOUT_MS}) is the budget for EACH batch, not for the whole script, so a long script is not penalised for being long. Raise it for a script with a heavy index rebuild or data migration in it.`,
         inputSchema: inputShape,
         outputSchema: outputShape,
         annotations: {

@@ -498,11 +498,14 @@ src/
   statement failed, how many there were, and whether anything persisted. `transactional: false` is the
   opt-out for statements SQL Server refuses to run inside a transaction; it gives up atomicity, and
   the error then lists exactly which statements were already committed.
-- **Per-call request timeout** — `timeoutMs` (1000..600000) on `execute_read_query` and
-  `execute_write_query` is stamped onto the tedious request's own `timeout`, which
-  `Connection#createRequestTimer` reads in preference to the pool-wide `requestTimeout`. mssql never
-  sets it, so the hook is `Request#_setCurrentRequest`, called after the tedious request is built and
-  before it is sent.
+- **Per-call request timeout** — `timeoutMs` (1000..600000) on `execute_read_query`,
+  `execute_write_query` and `execute_sql_file` is stamped onto the tedious request's own `timeout`,
+  which `Connection#createRequestTimer` reads in preference to the pool-wide `requestTimeout`. mssql
+  never sets it, so the hook is `Request#_setCurrentRequest`, called after the tedious request is
+  built and before it is sent. On the first two, omitting it falls back to the pool-wide 30 s.
+  `execute_sql_file` instead defaults to **90000 ms, applied per BATCH**: the whole script is one
+  transaction, so a batch that overruns costs the entire deployment, and the batch that overruns is
+  the `CREATE INDEX` or data `MERGE` rather than the `CREATE PROCEDURE`.
 - **Least privilege** — the safest setup is a SQL login with only `SELECT` (and `EXECUTE` if
   needed) on the relevant schemas. The MCP layer reinforces that, it doesn't replace it.
 

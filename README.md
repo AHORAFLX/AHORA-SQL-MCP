@@ -782,10 +782,18 @@ Lo que hay ahora, por orden de lo que aporta:
 
 Y el timeout, que era la otra mitad del problema: `requestTimeout` (30 s por defecto) es de **pool**,
 y no había forma de subirlo para una llamada. Un `DELETE` legítimo sobre una tabla concentradora con
-41 FK `ON DELETE CASCADE` no cabe en 30 s y, tal como estaba, no se podía ejecutar. `execute_read_query`
-y `execute_write_query` aceptan ahora **`timeoutMs` por llamada** (1.000–600.000 ms), que se aplica
-donde tedious lo lee de verdad (`request.timeout` del request de tedious, que mssql nunca llegaba a
-poner).
+41 FK `ON DELETE CASCADE` no cabe en 30 s y, tal como estaba, no se podía ejecutar. `execute_read_query`,
+`execute_write_query` y `execute_sql_file` aceptan ahora **`timeoutMs` por llamada** (1.000–600.000 ms),
+que se aplica donde tedious lo lee de verdad (`request.timeout` del request de tedious, que mssql nunca
+llegaba a poner).
+
+**`execute_sql_file` no hereda los 30 s: su defecto son 90.000 ms.** Ese presupuesto es **por batch**,
+no por script, así que un despliegue largo no se penaliza por ser largo. El batch que se pasaba de 30 s
+nunca era el `CREATE PROCEDURE` —eso son milisegundos— sino el `CREATE INDEX` o el `MERGE` de datos que
+va detrás, que caen justo en la franja de 30-70 s; y como el script entero va en una sola transacción,
+quedarse corto ahí no costaba una sentencia, costaba el despliegue completo con su rollback. Los otros
+dos siguen en los 30 s del pool: ahí el límite es el freno que interesa conservar para un `SELECT`
+desbocado, y quien necesite más lo pide con `timeoutMs`.
 
 ---
 

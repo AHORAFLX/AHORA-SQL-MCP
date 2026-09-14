@@ -57,6 +57,31 @@ const timeoutMsShape = {
     ),
 };
 
+// Default for `execute_sql_file`, which does NOT inherit the 30 s above.
+//
+// That 30 s is a per-BATCH budget, and a deployment script is a pile of batches: the
+// one that runs out is never the CREATE PROCEDURE (milliseconds) but the CREATE INDEX
+// or the data MERGE behind it, which land squarely in the 30-70 s band. The script
+// then dies halfway and the whole transaction rolls back, so the cost of being too
+// tight here is the entire deployment, not one slow statement. 90 s clears that band
+// with room to spare and is still far below what an MCP client waits for a tool call.
+const SQL_FILE_TIMEOUT_MS = 90000;
+
+const sqlFileTimeoutMsShape = {
+  timeoutMs: z
+    .number()
+    .int()
+    .min(MIN_TIMEOUT_MS)
+    .max(MAX_TIMEOUT_MS)
+    .default(SQL_FILE_TIMEOUT_MS)
+    .describe(
+      `Per-batch request timeout in milliseconds (${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS}). ` +
+        `Default ${SQL_FILE_TIMEOUT_MS}. It applies to EACH batch, not to the script as a ` +
+        "whole, so a long script is not penalised for being long - only a single slow " +
+        "batch is. Raise it for a script with a heavy index rebuild or data migration."
+    ),
+};
+
 const paginationShape = {
   limit: z
     .number()
@@ -98,6 +123,7 @@ module.exports = {
   dbKeyShape,
   paginationShape,
   timeoutMsShape,
+  sqlFileTimeoutMsShape,
   queryString,
   sqlFilePath,
   resourceUri,
@@ -105,6 +131,7 @@ module.exports = {
   DEFAULT_LIMIT,
   MIN_TIMEOUT_MS,
   MAX_TIMEOUT_MS,
+  SQL_FILE_TIMEOUT_MS,
   MAX_QUERY_LEN,
   MAX_SQL_FILE_BYTES,
   MAX_BATCHES,
