@@ -1173,6 +1173,21 @@ ${USAGE2}`);
         }
         process.exit(code ?? 1);
       });
+      const stopChild = () => {
+        if (child.exitCode === null && child.signalCode === null) {
+          try {
+            child.kill();
+          } catch {
+          }
+        }
+      };
+      process.on("exit", stopChild);
+      for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+        process.on(sig, () => {
+          stopChild();
+          process.exit(0);
+        });
+      }
     }
     if (require.main === module2) main2();
     module2.exports = {

@@ -1086,6 +1086,27 @@ function main() {
     }
     process.exit(code ?? 1);
   });
+  // El hijo no puede sobrevivir al wrapper. Si el cliente mata este proceso, o le llega
+  // una senal, el servidor de al lado se quedaba corriendo con sus conexiones abiertas:
+  // en Windows no hay grupo de procesos que arrastre al hijo. `exit` cubre la salida
+  // normal y las senales que Node convierte en salida; el servidor cubre por su parte el
+  // caso de un TerminateProcess directo, cerrandose cuando se le acaba stdin.
+  const stopChild = () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      try {
+        child.kill();
+      } catch {
+        // ya estaba muerto
+      }
+    }
+  };
+  process.on("exit", stopChild);
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.on(sig, () => {
+      stopChild();
+      process.exit(0);
+    });
+  }
 }
 
 if (require.main === module) main();

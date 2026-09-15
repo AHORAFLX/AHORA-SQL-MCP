@@ -1,6 +1,24 @@
 const { z } = require("zod");
 const { revealAll, isProtected } = require("./secrets");
 
+/**
+ * Cuanto vive una conexion libre en el pool antes de cerrarse.
+ *
+ * Eran 30 s, el valor por defecto de mssql, y en un MCP es el peor valor posible: entre
+ * dos llamadas del modelo pasan casi siempre mas de 30 s pensando, asi que cada tool
+ * encontraba el pool vacio y pagaba un connect entero -TCP, TLS y login- para una
+ * consulta de milisegundos. Con `min: 0` el pool no repone nada por su cuenta, de modo
+ * que el coste se repetia en practicamente todas las llamadas de una sesion.
+ *
+ * Subirlo no arriesga nada que no este ya cubierto: una conexion que muere mientras
+ * espera -reinicio del servicio SQL, portatil suspendido- la rechaza el `validate` al
+ * cogerla (db/connections.js) y tarn crea otra; y tedious lleva keep-alive TCP, con lo
+ * que un socket a medio cerrar acaba marcado como cerrado sin esperar al reset. Cinco
+ * minutos cubre con holgura una sesion de trabajo con pausas y sigue soltando las
+ * conexiones cuando de verdad se deja de usar el MCP.
+ */
+const POOL_IDLE_TIMEOUT_MS = 300000;
+
 const dbConnectionSchema = z.object({
   server: z.string().min(1),
   port: z.number().int().positive().optional(),
@@ -20,9 +38,13 @@ const dbConnectionSchema = z.object({
     .object({
       max: z.number().int().positive().default(10),
       min: z.number().int().nonnegative().default(0),
-      idleTimeoutMillis: z.number().int().nonnegative().default(30000),
+      idleTimeoutMillis: z
+        .number()
+        .int()
+        .nonnegative()
+        .default(POOL_IDLE_TIMEOUT_MS),
     })
-    .default({ max: 10, min: 0, idleTimeoutMillis: 30000 }),
+    .default({ max: 10, min: 0, idleTimeoutMillis: POOL_IDLE_TIMEOUT_MS }),
 });
 
 function buildConfig({
@@ -179,6 +201,7 @@ function _resetForTests() {
 }
 
 module.exports = {
+  POOL_IDLE_TIMEOUT_MS,
   loadConfigsFromEnv,
   getConfigs,
   getConfig,

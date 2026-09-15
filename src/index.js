@@ -9,6 +9,16 @@ const {
 const { createServer } = require("./server");
 const { closeAllPools } = require("./db/pools");
 
+/**
+ * Cuanto se espera, como maximo, a que los pools se cierren al apagar.
+ *
+ * El apagado no puede depender de que el servidor SQL conteste: si una conexion esta
+ * colgada, `pool.close()` no vuelve, y un proceso que no muere es justo lo que se esta
+ * intentando evitar aqui. Vencido el plazo se sale igual; el servidor deshace por su
+ * cuenta cualquier transaccion de una sesion que se corta.
+ */
+const SHUTDOWN_TIMEOUT_MS = 5000;
+
 async function main() {
   const server = createServer();
   const transport = new StdioServerTransport();
@@ -17,16 +27,25 @@ async function main() {
   const shutdown = async (code = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    // Red de seguridad: pase lo que pase con el cierre ordenado, el proceso termina.
+    setTimeout(() => process.exit(code), SHUTDOWN_TIMEOUT_MS).unref();
     try {
       await server.close();
     } catch {
       // ignore
     }
-    await closeAllPools();
+    await closeAllPools().catch(() => {});
     process.exit(code);
   };
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
+  // El fin de stdin ES la senal de que el cliente se ha ido, y en Windows la unica: ni
+  // SIGINT ni SIGTERM llegan a un proceso que no es consola. El transporte stdio del SDK
+  // no escucha `end`, y tras la primera consulta el pool deja un `setInterval` (el
+  // reaper de tarn) que mantiene vivo el bucle de eventos indefinidamente. Sin esto, cada
+  // reinicio del cliente dejaba un node.exe huerfano con sus sesiones SQL abiertas.
+  process.stdin.on("end", () => shutdown(0));
+  process.stdin.on("close", () => shutdown(0));
   installCrashGuards();
 
   try {

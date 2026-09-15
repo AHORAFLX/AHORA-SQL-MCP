@@ -1207,6 +1207,21 @@ ${USAGE}`);
         }
         process.exit(code ?? 1);
       });
+      const stopChild = () => {
+        if (child.exitCode === null && child.signalCode === null) {
+          try {
+            child.kill();
+          } catch {
+          }
+        }
+      };
+      process.on("exit", stopChild);
+      for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+        process.on(sig, () => {
+          stopChild();
+          process.exit(0);
+        });
+      }
     }
     if (require.main === module2) main();
     module2.exports = {
@@ -74377,6 +74392,7 @@ var require_config = __commonJS({
   "src/config.js"(exports2, module2) {
     var { z } = require_zod();
     var { revealAll, isProtected } = require_secrets();
+    var POOL_IDLE_TIMEOUT_MS = 3e5;
     var dbConnectionSchema = z.object({
       server: z.string().min(1),
       port: z.number().int().positive().optional(),
@@ -74395,8 +74411,8 @@ var require_config = __commonJS({
       pool: z.object({
         max: z.number().int().positive().default(10),
         min: z.number().int().nonnegative().default(0),
-        idleTimeoutMillis: z.number().int().nonnegative().default(3e4)
-      }).default({ max: 10, min: 0, idleTimeoutMillis: 3e4 })
+        idleTimeoutMillis: z.number().int().nonnegative().default(POOL_IDLE_TIMEOUT_MS)
+      }).default({ max: 10, min: 0, idleTimeoutMillis: POOL_IDLE_TIMEOUT_MS })
     });
     function buildConfig({
       server,
@@ -74518,6 +74534,7 @@ var require_config = __commonJS({
       cached = void 0;
     }
     module2.exports = {
+      POOL_IDLE_TIMEOUT_MS,
       loadConfigsFromEnv,
       getConfigs,
       getConfig,

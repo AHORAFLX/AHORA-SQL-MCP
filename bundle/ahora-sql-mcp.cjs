@@ -32412,6 +32412,7 @@ var require_config = __commonJS({
   "src/config.js"(exports2, module2) {
     var { z } = require_zod();
     var { revealAll, isProtected } = require_secrets();
+    var POOL_IDLE_TIMEOUT_MS = 3e5;
     var dbConnectionSchema = z.object({
       server: z.string().min(1),
       port: z.number().int().positive().optional(),
@@ -32430,8 +32431,8 @@ var require_config = __commonJS({
       pool: z.object({
         max: z.number().int().positive().default(10),
         min: z.number().int().nonnegative().default(0),
-        idleTimeoutMillis: z.number().int().nonnegative().default(3e4)
-      }).default({ max: 10, min: 0, idleTimeoutMillis: 3e4 })
+        idleTimeoutMillis: z.number().int().nonnegative().default(POOL_IDLE_TIMEOUT_MS)
+      }).default({ max: 10, min: 0, idleTimeoutMillis: POOL_IDLE_TIMEOUT_MS })
     });
     function buildConfig({
       server,
@@ -32553,6 +32554,7 @@ var require_config = __commonJS({
       cached = void 0;
     }
     module2.exports = {
+      POOL_IDLE_TIMEOUT_MS,
       loadConfigsFromEnv,
       getConfigs,
       getConfig,
@@ -103123,7 +103125,9 @@ var require_execute_sql_file = __commonJS({
     var {
       applyRequestTimeout,
       attachAbort,
-      writesEnabled
+      writesEnabled,
+      rollbackAndCheck,
+      abandonedTransactionError
     } = require_safety();
     var {
       decodeSqlBuffer,
@@ -103238,12 +103242,13 @@ var require_execute_sql_file = __commonJS({
       if (Array.isArray(err.precedingErrors) && err.precedingErrors.length > 0) {
         parts.push(`(${err.precedingErrors.length} preceding error(s) suppressed.)`);
       }
-      parts.push(
-        "The whole script runs in a single transaction, which was rolled back - nothing was applied."
-      );
       const wrapped = new Error(parts.join(" "));
       wrapped.cause = err;
       return wrapped;
+    }
+    function rolledBackError(err) {
+      err.message += " The whole script runs in a single transaction, which was rolled back - nothing was applied.";
+      return err;
     }
     function respond(structured) {
       return {
@@ -103320,6 +103325,8 @@ var require_execute_sql_file = __commonJS({
       await transaction.begin(sqlLib.ISOLATION_LEVEL.READ_COMMITTED);
       const messages = [];
       const results = [];
+      let aborted = false;
+      let failure = null;
       try {
         for (const batch of batches) {
           let last = null;
@@ -103329,7 +103336,7 @@ var require_execute_sql_file = __commonJS({
               new sqlLib.Request(transaction),
               timeoutMs
             );
-            attachAbort(request, signal);
+            const abort = attachAbort(request, signal);
             request.on("info", (info) => {
               if (messages.length < MAX_MESSAGES) {
                 messages.push(String(info?.message ?? info));
@@ -103338,7 +103345,10 @@ var require_execute_sql_file = __commonJS({
             try {
               last = await request.batch(batch.sql);
             } catch (err) {
+              aborted = abort.aborted;
               throw toFileError(err, batch, realPath, run);
+            } finally {
+              abort.detach();
             }
           }
           results.push(summarizeBatch(batch, last, maxRowsPerBatch));
@@ -103349,13 +103359,12 @@ var require_execute_sql_file = __commonJS({
         ).batch(RESTORE_SESSION_DEFAULTS);
         await transaction.commit();
       } catch (err) {
-        if (!serverRolledBack) {
-          try {
-            await transaction.rollback();
-          } catch {
-          }
-        }
-        throw err;
+        failure = err;
+      }
+      if (failure) {
+        const cleanup = serverRolledBack ? { ok: true, serverRolledBack: true } : await rollbackAndCheck(pool, transaction, { aborted, mssql: sqlLib });
+        if (!cleanup.ok) throw abandonedTransactionError(cleanup, failure);
+        throw rolledBackError(failure);
       }
       const executed = results.filter((r) => !r.skipped).length;
       return respond({
@@ -104432,6 +104441,7 @@ var {
 } = require_stdio2();
 var { createServer } = require_server3();
 var { closeAllPools } = require_pools();
+var SHUTDOWN_TIMEOUT_MS = 5e3;
 async function main() {
   const server = createServer();
   const transport = new StdioServerTransport();
@@ -104439,15 +104449,19 @@ async function main() {
   const shutdown = async (code = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    setTimeout(() => process.exit(code), SHUTDOWN_TIMEOUT_MS).unref();
     try {
       await server.close();
     } catch {
     }
-    await closeAllPools();
+    await closeAllPools().catch(() => {
+    });
     process.exit(code);
   };
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
+  process.stdin.on("end", () => shutdown(0));
+  process.stdin.on("close", () => shutdown(0));
   installCrashGuards();
   try {
     await server.connect(transport);

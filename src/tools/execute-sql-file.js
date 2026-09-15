@@ -8,6 +8,8 @@ const {
   applyRequestTimeout,
   attachAbort,
   writesEnabled,
+  rollbackAndCheck,
+  abandonedTransactionError,
 } = require("../db/safety");
 const {
   decodeSqlBuffer,
@@ -157,12 +159,27 @@ function toFileError(err, batch, file, run) {
   if (Array.isArray(err.precedingErrors) && err.precedingErrors.length > 0) {
     parts.push(`(${err.precedingErrors.length} preceding error(s) suppressed.)`);
   }
-  parts.push(
-    "The whole script runs in a single transaction, which was rolled back - nothing was applied."
-  );
+  // Deliberately silent about the rollback: whether it happened is only known once the
+  // cleanup has run, and the caller appends the verdict then (see `rolledBackError`).
   const wrapped = new Error(parts.join(" "));
   wrapped.cause = err;
   return wrapped;
+}
+
+/**
+ * The failure the caller sees once the transaction is KNOWN to be gone.
+ *
+ * Stated after the cleanup, not before it. The old message claimed "which was rolled
+ * back - nothing was applied" unconditionally, and that was a guess: a batch timeout or
+ * a client cancel leaves the request in flight, tedious serialises requests per
+ * connection, so the ROLLBACK could not even be sent and the claim was false. Now the
+ * sentence is only added on the path where the rollback (ours or the server's) has
+ * actually completed; the other path raises `abandonedTransactionError` instead.
+ */
+function rolledBackError(err) {
+  err.message +=
+    " The whole script runs in a single transaction, which was rolled back - nothing was applied.";
+  return err;
 }
 
 function respond(structured) {
@@ -268,6 +285,11 @@ async function handler(
 
   const messages = [];
   const results = [];
+  // Whether a cancel was fired at the request that failed. The cleanup needs it: a
+  // cancelled request is still in flight until the server acknowledges the ATTENTION,
+  // and the ROLLBACK has to wait for that before it can even be sent.
+  let aborted = false;
+  let failure = null;
   try {
     for (const batch of batches) {
       let last = null;
@@ -281,7 +303,7 @@ async function handler(
           new sqlLib.Request(transaction),
           timeoutMs
         );
-        attachAbort(request, signal);
+        const abort = attachAbort(request, signal);
         request.on("info", (info) => {
           if (messages.length < MAX_MESSAGES) {
             messages.push(String(info?.message ?? info));
@@ -290,7 +312,10 @@ async function handler(
         try {
           last = await request.batch(batch.sql);
         } catch (err) {
+          aborted = abort.aborted;
           throw toFileError(err, batch, realPath, run);
+        } finally {
+          abort.detach();
         }
       }
       results.push(summarizeBatch(batch, last, maxRowsPerBatch));
@@ -302,14 +327,22 @@ async function handler(
     ).batch(RESTORE_SESSION_DEFAULTS);
     await transaction.commit();
   } catch (err) {
-    if (!serverRolledBack) {
-      try {
-        await transaction.rollback();
-      } catch {
-        // ignore - the server may have already closed the transaction
-      }
-    }
-    throw err;
+    failure = err;
+  }
+
+  if (failure) {
+    // The same wait-then-rollback-then-check as every read and write, instead of the
+    // old `rollback()` inside an empty catch. That catch was exactly the bug the pool
+    // hygiene fixed elsewhere: the request was still in flight after a batch timeout or
+    // a client cancel, the ROLLBACK failed with EREQINPROG, and the connection went back
+    // to the pool with the deployment's transaction - and its schema locks, which DO
+    // block other sessions - still open. Now that connection is either proven clean or
+    // destroyed, and the caller is told which.
+    const cleanup = serverRolledBack
+      ? { ok: true, serverRolledBack: true }
+      : await rollbackAndCheck(pool, transaction, { aborted, mssql: sqlLib });
+    if (!cleanup.ok) throw abandonedTransactionError(cleanup, failure);
+    throw rolledBackError(failure);
   }
 
   const executed = results.filter((r) => !r.skipped).length;
