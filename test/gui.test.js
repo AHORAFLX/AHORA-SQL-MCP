@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 const gui = require("../installer/gui");
+const { samePath } = require("../installer/existing");
 const { isProtected, reveal } = require("../src/secrets");
 
 const HOST = "PC_158\\SQL2022";
@@ -827,4 +828,170 @@ test("write sin la casilla del navegador no toca un playwright puesto a mano", a
     const despues = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8"));
     assert.deepEqual(despues.mcpServers.playwright, aMano);
   });
+});
+
+// ── Precarga de lo que ya estaba configurado ─────────────────────────────────
+// El instalador se lanza mas veces para CAMBIAR algo (otra base de datos, otro
+// entorno) que para configurar de cero. Sin esto, las dos cosas cuestan lo mismo:
+// repetir todas las respuestas y volver a marcar todas las casillas.
+
+test("detect devuelve la configuracion que ya tenia el proyecto", async () => {
+  const root = coreProject();
+  await withGui(async ({ call, origin }) => {
+    // Primera pasada: se configura como se configuraria de verdad.
+    const det = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+    assert.equal(det.existing.found, false, "un proyecto nuevo no precarga nada");
+
+    const core = det.files.find((f) => f.type === "core");
+    await call("/api/write", {
+      origin,
+      body: {
+        projectDir: root,
+        configFile: core.path,
+        environment: "Development",
+        connections: [
+          { name: "ConfConnectionString", alias: "config" },
+          { name: "DataConnectionString", alias: "data" },
+        ],
+        profileKey: "local",
+        allowWrites: true,
+        sqlDirs: [],
+        clients: ["claude"],
+      },
+    });
+
+    // Segunda pasada: el formulario ya sabe lo que hay.
+    const otra = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+    assert.equal(otra.existing.found, true);
+    assert.deepEqual(otra.existing.clients, ["claude"]);
+    assert.equal(otra.existing.environment, "Development");
+    assert.equal(otra.existing.allowWrites, true);
+    assert.equal(otra.existing.profileKey, "local");
+    assert.deepEqual(
+      otra.existing.connections.map((c) => c.alias),
+      ["config", "data"]
+    );
+    // Y la fuente casa con una de las opciones de la lista, que es lo que permite
+    // dejarla marcada en vez de hacer elegirla otra vez. Se compara con samePath
+    // porque el .mcp.json guarda la ruta con barras normales y el buscador de
+    // ficheros la devuelve con las invertidas de Windows.
+    assert.ok(otra.files.some((f) => samePath(f.path, otra.existing.configFile)));
+  });
+});
+
+test("detect no devuelve ninguna contrasena, ni cifrada", async () => {
+  const root = coreProject();
+  await withGui(async ({ call, origin }) => {
+    const w = await call("/api/write", {
+      origin,
+      body: {
+        projectDir: root,
+        configFile: null,
+        manualConnections: [
+          { server: HOST, database: "BD", user: "sa", password: "contrasena-secreta" },
+        ],
+        profileKey: "local",
+        clients: ["claude"],
+      },
+    });
+    const det = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+
+    assert.equal(det.existing.found, true);
+    assert.equal(det.existing.credentials.length, 1);
+    assert.equal(det.existing.credentials[0].database, "BD");
+    assert.equal(det.existing.credentials[0].hasPassword, true);
+    const crudo = JSON.stringify(det);
+    assert.ok(!crudo.includes("contrasena-secreta"), "la contrasena no puede viajar al navegador");
+    assert.ok(!crudo.includes("passwordEnc"), "tampoco el token cifrado");
+    fs.rmSync(w.json.credentialsFile, { force: true });
+  });
+});
+
+test("cambiar de base de datos conserva la contrasena que no se ha reescrito", async () => {
+  // El caso que motiva todo esto: el mismo servidor y el mismo usuario, otra base
+  // de datos, sin tener que acordarse de la contrasena del SQL del cliente.
+  const root = coreProject();
+  await withGui(async ({ call, origin }) => {
+    const primera = await call("/api/write", {
+      origin,
+      body: {
+        projectDir: root,
+        configFile: null,
+        manualConnections: [
+          { server: HOST, database: "BD_VIEJA", user: "sa", password: "contrasena-secreta" },
+        ],
+        profileKey: "local",
+        clients: ["claude"],
+      },
+    });
+    assert.equal(primera.status, 200);
+
+    // Segunda escritura SIN contrasena: es lo que manda el formulario cuando el
+    // hueco se deja vacio.
+    const segunda = await call("/api/write", {
+      origin,
+      body: {
+        projectDir: root,
+        configFile: null,
+        manualConnections: [{ server: HOST, database: "BD_NUEVA", user: "sa", password: "" }],
+        profileKey: "local",
+        clients: ["claude"],
+      },
+    });
+    assert.equal(segunda.status, 200);
+
+    const creds = JSON.parse(fs.readFileSync(segunda.json.credentialsFile, "utf8"));
+    assert.equal(creds.database, "BD_NUEVA");
+    assert.ok(isProtected(creds.passwordEnc));
+    assert.equal(reveal(creds.passwordEnc), "contrasena-secreta");
+    fs.rmSync(segunda.json.credentialsFile, { force: true });
+  });
+});
+
+test("detect avisa de los flags que el formulario no sabe editar", async () => {
+  // Guardar reemplaza la entrada entera: lo que no se sabe editar desaparece, y
+  // callarselo seria quitarle a alguien un ajuste que puso a mano.
+  const root = coreProject();
+  const doc = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8"));
+  doc.mcpServers["ahora-sql"] = {
+    command: "node",
+    args: [
+      "C:/x/bundle/start-mssql-mcp.cjs",
+      "--config-file",
+      "C:/p/Web.config",
+      "--allow-writes-for",
+      "data",
+    ],
+  };
+  fs.writeFileSync(path.join(root, ".mcp.json"), JSON.stringify(doc), "utf8");
+
+  await withGui(async ({ call, origin }) => {
+    const det = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+    assert.deepEqual(det.existing.unknown, ["--allow-writes-for", "data"]);
+  });
+});
+
+test("la pagina de un proyecto ya configurado se detecta sola al abrirse", () => {
+  const root = coreProject();
+  const doc = JSON.parse(fs.readFileSync(path.join(root, ".mcp.json"), "utf8"));
+  doc.mcpServers["ahora-sql"] = {
+    command: "node",
+    args: ["C:/x/bundle/start-mssql-mcp.cjs", "--config-file", "C:/p/Web.config"],
+  };
+  fs.writeFileSync(path.join(root, ".mcp.json"), JSON.stringify(doc), "utf8");
+
+  const conPrevio = gui.renderPage("t", root, { autoDetect: true });
+  assert.ok(conPrevio.includes('if (true) $("btnDetect").click();'));
+
+  const sinPrevio = gui.renderPage("t", root);
+  assert.ok(sinPrevio.includes('if (false) $("btnDetect").click();'));
+});
+
+test("el JS de la precarga tambien es sintacticamente valido", () => {
+  // Misma red que para el resto de la pagina: un error de sintaxis en el bloque de
+  // precarga dejaria el formulario entero sin JS, y solo se veria al abrirlo.
+  const html = gui.renderPage("t", "C:/p", { autoDetect: true });
+  const js = html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>"));
+  assert.doesNotThrow(() => new Function(js));
+  assert.ok(js.includes("function applyExisting"));
 });

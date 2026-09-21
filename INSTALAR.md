@@ -56,6 +56,23 @@ instalador.
 Si el servidor no responde te lo dice y te deja seguir marcando una casilla, porque puede ser la VPN
 o el SQL Browser parado y no una errata.
 
+### Cambiar de base de datos después, sin repetirlo todo
+
+**Si la carpeta ya tiene el MCP configurado, el instalador viene relleno con lo que hay.** Lee la
+entrada del `.mcp.json`, se detecta solo al abrirse y deja puesto todo: el fichero de configuración,
+las cadenas con sus alias, el entorno, si la escritura está permitida, los clientes y las casillas de
+producto, navegador y permisos. Cambias lo que quieras —normalmente la base de datos— y pulsas
+**Guardar cambios**. El asistente de terminal (`--cli`) hace lo mismo: cada pregunta trae ese valor
+entre corchetes, así que es ir dando a Intro y pararse solo en lo que cambia.
+
+Con las conexiones guardadas en `%APPDATA%` (carpetas sin `Web.config`), **la contraseña no hay que
+volver a escribirla**: deja el hueco vacío y se mantiene la que ya estaba. Se reutiliza cifrada, y
+solo se descifra para probar la conexión. Si quieres cambiarla, escríbela y sustituye a la anterior.
+
+Un aviso que verás si aplica: si la entrada actual lleva opciones que el formulario no edita (por
+ejemplo un `--allow-writes-for` o un `--port` que pusiste a mano), te las enseña antes de guardar,
+porque guardar **reemplaza la entrada entera** y se perderían.
+
 También ofrece **permitir de antemano las consultas de lectura**, para que el modo auto de Claude Code
 no te las deniegue en mitad de una demo con un mensaje que no menciona el MCP. Las **escrituras se
 quedan fuera** salvo que lo pidas expresamente: que te pregunte antes de escribir es el freno que

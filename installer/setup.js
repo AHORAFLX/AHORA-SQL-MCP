@@ -45,6 +45,7 @@ const {
   isOurPlaywrightEntry,
 } = require("./server-name");
 const { installRuntime } = require("./runtime");
+const { readExisting, revealStoredPassword, samePath } = require("./existing");
 const { toolVersion } = require("./tools");
 const {
   PRODUCT_PACKAGE,
@@ -226,10 +227,10 @@ async function askYesNo(rl, question, fallback = false) {
   return answer.startsWith("s");
 }
 
-async function pickFromList(rl, items, label) {
+async function pickFromList(rl, items, label, fallback = "1") {
   items.forEach((item, i) => say(`   ${i + 1}) ${item}`));
   while (true) {
-    const raw = await ask(rl, `${label} (numero)`, "1");
+    const raw = await ask(rl, `${label} (numero)`, String(fallback));
     const idx = Number.parseInt(raw, 10);
     if (Number.isInteger(idx) && idx >= 1 && idx <= items.length) return items[idx - 1];
     say("   Numero no valido.");
@@ -322,6 +323,36 @@ function suggestAliases(names) {
     taken.push(alias);
     return alias;
   });
+}
+
+/**
+ * Lo que ya hay configurado, en frases que se puedan leer de un vistazo.
+ *
+ * El asistente no puede ensenar el formulario relleno, asi que lo dice: de otra
+ * forma, la unica manera de saber contra que base de datos esta apuntando ahora el
+ * proyecto seria abrir el .mcp.json a mano.
+ */
+function describeExisting(previo) {
+  const lineas = [];
+  if (previo.credentialsFile) {
+    lineas.push(`Conexiones guardadas fuera del repositorio: ${previo.credentialsFile}`);
+    for (const c of previo.credentials) {
+      lineas.push(`  - ${c.alias || "maindb"}: ${c.database} en ${c.server} (usuario ${c.user})`);
+    }
+  } else if (previo.configFile) {
+    lineas.push(`Fichero de configuracion: ${previo.configFile}`);
+    if (previo.environment) lineas.push(`Entorno: ${previo.environment}`);
+    for (const c of previo.connections) {
+      lineas.push(`  - ${c.name}${c.alias ? ` (alias ${c.alias})` : ""}`);
+    }
+  }
+  lineas.push(`Entorno de trabajo: ${previo.production ? "PRODUCCION" : "local / pruebas"}`);
+  lineas.push(`Escritura: ${previo.allowWrites ? "permitida" : "no"}`);
+  for (const dir of previo.sqlDirs) lineas.push(`Carpeta .sql permitida: ${dir}`);
+  lineas.push(`Clientes: ${previo.clients.join(", ") || "ninguno"}`);
+  if (previo.product) lineas.push(`MCP de producto: si (${previo.product.db || previo.product.connectionName})`);
+  if (previo.playwright) lineas.push("MCP de navegador: si");
+  return lineas;
 }
 
 /** Lee un JSON existente sin reventar por un BOM ni por comentarios sueltos. */
@@ -773,6 +804,27 @@ async function main() {
       process.exit(1);
     }
 
+    // Lo que el proyecto ya tiene puesto. A partir de aqui es el valor por defecto
+    // de cada pregunta: reconfigurar pasa a ser ir dando a Intro y pararse solo en
+    // lo que se quiera cambiar, en vez de volver a teclearlo todo.
+    const previo = readExisting(root);
+    if (previo.found) {
+      say();
+      say("Este proyecto YA esta configurado. Ahora mismo tiene:");
+      for (const linea of describeExisting(previo)) say(`   ${linea}`);
+      say();
+      say("Cada pregunta viene con ese valor entre corchetes: Intro lo deja igual.");
+      if (previo.unknown.length > 0) {
+        // Guardar REEMPLAZA la entrada entera, asi que lo que este asistente no sabe
+        // editar desaparece. Callarselo seria quitarle a alguien un ajuste que puso
+        // a mano sin que se entere.
+        say();
+        say("   ⚠ La entrada actual lleva opciones que este asistente no edita:");
+        say(`     ${previo.unknown.join(" ")}`);
+        say("     Si sigues, se perderan y habra que volver a ponerlas en el .mcp.json.");
+      }
+    }
+
     // ── Fichero de configuracion ──
     title("2/5  Fichero de configuracion");
     say("Buscando Web.config / appsettings.json...");
@@ -785,7 +837,7 @@ async function main() {
       // que solo quiere mirar una base de datos no tiene Web.config ninguno.
       say("No he encontrado ninguno en esta carpeta.");
       const options = ["Indico la ruta de un Web.config o appsettings.json", MANUAL];
-      const chosen = await pickFromList(rl, options, "Que hago");
+      const chosen = await pickFromList(rl, options, "Que hago", previo.credentialsFile ? 2 : 1);
       if (chosen !== MANUAL) configFile = path.resolve(await ask(rl, "Ruta"));
     } else {
       say(`Encontrados ${candidates.length}:`);
@@ -794,7 +846,13 @@ async function main() {
         "otra ruta…",
         MANUAL,
       ];
-      const chosen = await pickFromList(rl, options, "Cual uso");
+      // El que ya estaba viene marcado: es el dato que mas cuesta volver a
+      // encontrar, y en un proyecto con varios Web.config elegir otro por descuido
+      // deja al agente mirando una base de datos que no es.
+      const yaEstaba = previo.credentialsFile
+        ? options.length
+        : candidates.findIndex((c) => samePath(c, previo.configFile)) + 1;
+      const chosen = await pickFromList(rl, options, "Cual uso", yaEstaba > 0 ? yaEstaba : 1);
       if (chosen === MANUAL) configFile = null;
       else if (chosen === "otra ruta…") configFile = path.resolve(await ask(rl, "Ruta"));
       else configFile = path.join(root, chosen);
@@ -833,6 +891,74 @@ async function main() {
       // errata al teclear, y sin conectar no se ve.
       say("Puedes meter varias: cada una sera una base de datos distinta para el");
       say("agente. Se piden de una en una y se prueban al momento.");
+
+      /** Prueba una conexion tecleada y decide si se puede seguir sin ella. */
+      const probarManual = async (conn, password) => {
+        say();
+        say("Probando la conexion de verdad...");
+        const result = await probeConnection({
+          datasource: conn.server,
+          initialcatalog: conn.database,
+          userid: conn.user,
+          password,
+        });
+        if (result.ok) {
+          say(`   ✓ conectado a ${result.target} / ${result.database}`);
+          if (result.version) say(`     ${result.version}`);
+          return;
+        }
+        say(`   ✗ no he podido conectar: ${result.error}`);
+        if (result.hint) say(`     ${result.hint}`);
+        say();
+        if (!(await askYesNo(rl, "¿Sigo de todas formas?", false))) {
+          say("✗ Nada escrito. Corrige los datos y vuelve a lanzarlo.");
+          process.exit(1);
+        }
+      };
+
+      // Con conexiones ya guardadas se parte de ellas. Cambiar de base de datos no
+      // deberia obligar a recordar el usuario y la contrasena del SQL de un cliente:
+      // dejar la contrasena en blanco significa "la de siempre", y el token cifrado
+      // se reutiliza sin abrirlo (solo se descifra para la prueba).
+      if (previo.credentials.length > 0) {
+        say();
+        say("Ya hay conexiones guardadas para este proyecto:");
+        for (const c of previo.credentials) {
+          say(`   - ${c.alias || "maindb"}: ${c.database} en ${c.server} (usuario ${c.user})`);
+        }
+        if (await askYesNo(rl, "¿Parto de esas y cambio solo lo que haga falta?", true)) {
+          for (const c of previo.credentials) {
+            say();
+            const server = await ask(
+              rl,
+              c.alias ? `Servidor de '${c.alias}'` : "Servidor",
+              c.port ? `${c.server},${c.port}` : c.server
+            );
+            const database = await ask(rl, "Base de datos", c.database);
+            const user = await ask(rl, "Usuario", c.user);
+            const password = await ask(
+              rl,
+              c.hasPassword ? "Contrasena (vacio = la que ya estaba)" : "Contrasena"
+            );
+            if (!server || !database || !user) {
+              say("✗ Faltan datos. Nada escrito.");
+              process.exit(1);
+            }
+            // En claro solo para probar; lo que se escribe sigue siendo el token
+            // cifrado que ya estaba, de eso se encarga writeCredentialsFile.
+            const enClaro = password || revealStoredPassword(root, c.alias);
+            if (!enClaro) {
+              say("✗ No hay ninguna contrasena guardada que reutilizar: escribela.");
+              process.exit(1);
+            }
+            const manual = { server, database, user, password };
+            if (c.alias) manual.alias = c.alias;
+            await probarManual(manual, enClaro);
+            manualConnections.push(manual);
+          }
+        }
+      }
+
       while (true) {
         const n = manualConnections.length;
         say();
@@ -853,27 +979,7 @@ async function main() {
           process.exit(1);
         }
         const manual = { server, database, user, password };
-
-        say();
-        say("Probando la conexion de verdad...");
-        const result = await probeConnection({
-          datasource: server,
-          initialcatalog: database,
-          userid: user,
-          password,
-        });
-        if (result.ok) {
-          say(`   ✓ conectado a ${result.target} / ${result.database}`);
-          if (result.version) say(`     ${result.version}`);
-        } else {
-          say(`   ✗ no he podido conectar: ${result.error}`);
-          if (result.hint) say(`     ${result.hint}`);
-          say();
-          if (!(await askYesNo(rl, "¿Sigo de todas formas?", false))) {
-            say("✗ Nada escrito. Corrige los datos y vuelve a lanzarlo.");
-            process.exit(1);
-          }
-        }
+        await probarManual(manual, password);
         manualConnections.push(manual);
       }
 
@@ -892,7 +998,7 @@ async function main() {
             const alias = await ask(
               rl,
               `   Alias de ${conn.database} (${conn.server})`,
-              suggested[i]
+              conn.alias || suggested[i]
             );
             const problem = aliasError(alias, taken);
             if (!problem) {
@@ -906,7 +1012,11 @@ async function main() {
       }
     } else {
       environment = isCore
-        ? await ask(rl, "Entorno de appsettings", resolveEnvironment(undefined))
+        ? await ask(
+            rl,
+            "Entorno de appsettings",
+            previo.environment || resolveEnvironment(undefined)
+          )
         : undefined;
 
       const names = listConnectionNames(resolved, { environment });
@@ -960,7 +1070,17 @@ async function main() {
         const flexygoIdx = ["conf", "dat"]
           .map((p) => names.findIndex((n) => new RegExp(`^${p}`, "i").test(n)) + 1)
           .filter((i) => i > 0);
-        const fallback = flexygoIdx.length === 2 ? flexygoIdx.join(",") : "1";
+        // Lo que ya se exponia manda sobre la heuristica: venir a cambiar de base
+        // de datos no deberia cambiar ademas cuales ve el agente.
+        const previoIdx = previo.connections
+          .map((c) => names.indexOf(c.name) + 1)
+          .filter((i) => i > 0);
+        const fallback =
+          previoIdx.length > 0
+            ? previoIdx.join(",")
+            : flexygoIdx.length === 2
+              ? flexygoIdx.join(",")
+              : "1";
         chosen = await pickManyFromList(rl, names, "Cuales expongo", fallback);
       }
 
@@ -974,7 +1094,12 @@ async function main() {
         const suggested = suggestAliases(chosen);
         for (const [i, name] of chosen.entries()) {
           while (true) {
-            const alias = await ask(rl, `   Alias de ${name}`, suggested[i]);
+            const yaTenia = previo.connections.find((c) => c.name === name);
+            const alias = await ask(
+              rl,
+              `   Alias de ${name}`,
+              (yaTenia && yaTenia.alias) || suggested[i]
+            );
             const problem = aliasError(alias, aliases);
             if (!problem) {
               aliases.push(alias);
@@ -1005,7 +1130,12 @@ async function main() {
     // ── Opciones ──
     title("4/5  Opciones");
     say("¿Contra que base de datos vas a trabajar?");
-    const profileLabel = await pickFromList(rl, PROFILES.map((p) => p.label), "Entorno");
+    const profileLabel = await pickFromList(
+      rl,
+      PROFILES.map((p) => p.label),
+      "Entorno",
+      Math.max(1, PROFILES.findIndex((p) => p.key === previo.profileKey) + 1)
+    );
     const profile = PROFILES.find((p) => p.label === profileLabel);
 
     let allowWrites = false;
@@ -1013,7 +1143,7 @@ async function main() {
       allowWrites = await askYesNo(
         rl,
         "¿El agente debe poder ejecutar INSERT/UPDATE/DDL?",
-        false
+        previo.allowWrites
       );
     } else {
       // En produccion no se pregunta: no hay respuesta correcta que se pueda dar
@@ -1025,10 +1155,19 @@ async function main() {
 
     const sqlDirs = [];
     if (
-      await askYesNo(rl, "¿Vas a ejecutar ficheros .sql de FUERA de la carpeta del proyecto?", false)
+      await askYesNo(
+        rl,
+        "¿Vas a ejecutar ficheros .sql de FUERA de la carpeta del proyecto?",
+        previo.sqlDirs.length > 0
+      )
     ) {
       while (true) {
-        const dir = await ask(rl, "   Carpeta (vacio para terminar)");
+        // Cada carpeta que ya estaba se ofrece en su turno: Intro la conserva.
+        const dir = await ask(
+          rl,
+          "   Carpeta (vacio para terminar)",
+          previo.sqlDirs[sqlDirs.length]
+        );
         if (!dir) break;
         if (!fs.existsSync(dir)) {
           say("   ✗ No existe.");
@@ -1121,10 +1260,16 @@ async function main() {
     const clientKeys = [];
     say();
     say("¿Que cliente usas?");
+    // Los que ya tienen nuestra entrada vienen marcados. Importa: guardar con uno
+    // fuera no lo retira, pero deja de actualizarlo, y ese se queda apuntando a la
+    // base de datos anterior.
+    const clientePrevio =
+      previo.clients.length === 2 ? 3 : previo.clients[0] === "vscode" ? 2 : 1;
     const clientChoice = await pickFromList(
       rl,
       [CLIENTS.claude.label, CLIENTS.vscode.label, "los dos"],
-      "Cliente"
+      "Cliente",
+      clientePrevio
     );
     if (clientChoice === CLIENTS.claude.label) clientKeys.push("claude");
     else if (clientChoice === CLIENTS.vscode.label) clientKeys.push("vscode");
@@ -1343,7 +1488,7 @@ async function main() {
           includeWrites = await askYesNo(
             rl,
             "   ¿Permitir tambien las ESCRITURAS sin preguntar? (solo en tu maquina)",
-            false
+            previo.permissions.write
           );
         }
         // El MCP de producto lleva sus propias reglas: sus herramientas no comparten
@@ -1355,7 +1500,7 @@ async function main() {
           productWrites = await askYesNo(
             rl,
             "   ¿Permitir las ESCRITURAS del MCP de producto sin preguntar? (solo en tu maquina)",
-            false
+            previo.permissions.productWrite
           );
         }
         // Y las del navegador aparte otra vez: mirar una pantalla es una cosa, y un
@@ -1366,7 +1511,7 @@ async function main() {
           playwrightActions = await askYesNo(
             rl,
             "   ¿Permitir que el navegador haga CLIC y ESCRIBA sin preguntar?",
-            false
+            previo.permissions.playwrightActions
           );
         }
         const perms = allowMcpTools(root, {

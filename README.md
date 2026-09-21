@@ -81,6 +81,16 @@ Framework o `appsettings.json` de Core), `--connection-string`, los datos suelto
 (`--server/--database/--user/--password`), `--from-env` o `--credentials-file`. Mezclarlas es un
 error de arranque, no hay precedencia que adivinar.
 
+> **Cambiar de base de datos después.** No hace falta editar esto a mano ni rehacer el asistente:
+> si la carpeta ya tiene la entrada `ahora-sql`, el instalador **la lee y viene relleno con lo que
+> hay** (fuente, cadenas, alias, entorno, escritura, clientes y todas las casillas), se detecta
+> solo al abrirse y solo tienes que cambiar lo que quieras y guardar. Con credenciales guardadas
+> en `%APPDATA%`, dejar la contraseña en blanco mantiene la que ya estaba: se reutiliza cifrada y
+> solo se descifra para probar la conexión. Si la entrada lleva flags que el formulario no edita
+> —`--allow-writes-for`, `--port`, `--connection-string`—, te avisa antes de guardar, porque
+> guardar reemplaza la entrada entera. El detalle está en
+> [INSTALAR.md](INSTALAR.md#cambiar-de-base-de-datos-después-sin-repetirlo-todo).
+
 > **De dónde sale `<RUTA>`.** De un clon del repositorio con `npm run build` hecho, o de la
 > instalación que hace el instalador guiado, que en Windows deja el servidor en
 > `%LOCALAPPDATA%\AHORA-SQL-MCP\node_modules\@ahoraflx\sql-mcp`. En los dos casos el binario es

@@ -1259,27 +1259,66 @@ var require_credentials = __commonJS({
       const name = path2.basename(path2.resolve(projectDir)).replace(/[^a-zA-Z0-9_.-]/g, "_");
       return path2.join(configDir(), `${name || "proyecto"}.json`);
     }
+    function stripBom(text) {
+      return text.charCodeAt(0) === 65279 ? text.slice(1) : text;
+    }
+    function readExistingSecrets(target) {
+      const previos = /* @__PURE__ */ new Map();
+      try {
+        if (!fs6.existsSync(target)) return previos;
+        const json = JSON.parse(stripBom(fs6.readFileSync(target, "utf8")));
+        const anota = (alias, raw) => {
+          if (raw && typeof raw === "object" && typeof raw.passwordEnc === "string") {
+            previos.set(alias, raw.passwordEnc);
+          }
+        };
+        if (json && json.connections && typeof json.connections === "object") {
+          for (const alias of Object.keys(json.connections)) anota(alias, json.connections[alias]);
+        } else {
+          anota("", json);
+        }
+      } catch {
+      }
+      return previos;
+    }
     function writeCredentialsFile(projectDir, connections, { warn = console.warn } = {}) {
       const target = credentialsPathFor(projectDir);
       fs6.mkdirSync(path2.dirname(target), { recursive: true });
-      const encrypted = protectAll(
-        connections.map((c) => c.password),
+      const previos = readExistingSecrets(target);
+      const anterior = (c) => {
+        const guardado = previos.get(c.alias || "");
+        if (guardado !== void 0) return guardado;
+        if (previos.size === 1 && connections.length === 1) return [...previos.values()][0];
+        return void 0;
+      };
+      const tecleadas = connections.filter((c) => c.password);
+      const cifradas = protectAll(
+        tecleadas.map((c) => c.password),
         {
           onFallback: (err) => warn(
             `  Aviso: DPAPI de Windows no esta disponible (${err.message}). Las credenciales se cifran con una clave local, que vive junto al fichero.`
           )
         }
       );
-      const one = (c, i) => ({
+      const nuevas = new Map(tecleadas.map((c, i) => [c, cifradas[i]]));
+      const secreto = (c) => {
+        if (nuevas.has(c)) return nuevas.get(c);
+        const guardado = anterior(c);
+        if (guardado !== void 0) return guardado;
+        throw new Error(
+          `Falta la contrasena de ${c.alias || c.database || c.server}: no hay ninguna guardada que reutilizar, asi que hay que escribirla.`
+        );
+      };
+      const one = (c) => ({
         server: c.server,
         database: c.database,
         user: c.user,
-        passwordEnc: encrypted[i],
+        passwordEnc: secreto(c),
         ...c.port ? { port: c.port } : {}
       });
-      const doc = connections.length === 1 && !connections[0].alias ? one(connections[0], 0) : {
+      const doc = connections.length === 1 && !connections[0].alias ? one(connections[0]) : {
         connections: Object.fromEntries(
-          connections.map((c, i) => [c.alias || "maindb", one(c, i)])
+          connections.map((c) => [c.alias || "maindb", one(c)])
         )
       };
       fs6.writeFileSync(target, `${JSON.stringify(doc, null, 2)}
@@ -1293,7 +1332,7 @@ var require_credentials = __commonJS({
       }
       return target;
     }
-    module2.exports = { credentialsPathFor, writeCredentialsFile };
+    module2.exports = { credentialsPathFor, writeCredentialsFile, readExistingSecrets };
   }
 });
 
@@ -74920,6 +74959,240 @@ var require_runtime = __commonJS({
   }
 });
 
+// installer/existing.js
+var require_existing = __commonJS({
+  "installer/existing.js"(exports2, module2) {
+    var fs6 = require("fs");
+    var path2 = require("path");
+    var {
+      SERVER_NAME,
+      PRODUCT_SERVER_NAME,
+      PLAYWRIGHT_SERVER_NAME,
+      isOurServerEntry,
+      isOurProductEntry,
+      isPlaywrightEntry
+    } = require_server_name();
+    var { credentialsPathFor, readExistingSecrets } = require_credentials();
+    var { reveal } = require_secrets();
+    var {
+      permissionsPath,
+      readRules,
+      writeRules,
+      productWriteRules,
+      playwrightActionRules
+    } = require_permissions();
+    var CON_VALOR = /* @__PURE__ */ new Set([
+      "--config-file",
+      "--connection-name",
+      "--environment",
+      "--allow-sql-dir",
+      "--credentials-file"
+    ]);
+    var BOOLEANOS = /* @__PURE__ */ new Set(["--production", "--allow-writes"]);
+    function samePath(a, b) {
+      if (!a || !b) return false;
+      const norm = (p) => path2.resolve(String(p)).replace(/\\/g, "/").toLowerCase();
+      return norm(a) === norm(b);
+    }
+    function stripBom(text) {
+      return text.charCodeAt(0) === 65279 ? text.slice(1) : text;
+    }
+    function leerJson(file) {
+      try {
+        if (!fs6.existsSync(file)) return null;
+        const texto = stripBom(fs6.readFileSync(file, "utf8"));
+        return JSON.parse(texto);
+      } catch {
+        return null;
+      }
+    }
+    function parseServerArgs(args = []) {
+      const out = {
+        configFile: null,
+        credentialsFile: null,
+        environment: null,
+        connections: [],
+        sqlDirs: [],
+        production: false,
+        allowWrites: false,
+        unknown: []
+      };
+      const lista = (Array.isArray(args) ? args : []).map((a) => String(a));
+      let empezado = false;
+      for (let i = 0; i < lista.length; i++) {
+        const arg = lista[i];
+        if (!arg.startsWith("--")) {
+          if (!empezado) continue;
+          out.unknown.push(arg);
+          continue;
+        }
+        if (CON_VALOR.has(arg)) {
+          empezado = true;
+          const valor = lista[++i];
+          if (valor === void 0) {
+            out.unknown.push(arg);
+            continue;
+          }
+          if (arg === "--config-file") out.configFile = valor;
+          else if (arg === "--credentials-file") out.credentialsFile = valor;
+          else if (arg === "--environment") out.environment = valor;
+          else if (arg === "--allow-sql-dir") out.sqlDirs.push(valor);
+          else out.connections.push(parseConnectionName(valor));
+          continue;
+        }
+        if (BOOLEANOS.has(arg)) {
+          empezado = true;
+          if (arg === "--production") out.production = true;
+          else out.allowWrites = true;
+          continue;
+        }
+        if (arg.startsWith("--package=") || arg === "--yes" || arg === "--prefer-offline") {
+          continue;
+        }
+        empezado = true;
+        out.unknown.push(arg);
+        const siguiente = lista[i + 1];
+        if (siguiente !== void 0 && !String(siguiente).startsWith("--")) {
+          out.unknown.push(String(siguiente));
+          i++;
+        }
+      }
+      return out;
+    }
+    function parseConnectionName(valor) {
+      const idx = String(valor).indexOf(":");
+      if (idx === -1) return { name: valor, alias: "" };
+      return { name: valor.slice(0, idx), alias: valor.slice(idx + 1) };
+    }
+    function parseProductArgs(args = []) {
+      const out = { connectionName: null, db: null };
+      const lista = (Array.isArray(args) ? args : []).map((a) => String(a));
+      for (let i = 0; i < lista.length; i++) {
+        if (lista[i] === "--connection-name") out.connectionName = lista[++i] ?? null;
+        else if (lista[i] === "--db") out.db = lista[++i] ?? null;
+      }
+      return out;
+    }
+    function readCredentials(file) {
+      const json = leerJson(file);
+      if (!json || typeof json !== "object") return [];
+      const una = (alias, raw) => {
+        if (!raw || typeof raw !== "object") return null;
+        return {
+          alias: alias || "",
+          server: typeof raw.server === "string" ? raw.server : "",
+          database: typeof raw.database === "string" ? raw.database : "",
+          user: typeof raw.user === "string" ? raw.user : "",
+          port: raw.port ? String(raw.port) : "",
+          hasPassword: Boolean(raw.passwordEnc || raw.password)
+        };
+      };
+      if (json.connections && typeof json.connections === "object") {
+        return Object.keys(json.connections).map((alias) => una(alias, json.connections[alias])).filter(Boolean);
+      }
+      const sola = una("", json);
+      return sola && sola.server ? [sola] : [];
+    }
+    function revealStoredPassword(projectDir, alias) {
+      if (!projectDir) return null;
+      try {
+        const target = credentialsPathFor(projectDir);
+        const guardadas = readExistingSecrets(target);
+        const token = guardadas.get(alias || "") ?? (guardadas.size === 1 ? [...guardadas.values()][0] : void 0);
+        return token ? reveal(token) : null;
+      } catch {
+        return null;
+      }
+    }
+    function tieneReglas(concedidas, reglas) {
+      if (reglas.length === 0) return false;
+      return reglas.every((r) => concedidas.includes(r));
+    }
+    function readPermissions(root) {
+      let concedidas = [];
+      const json = leerJson(permissionsPath(root));
+      const allow = json && json.permissions ? json.permissions.allow : null;
+      if (Array.isArray(allow)) concedidas = allow.filter((r) => typeof r === "string");
+      return {
+        read: tieneReglas(concedidas, readRules()),
+        write: tieneReglas(concedidas, writeRules()),
+        productWrite: tieneReglas(concedidas, productWriteRules()),
+        playwrightActions: tieneReglas(concedidas, playwrightActionRules())
+      };
+    }
+    function readExisting(root) {
+      const { CLIENTS } = require_setup();
+      const vacio = {
+        found: false,
+        clients: [],
+        configFile: null,
+        credentialsFile: null,
+        environment: null,
+        connections: [],
+        sqlDirs: [],
+        production: false,
+        allowWrites: false,
+        profileKey: "local",
+        credentials: [],
+        product: null,
+        playwright: false,
+        permissions: { read: false, write: false, productWrite: false, playwrightActions: false },
+        unknown: []
+      };
+      let sql = null;
+      let product = null;
+      let playwright = false;
+      const clients = [];
+      for (const [key, client] of Object.entries(CLIENTS)) {
+        const doc = leerJson(client.file(root));
+        const servers = doc && typeof doc === "object" ? doc[client.key] : null;
+        if (!servers || typeof servers !== "object") continue;
+        if (isOurServerEntry(servers[SERVER_NAME])) {
+          clients.push(key);
+          if (!sql) sql = parseServerArgs(servers[SERVER_NAME].args);
+        }
+        if (!product && isOurProductEntry(servers[PRODUCT_SERVER_NAME])) {
+          product = parseProductArgs(servers[PRODUCT_SERVER_NAME].args);
+        }
+        if (!playwright && isPlaywrightEntry(servers[PLAYWRIGHT_SERVER_NAME])) {
+          playwright = true;
+        }
+      }
+      if (!sql) return vacio;
+      return {
+        found: true,
+        clients,
+        configFile: sql.configFile,
+        credentialsFile: sql.credentialsFile,
+        environment: sql.environment,
+        connections: sql.connections,
+        sqlDirs: sql.sqlDirs,
+        production: sql.production,
+        allowWrites: sql.allowWrites,
+        // El perfil no viaja en los argumentos, y no hace falta: `local` y `pruebas` se
+        // comportan igual (los dos permiten escritura y ninguno marca produccion), asi
+        // que lo unico que hay que recuperar es si era PRODUCCION.
+        profileKey: sql.production ? "produccion" : "local",
+        credentials: sql.credentialsFile ? readCredentials(sql.credentialsFile) : [],
+        product,
+        playwright,
+        permissions: readPermissions(root),
+        unknown: sql.unknown
+      };
+    }
+    module2.exports = {
+      readExisting,
+      samePath,
+      revealStoredPassword,
+      parseServerArgs,
+      parseProductArgs,
+      parseConnectionName,
+      readCredentials,
+      readPermissions
+    };
+  }
+});
+
 // installer/tools.js
 var require_tools = __commonJS({
   "installer/tools.js"(exports2, module2) {
@@ -75623,12 +75896,20 @@ var require_gui = __commonJS({
     var { credentialsPathFor, writeCredentialsFile } = require_credentials();
     var { probeConnection } = require_probe();
     var { allowMcpTools } = require_permissions();
+    var { readExisting, revealStoredPassword, samePath } = require_existing();
     var PKG_VERSION = require_package2().version;
     var TOKEN_HEADER = "x-ahora-token";
     function detect(projectDir) {
       const root = path2.resolve(projectDir);
       if (!fs6.existsSync(root)) throw new Error(`No existe la carpeta: ${root}`);
-      const files = findConfigFiles(root).map((file) => {
+      const existing = readExisting(root);
+      const rutas = findConfigFiles(root);
+      if (existing.configFile && fs6.existsSync(existing.configFile)) {
+        if (!rutas.some((f) => samePath(f, existing.configFile))) {
+          rutas.push(path2.resolve(existing.configFile));
+        }
+      }
+      const files = rutas.map((file) => {
         let names = [];
         let error = null;
         try {
@@ -75658,7 +75939,8 @@ var require_gui = __commonJS({
         hasProduct: hasProductServer(root),
         // Lo mismo para el de Playwright, y contando tambien el puesto a mano: si ya hay
         // uno registrado, dejar la casilla en "no" haria que reinstalar lo retirase.
-        hasPlaywright: hasPlaywrightServer(root)
+        hasPlaywright: hasPlaywrightServer(root),
+        existing
       };
     }
     function playwrightStatus() {
@@ -75689,7 +75971,7 @@ var require_gui = __commonJS({
       }
       return status;
     }
-    async function validate({ configFile, environment, names = [], manual }) {
+    async function validate({ projectDir, configFile, environment, names = [], manual }) {
       if (!configFile) {
         const typed = (Array.isArray(manual) ? manual : [manual]).filter(Boolean);
         if (typed.length === 0) {
@@ -75698,14 +75980,15 @@ var require_gui = __commonJS({
         const suggested = typed.length > 1 ? suggestAliases(typed.map((m) => m.alias || m.database)) : [];
         const results2 = [];
         for (const [i, one] of typed.entries()) {
-          if (!one.server || !one.database || !one.user || !one.password) {
+          const password = one.password || revealStoredPassword(projectDir, one.alias);
+          if (!one.server || !one.database || !one.user || !password) {
             throw new Error("Faltan datos: servidor, base de datos, usuario y contrasena.");
           }
           const probe = await probeConnection({
             datasource: one.server,
             initialcatalog: one.database,
             userid: one.user,
-            password: one.password,
+            password,
             ...one.port ? { datasource: `${one.server},${one.port}` } : {}
           });
           const alias = typed.length > 1 ? one.alias || suggested[i] : void 0;
@@ -75998,7 +76281,12 @@ var require_gui = __commonJS({
       install
     } = {}) {
       const token = crypto2.randomBytes(24).toString("hex");
-      const html = renderPage(token, cwd);
+      let yaConfigurado = false;
+      try {
+        yaConfigurado = readExisting(path2.resolve(cwd)).found;
+      } catch {
+      }
+      const html = renderPage(token, cwd, { autoDetect: yaConfigurado });
       return new Promise((resolve, reject) => {
         let finished = false;
         const server = http.createServer(async (req, res) => {
@@ -76085,7 +76373,7 @@ Instalador AHORA-SQL-MCP v${PKG_VERSION}`);
     function escAttr(s) {
       return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
     }
-    function renderPage(token, cwd = process.cwd()) {
+    function renderPage(token, cwd = process.cwd(), { autoDetect = false } = {}) {
       const profiles = PROFILES.map(
         (p) => `<option value="${p.key}" data-canwrite="${p.canWrite}">${p.label}</option>`
       ).join("");
@@ -76154,6 +76442,7 @@ Instalador AHORA-SQL-MCP v${PKG_VERSION}`);
       <strong>Puedes cambiarla</strong>: el instalador no tiene que estar dentro del proyecto.
       Aqui se buscan el Web.config y el appsettings.json.</p>
     <div id="detectOut"></div>
+    <div id="existingOut"></div>
   </section>
 
   <section id="s2" hidden>
@@ -76332,8 +76621,117 @@ $("btnDetect").onclick = async () => {
     $("detectOut").innerHTML = html;
     renderFiles();
     $("s2").hidden = false;
+    applyExisting();
   } catch (e) { $("detectOut").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; }
 };
+
+// \u2500\u2500 Precarga de lo que ya estaba configurado \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// El instalador se lanza mas veces para CAMBIAR algo (otra base de datos, otro
+// cliente, otro entorno) que para configurar de cero, y hasta ahora las dos cosas
+// costaban lo mismo: repetir todas las respuestas y volver a marcar todas las
+// casillas. Con la configuracion puesta, cambiar de base de datos es tocar un campo.
+
+/** Misma ruta, con las barras y las mayusculas de Windows sin molestar. */
+function samePath(a, b) {
+  if (!a || !b) return false;
+  const n = (p) => String(p).replace(/\\\\/g, "/").toLowerCase().replace(/\\/+$/, "");
+  return n(a) === n(b);
+}
+
+/** La base de datos que tenia elegida el MCP de producto, para volver a marcarla. */
+let productPreset = null;
+
+function applyExisting() {
+  const ex = detected.existing;
+  $("existingOut").innerHTML = "";
+  productPreset = null;
+  if (!ex || !ex.found) return;
+  productPreset = ex.product;
+
+  if (ex.credentialsFile) applyExistingManual(ex);
+  else applyExistingFile(ex);
+
+  // Paso 3. Se pone todo aunque la seccion siga oculta: se revela sola al validar, y
+  // entonces ya esta como estaba en vez de con los valores de una instalacion nueva.
+  $("profile").value = ex.profileKey;
+  $("profile").onchange();
+  $("writes").checked = Boolean(ex.allowWrites) && !$("writeBox").hidden;
+  syncWriteRules();
+  // Despues de syncWriteRules, que apaga esta casilla cuando no hay escritura.
+  $("cWriteRules").checked = Boolean(ex.permissions.write) && $("writes").checked;
+  $("sqlDir").value = (ex.sqlDirs && ex.sqlDirs[0]) || "";
+  // Los clientes son los ficheros donde esta HOY nuestra entrada. Importa dejarlos
+  // como estaban: guardar con uno desmarcado no lo retira, pero deja de
+  // actualizarlo, y ese se queda apuntando a la base de datos de antes.
+  $("cClaude").checked = ex.clients.includes("claude");
+  $("cVscode").checked = ex.clients.includes("vscode");
+  $("cProductWriteRules").checked = Boolean(ex.permissions.productWrite);
+  $("cPlaywrightActionRules").checked = Boolean(ex.permissions.playwrightActions);
+
+  $("btnWrite").textContent = "Guardar cambios";
+
+  let aviso = '<div class="banner good"><strong>Este proyecto ya estaba configurado.</strong> ' +
+    "He dejado puesto lo que tenia" + (ex.credentialsFile
+      ? " (conexiones guardadas fuera del repositorio; la contrasena se mantiene si dejas el hueco vacio)"
+      : "") + ". Cambia solo lo que quieras y pulsa <strong>Guardar cambios</strong>.</div>";
+  if (ex.unknown && ex.unknown.length) {
+    // Guardar REEMPLAZA la entrada entera, asi que lo que este formulario no sabe
+    // editar desaparece. Callarselo seria quitarle a alguien un ajuste que puso a
+    // mano sin que se entere.
+    aviso += '<div class="banner warn">La entrada actual lleva opciones que este ' +
+      "formulario no edita: <code>" + esc(ex.unknown.join(" ")) + "</code>. Si guardas, " +
+      "se perderan y habra que volver a ponerlas a mano en el <code>.mcp.json</code>.</div>";
+  }
+  $("existingOut").innerHTML = aviso;
+
+  // Y se valida sola: con los datos ya puestos, el unico paso que queda antes de
+  // poder guardar es probar la conexion, y hacerlo a mano no aporta nada.
+  $("btnValidate").click();
+}
+
+/** Precarga con fichero de configuracion: marca la fuente y sus cadenas. */
+function applyExistingFile(ex) {
+  const idx = detected.files.findIndex((f) => samePath(f.path, ex.configFile));
+  if (idx === -1) return;
+  $("cfg" + idx).checked = true;
+  onFileChange();
+  if (ex.environment) $("env").value = ex.environment;
+
+  const lis = [...document.querySelectorAll("#names .list li")];
+  if (lis.length === 0 || ex.connections.length === 0) return;
+  for (const li of lis) li.querySelector(".nm").checked = false;
+  for (const conn of ex.connections) {
+    const li = lis.find((l) => l.querySelector(".nm").value === conn.name);
+    if (!li) continue;
+    li.querySelector(".nm").checked = true;
+    if (conn.alias) li.querySelector(".al").value = conn.alias;
+  }
+  // Ninguna casa (han renombrado las cadenas del Web.config): mejor dejar la
+  // premarca de siempre que dejar el paso sin nada marcado.
+  if (!lis.some((l) => l.querySelector(".nm").checked)) onFileChange();
+}
+
+/** Precarga con datos a mano: un bloque por conexion guardada, sin contrasenas. */
+function applyExistingManual(ex) {
+  $("cfgNone").checked = true;
+  onFileChange();
+  if (!ex.credentials || ex.credentials.length === 0) return;
+  $("manualList").innerHTML = "";
+  for (const c of ex.credentials) {
+    addManual();
+    const b = $("manualList").lastElementChild;
+    b.querySelector(".mServer").value = c.port ? c.server + "," + c.port : c.server;
+    b.querySelector(".mDb").value = c.database;
+    b.querySelector(".mUser").value = c.user;
+    b.querySelector(".mAlias").value = c.alias || "";
+    if (c.hasPassword) {
+      // Vacio significa "la de siempre": el servidor reutiliza el token cifrado sin
+      // abrirlo al guardar, y lo descifra solo para probar la conexion.
+      b.querySelector(".mPass").placeholder = "(se mantiene la actual)";
+    }
+  }
+  syncManual();
+}
 
 function renderFiles() {
   const items = detected.files.map((f, i) =>
@@ -76495,6 +76893,9 @@ $("btnValidate").onclick = async () => {
     }
 
     const { results } = await api("validate", {
+      // La carpeta hace falta para encontrar el fichero de credenciales del que
+      // recuperar una contrasena que no se ha vuelto a teclear.
+      projectDir: detected.root,
       configFile: chosenFile ? chosenFile.path : null,
       environment: $("env").value,
       names, manual,
@@ -76613,6 +77014,14 @@ function fillProductDb() {
     .join("");
   if (previo && $("productDb").querySelector('option[value="' + previo + '"]')) {
     $("productDb").value = previo;
+  } else if (productPreset) {
+    // La que ya tenia elegida el MCP de producto. Se busca por alias y, sin el
+    // (proyecto con Web.config), por el nombre de la cadena: son las dos formas en
+    // las que su lanzador puede tenerla escrita.
+    const i = conns.findIndex((c) =>
+      productPreset.db ? c.alias === productPreset.db : c.name === productPreset.connectionName
+    );
+    if (i !== -1) $("productDb").value = String(i);
   }
   $("productPick").hidden = conns.length < 2;
 }
@@ -76869,6 +77278,9 @@ $("btnWrite").onclick = async () => {
     $("btnWrite").disabled = false;
   }
 };
+
+// Proyecto ya configurado: se arranca la deteccion sin esperar a que nadie pulse.
+if (${autoDetect ? "true" : "false"}) $("btnDetect").click();
 </script>
 </body>
 </html>`;
@@ -76917,6 +77329,7 @@ var require_setup = __commonJS({
       isOurPlaywrightEntry
     } = require_server_name();
     var { installRuntime } = require_runtime();
+    var { readExisting, revealStoredPassword, samePath } = require_existing();
     var { toolVersion } = require_tools();
     var {
       PRODUCT_PACKAGE,
@@ -77063,10 +77476,10 @@ var require_setup = __commonJS({
       const answer = (await ask(rl, `${question} (s/n)`, def)).toLowerCase();
       return answer.startsWith("s");
     }
-    async function pickFromList(rl, items, label) {
+    async function pickFromList(rl, items, label, fallback = "1") {
       items.forEach((item, i) => say(`   ${i + 1}) ${item}`));
       while (true) {
-        const raw = await ask(rl, `${label} (numero)`, "1");
+        const raw = await ask(rl, `${label} (numero)`, String(fallback));
         const idx = Number.parseInt(raw, 10);
         if (Number.isInteger(idx) && idx >= 1 && idx <= items.length) return items[idx - 1];
         say("   Numero no valido.");
@@ -77127,6 +77540,28 @@ var require_setup = __commonJS({
         taken.push(alias);
         return alias;
       });
+    }
+    function describeExisting(previo) {
+      const lineas = [];
+      if (previo.credentialsFile) {
+        lineas.push(`Conexiones guardadas fuera del repositorio: ${previo.credentialsFile}`);
+        for (const c of previo.credentials) {
+          lineas.push(`  - ${c.alias || "maindb"}: ${c.database} en ${c.server} (usuario ${c.user})`);
+        }
+      } else if (previo.configFile) {
+        lineas.push(`Fichero de configuracion: ${previo.configFile}`);
+        if (previo.environment) lineas.push(`Entorno: ${previo.environment}`);
+        for (const c of previo.connections) {
+          lineas.push(`  - ${c.name}${c.alias ? ` (alias ${c.alias})` : ""}`);
+        }
+      }
+      lineas.push(`Entorno de trabajo: ${previo.production ? "PRODUCCION" : "local / pruebas"}`);
+      lineas.push(`Escritura: ${previo.allowWrites ? "permitida" : "no"}`);
+      for (const dir of previo.sqlDirs) lineas.push(`Carpeta .sql permitida: ${dir}`);
+      lineas.push(`Clientes: ${previo.clients.join(", ") || "ninguno"}`);
+      if (previo.product) lineas.push(`MCP de producto: si (${previo.product.db || previo.product.connectionName})`);
+      if (previo.playwright) lineas.push("MCP de navegador: si");
+      return lineas;
     }
     function readJsonIfExists(file) {
       if (!fs6.existsSync(file)) return null;
@@ -77399,6 +77834,20 @@ var require_setup = __commonJS({
           say(`\u2717 No existe: ${root}`);
           process.exit(1);
         }
+        const previo = readExisting(root);
+        if (previo.found) {
+          say();
+          say("Este proyecto YA esta configurado. Ahora mismo tiene:");
+          for (const linea of describeExisting(previo)) say(`   ${linea}`);
+          say();
+          say("Cada pregunta viene con ese valor entre corchetes: Intro lo deja igual.");
+          if (previo.unknown.length > 0) {
+            say();
+            say("   \u26A0 La entrada actual lleva opciones que este asistente no edita:");
+            say(`     ${previo.unknown.join(" ")}`);
+            say("     Si sigues, se perderan y habra que volver a ponerlas en el .mcp.json.");
+          }
+        }
         title("2/5  Fichero de configuracion");
         say("Buscando Web.config / appsettings.json...");
         const candidates = findConfigFiles(root);
@@ -77407,7 +77856,7 @@ var require_setup = __commonJS({
         if (candidates.length === 0) {
           say("No he encontrado ninguno en esta carpeta.");
           const options = ["Indico la ruta de un Web.config o appsettings.json", MANUAL];
-          const chosen = await pickFromList(rl, options, "Que hago");
+          const chosen = await pickFromList(rl, options, "Que hago", previo.credentialsFile ? 2 : 1);
           if (chosen !== MANUAL) configFile = path2.resolve(await ask(rl, "Ruta"));
         } else {
           say(`Encontrados ${candidates.length}:`);
@@ -77416,7 +77865,8 @@ var require_setup = __commonJS({
             "otra ruta\u2026",
             MANUAL
           ];
-          const chosen = await pickFromList(rl, options, "Cual uso");
+          const yaEstaba = previo.credentialsFile ? options.length : candidates.findIndex((c) => samePath(c, previo.configFile)) + 1;
+          const chosen = await pickFromList(rl, options, "Cual uso", yaEstaba > 0 ? yaEstaba : 1);
           if (chosen === MANUAL) configFile = null;
           else if (chosen === "otra ruta\u2026") configFile = path2.resolve(await ask(rl, "Ruta"));
           else configFile = path2.join(root, chosen);
@@ -77443,6 +77893,64 @@ var require_setup = __commonJS({
         if (!resolved) {
           say("Puedes meter varias: cada una sera una base de datos distinta para el");
           say("agente. Se piden de una en una y se prueban al momento.");
+          const probarManual = async (conn, password) => {
+            say();
+            say("Probando la conexion de verdad...");
+            const result = await probeConnection({
+              datasource: conn.server,
+              initialcatalog: conn.database,
+              userid: conn.user,
+              password
+            });
+            if (result.ok) {
+              say(`   \u2713 conectado a ${result.target} / ${result.database}`);
+              if (result.version) say(`     ${result.version}`);
+              return;
+            }
+            say(`   \u2717 no he podido conectar: ${result.error}`);
+            if (result.hint) say(`     ${result.hint}`);
+            say();
+            if (!await askYesNo(rl, "\xBFSigo de todas formas?", false)) {
+              say("\u2717 Nada escrito. Corrige los datos y vuelve a lanzarlo.");
+              process.exit(1);
+            }
+          };
+          if (previo.credentials.length > 0) {
+            say();
+            say("Ya hay conexiones guardadas para este proyecto:");
+            for (const c of previo.credentials) {
+              say(`   - ${c.alias || "maindb"}: ${c.database} en ${c.server} (usuario ${c.user})`);
+            }
+            if (await askYesNo(rl, "\xBFParto de esas y cambio solo lo que haga falta?", true)) {
+              for (const c of previo.credentials) {
+                say();
+                const server = await ask(
+                  rl,
+                  c.alias ? `Servidor de '${c.alias}'` : "Servidor",
+                  c.port ? `${c.server},${c.port}` : c.server
+                );
+                const database = await ask(rl, "Base de datos", c.database);
+                const user = await ask(rl, "Usuario", c.user);
+                const password = await ask(
+                  rl,
+                  c.hasPassword ? "Contrasena (vacio = la que ya estaba)" : "Contrasena"
+                );
+                if (!server || !database || !user) {
+                  say("\u2717 Faltan datos. Nada escrito.");
+                  process.exit(1);
+                }
+                const enClaro = password || revealStoredPassword(root, c.alias);
+                if (!enClaro) {
+                  say("\u2717 No hay ninguna contrasena guardada que reutilizar: escribela.");
+                  process.exit(1);
+                }
+                const manual = { server, database, user, password };
+                if (c.alias) manual.alias = c.alias;
+                await probarManual(manual, enClaro);
+                manualConnections.push(manual);
+              }
+            }
+          }
           while (true) {
             const n = manualConnections.length;
             say();
@@ -77460,26 +77968,7 @@ var require_setup = __commonJS({
               process.exit(1);
             }
             const manual = { server, database, user, password };
-            say();
-            say("Probando la conexion de verdad...");
-            const result = await probeConnection({
-              datasource: server,
-              initialcatalog: database,
-              userid: user,
-              password
-            });
-            if (result.ok) {
-              say(`   \u2713 conectado a ${result.target} / ${result.database}`);
-              if (result.version) say(`     ${result.version}`);
-            } else {
-              say(`   \u2717 no he podido conectar: ${result.error}`);
-              if (result.hint) say(`     ${result.hint}`);
-              say();
-              if (!await askYesNo(rl, "\xBFSigo de todas formas?", false)) {
-                say("\u2717 Nada escrito. Corrige los datos y vuelve a lanzarlo.");
-                process.exit(1);
-              }
-            }
+            await probarManual(manual, password);
             manualConnections.push(manual);
           }
           if (manualConnections.length > 1) {
@@ -77493,7 +77982,7 @@ var require_setup = __commonJS({
                 const alias = await ask(
                   rl,
                   `   Alias de ${conn.database} (${conn.server})`,
-                  suggested[i]
+                  conn.alias || suggested[i]
                 );
                 const problem = aliasError(alias, taken);
                 if (!problem) {
@@ -77506,7 +77995,11 @@ var require_setup = __commonJS({
             }
           }
         } else {
-          environment = isCore ? await ask(rl, "Entorno de appsettings", resolveEnvironment(void 0)) : void 0;
+          environment = isCore ? await ask(
+            rl,
+            "Entorno de appsettings",
+            previo.environment || resolveEnvironment(void 0)
+          ) : void 0;
           const names = listConnectionNames(resolved, { environment });
           if (names.length === 0) {
             say("\u2717 Ese fichero no declara ninguna cadena de conexion.");
@@ -77544,7 +78037,8 @@ var require_setup = __commonJS({
             say();
             say("Cada cadena que elijas sera una base de datos distinta para el agente.");
             const flexygoIdx = ["conf", "dat"].map((p) => names.findIndex((n) => new RegExp(`^${p}`, "i").test(n)) + 1).filter((i) => i > 0);
-            const fallback = flexygoIdx.length === 2 ? flexygoIdx.join(",") : "1";
+            const previoIdx = previo.connections.map((c) => names.indexOf(c.name) + 1).filter((i) => i > 0);
+            const fallback = previoIdx.length > 0 ? previoIdx.join(",") : flexygoIdx.length === 2 ? flexygoIdx.join(",") : "1";
             chosen = await pickManyFromList(rl, names, "Cuales expongo", fallback);
           }
           const aliases = [];
@@ -77555,7 +78049,12 @@ var require_setup = __commonJS({
             const suggested = suggestAliases(chosen);
             for (const [i, name] of chosen.entries()) {
               while (true) {
-                const alias = await ask(rl, `   Alias de ${name}`, suggested[i]);
+                const yaTenia = previo.connections.find((c) => c.name === name);
+                const alias = await ask(
+                  rl,
+                  `   Alias de ${name}`,
+                  yaTenia && yaTenia.alias || suggested[i]
+                );
                 const problem = aliasError(alias, aliases);
                 if (!problem) {
                   aliases.push(alias);
@@ -77583,14 +78082,19 @@ var require_setup = __commonJS({
         }
         title("4/5  Opciones");
         say("\xBFContra que base de datos vas a trabajar?");
-        const profileLabel = await pickFromList(rl, PROFILES.map((p) => p.label), "Entorno");
+        const profileLabel = await pickFromList(
+          rl,
+          PROFILES.map((p) => p.label),
+          "Entorno",
+          Math.max(1, PROFILES.findIndex((p) => p.key === previo.profileKey) + 1)
+        );
         const profile = PROFILES.find((p) => p.label === profileLabel);
         let allowWrites = false;
         if (profile.canWrite) {
           allowWrites = await askYesNo(
             rl,
             "\xBFEl agente debe poder ejecutar INSERT/UPDATE/DDL?",
-            false
+            previo.allowWrites
           );
         } else {
           say("   La escritura queda deshabilitada y la configuracion se marca como");
@@ -77598,9 +78102,17 @@ var require_setup = __commonJS({
           say("   servidor se niegue a arrancar.");
         }
         const sqlDirs = [];
-        if (await askYesNo(rl, "\xBFVas a ejecutar ficheros .sql de FUERA de la carpeta del proyecto?", false)) {
+        if (await askYesNo(
+          rl,
+          "\xBFVas a ejecutar ficheros .sql de FUERA de la carpeta del proyecto?",
+          previo.sqlDirs.length > 0
+        )) {
           while (true) {
-            const dir = await ask(rl, "   Carpeta (vacio para terminar)");
+            const dir = await ask(
+              rl,
+              "   Carpeta (vacio para terminar)",
+              previo.sqlDirs[sqlDirs.length]
+            );
             if (!dir) break;
             if (!fs6.existsSync(dir)) {
               say("   \u2717 No existe.");
@@ -77671,10 +78183,12 @@ var require_setup = __commonJS({
         const clientKeys = [];
         say();
         say("\xBFQue cliente usas?");
+        const clientePrevio = previo.clients.length === 2 ? 3 : previo.clients[0] === "vscode" ? 2 : 1;
         const clientChoice = await pickFromList(
           rl,
           [CLIENTS.claude.label, CLIENTS.vscode.label, "los dos"],
-          "Cliente"
+          "Cliente",
+          clientePrevio
         );
         if (clientChoice === CLIENTS.claude.label) clientKeys.push("claude");
         else if (clientChoice === CLIENTS.vscode.label) clientKeys.push("vscode");
@@ -77843,7 +78357,7 @@ var require_setup = __commonJS({
               includeWrites = await askYesNo(
                 rl,
                 "   \xBFPermitir tambien las ESCRITURAS sin preguntar? (solo en tu maquina)",
-                false
+                previo.permissions.write
               );
             }
             let productWrites = false;
@@ -77851,7 +78365,7 @@ var require_setup = __commonJS({
               productWrites = await askYesNo(
                 rl,
                 "   \xBFPermitir las ESCRITURAS del MCP de producto sin preguntar? (solo en tu maquina)",
-                false
+                previo.permissions.productWrite
               );
             }
             let playwrightActions = false;
@@ -77859,7 +78373,7 @@ var require_setup = __commonJS({
               playwrightActions = await askYesNo(
                 rl,
                 "   \xBFPermitir que el navegador haga CLIC y ESCRIBA sin preguntar?",
-                false
+                previo.permissions.playwrightActions
               );
             }
             const perms = allowMcpTools(root, {

@@ -75,6 +75,7 @@ const {
 const { credentialsPathFor, writeCredentialsFile } = require("./credentials");
 const { probeConnection } = require("./probe");
 const { allowMcpTools } = require("./permissions");
+const { readExisting, revealStoredPassword, samePath } = require("./existing");
 
 const PKG_VERSION = require("../package.json").version;
 const TOKEN_HEADER = "x-ahora-token";
@@ -84,7 +85,22 @@ function detect(projectDir) {
   const root = path.resolve(projectDir);
   if (!fs.existsSync(root)) throw new Error(`No existe la carpeta: ${root}`);
 
-  const files = findConfigFiles(root).map((file) => {
+  // Lo que el proyecto YA tiene configurado, para poder ofrecerlo puesto en vez de
+  // hacer repetir todas las respuestas. Nunca lanza: como mucho dice que no hay nada.
+  const existing = readExisting(root);
+
+  const rutas = findConfigFiles(root);
+  // El fichero con el que se configuro el proyecto puede no salir en la busqueda
+  // (esta fuera de la carpeta, o en una que el buscador descarta por ruido). Sin
+  // anadirlo no habria ninguna opcion que marcar y la precarga perderia la fuente,
+  // que es justo el dato que mas cuesta volver a encontrar.
+  if (existing.configFile && fs.existsSync(existing.configFile)) {
+    if (!rutas.some((f) => samePath(f, existing.configFile))) {
+      rutas.push(path.resolve(existing.configFile));
+    }
+  }
+
+  const files = rutas.map((file) => {
     let names = [];
     let error = null;
     try {
@@ -115,6 +131,7 @@ function detect(projectDir) {
     // Lo mismo para el de Playwright, y contando tambien el puesto a mano: si ya hay
     // uno registrado, dejar la casilla en "no" haria que reinstalar lo retirase.
     hasPlaywright: hasPlaywrightServer(root),
+    existing,
   };
 }
 
@@ -175,7 +192,7 @@ async function productStatus() {
  * pueden exponer varias bases de datos, igual que con el. Se acepta la forma de una
  * sola por compatibilidad con quien ya llame a esto.
  */
-async function validate({ configFile, environment, names = [], manual }) {
+async function validate({ projectDir, configFile, environment, names = [], manual }) {
   if (!configFile) {
     const typed = (Array.isArray(manual) ? manual : [manual]).filter(Boolean);
     if (typed.length === 0) {
@@ -188,14 +205,18 @@ async function validate({ configFile, environment, names = [], manual }) {
       typed.length > 1 ? suggestAliases(typed.map((m) => m.alias || m.database)) : [];
     const results = [];
     for (const [i, one] of typed.entries()) {
-      if (!one.server || !one.database || !one.user || !one.password) {
+      // La contrasena puede venir vacia a proposito: al reconfigurar significa "la
+      // de siempre". Se recupera la guardada para poder probar de verdad, y solo
+      // falta de veras si tampoco hay ninguna.
+      const password = one.password || revealStoredPassword(projectDir, one.alias);
+      if (!one.server || !one.database || !one.user || !password) {
         throw new Error("Faltan datos: servidor, base de datos, usuario y contrasena.");
       }
       const probe = await probeConnection({
         datasource: one.server,
         initialcatalog: one.database,
         userid: one.user,
-        password: one.password,
+        password,
         ...(one.port ? { datasource: `${one.server},${one.port}` } : {}),
       });
       const alias = typed.length > 1 ? one.alias || suggested[i] : undefined;
@@ -584,7 +605,16 @@ function startGui({
   install,
 } = {}) {
   const token = crypto.randomBytes(24).toString("hex");
-  const html = renderPage(token, cwd);
+  // Si la carpeta ya tiene nuestra entrada, la pagina se detecta sola al abrirse:
+  // quien vuelve al instalador viene a cambiar algo concreto, y pulsar "Detectar"
+  // para ver lo que ya tenia no decide nada.
+  let yaConfigurado = false;
+  try {
+    yaConfigurado = readExisting(path.resolve(cwd)).found;
+  } catch {
+    // Una carpeta que no existe no impide abrir el formulario: se escribe otra.
+  }
+  const html = renderPage(token, cwd, { autoDetect: yaConfigurado });
 
   return new Promise((resolve, reject) => {
     let finished = false;
@@ -686,7 +716,7 @@ function escAttr(s) {
  * tienes que teclear nada, y si no, editas el campo. El exe NO tiene que estar en
  * el proyecto.
  */
-function renderPage(token, cwd = process.cwd()) {
+function renderPage(token, cwd = process.cwd(), { autoDetect = false } = {}) {
   const profiles = PROFILES.map(
     (p) => `<option value="${p.key}" data-canwrite="${p.canWrite}">${p.label}</option>`
   ).join("");
@@ -756,6 +786,7 @@ function renderPage(token, cwd = process.cwd()) {
       <strong>Puedes cambiarla</strong>: el instalador no tiene que estar dentro del proyecto.
       Aqui se buscan el Web.config y el appsettings.json.</p>
     <div id="detectOut"></div>
+    <div id="existingOut"></div>
   </section>
 
   <section id="s2" hidden>
@@ -934,8 +965,117 @@ $("btnDetect").onclick = async () => {
     $("detectOut").innerHTML = html;
     renderFiles();
     $("s2").hidden = false;
+    applyExisting();
   } catch (e) { $("detectOut").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; }
 };
+
+// ── Precarga de lo que ya estaba configurado ─────────────────────────────────
+// El instalador se lanza mas veces para CAMBIAR algo (otra base de datos, otro
+// cliente, otro entorno) que para configurar de cero, y hasta ahora las dos cosas
+// costaban lo mismo: repetir todas las respuestas y volver a marcar todas las
+// casillas. Con la configuracion puesta, cambiar de base de datos es tocar un campo.
+
+/** Misma ruta, con las barras y las mayusculas de Windows sin molestar. */
+function samePath(a, b) {
+  if (!a || !b) return false;
+  const n = (p) => String(p).replace(/\\\\/g, "/").toLowerCase().replace(/\\/+$/, "");
+  return n(a) === n(b);
+}
+
+/** La base de datos que tenia elegida el MCP de producto, para volver a marcarla. */
+let productPreset = null;
+
+function applyExisting() {
+  const ex = detected.existing;
+  $("existingOut").innerHTML = "";
+  productPreset = null;
+  if (!ex || !ex.found) return;
+  productPreset = ex.product;
+
+  if (ex.credentialsFile) applyExistingManual(ex);
+  else applyExistingFile(ex);
+
+  // Paso 3. Se pone todo aunque la seccion siga oculta: se revela sola al validar, y
+  // entonces ya esta como estaba en vez de con los valores de una instalacion nueva.
+  $("profile").value = ex.profileKey;
+  $("profile").onchange();
+  $("writes").checked = Boolean(ex.allowWrites) && !$("writeBox").hidden;
+  syncWriteRules();
+  // Despues de syncWriteRules, que apaga esta casilla cuando no hay escritura.
+  $("cWriteRules").checked = Boolean(ex.permissions.write) && $("writes").checked;
+  $("sqlDir").value = (ex.sqlDirs && ex.sqlDirs[0]) || "";
+  // Los clientes son los ficheros donde esta HOY nuestra entrada. Importa dejarlos
+  // como estaban: guardar con uno desmarcado no lo retira, pero deja de
+  // actualizarlo, y ese se queda apuntando a la base de datos de antes.
+  $("cClaude").checked = ex.clients.includes("claude");
+  $("cVscode").checked = ex.clients.includes("vscode");
+  $("cProductWriteRules").checked = Boolean(ex.permissions.productWrite);
+  $("cPlaywrightActionRules").checked = Boolean(ex.permissions.playwrightActions);
+
+  $("btnWrite").textContent = "Guardar cambios";
+
+  let aviso = '<div class="banner good"><strong>Este proyecto ya estaba configurado.</strong> ' +
+    "He dejado puesto lo que tenia" + (ex.credentialsFile
+      ? " (conexiones guardadas fuera del repositorio; la contrasena se mantiene si dejas el hueco vacio)"
+      : "") + ". Cambia solo lo que quieras y pulsa <strong>Guardar cambios</strong>.</div>";
+  if (ex.unknown && ex.unknown.length) {
+    // Guardar REEMPLAZA la entrada entera, asi que lo que este formulario no sabe
+    // editar desaparece. Callarselo seria quitarle a alguien un ajuste que puso a
+    // mano sin que se entere.
+    aviso += '<div class="banner warn">La entrada actual lleva opciones que este ' +
+      "formulario no edita: <code>" + esc(ex.unknown.join(" ")) + "</code>. Si guardas, " +
+      "se perderan y habra que volver a ponerlas a mano en el <code>.mcp.json</code>.</div>";
+  }
+  $("existingOut").innerHTML = aviso;
+
+  // Y se valida sola: con los datos ya puestos, el unico paso que queda antes de
+  // poder guardar es probar la conexion, y hacerlo a mano no aporta nada.
+  $("btnValidate").click();
+}
+
+/** Precarga con fichero de configuracion: marca la fuente y sus cadenas. */
+function applyExistingFile(ex) {
+  const idx = detected.files.findIndex((f) => samePath(f.path, ex.configFile));
+  if (idx === -1) return;
+  $("cfg" + idx).checked = true;
+  onFileChange();
+  if (ex.environment) $("env").value = ex.environment;
+
+  const lis = [...document.querySelectorAll("#names .list li")];
+  if (lis.length === 0 || ex.connections.length === 0) return;
+  for (const li of lis) li.querySelector(".nm").checked = false;
+  for (const conn of ex.connections) {
+    const li = lis.find((l) => l.querySelector(".nm").value === conn.name);
+    if (!li) continue;
+    li.querySelector(".nm").checked = true;
+    if (conn.alias) li.querySelector(".al").value = conn.alias;
+  }
+  // Ninguna casa (han renombrado las cadenas del Web.config): mejor dejar la
+  // premarca de siempre que dejar el paso sin nada marcado.
+  if (!lis.some((l) => l.querySelector(".nm").checked)) onFileChange();
+}
+
+/** Precarga con datos a mano: un bloque por conexion guardada, sin contrasenas. */
+function applyExistingManual(ex) {
+  $("cfgNone").checked = true;
+  onFileChange();
+  if (!ex.credentials || ex.credentials.length === 0) return;
+  $("manualList").innerHTML = "";
+  for (const c of ex.credentials) {
+    addManual();
+    const b = $("manualList").lastElementChild;
+    b.querySelector(".mServer").value = c.port ? c.server + "," + c.port : c.server;
+    b.querySelector(".mDb").value = c.database;
+    b.querySelector(".mUser").value = c.user;
+    b.querySelector(".mAlias").value = c.alias || "";
+    if (c.hasPassword) {
+      // Vacio significa "la de siempre": el servidor reutiliza el token cifrado sin
+      // abrirlo al guardar, y lo descifra solo para probar la conexion.
+      b.querySelector(".mPass").placeholder = "(se mantiene la actual)";
+    }
+  }
+  syncManual();
+}
 
 function renderFiles() {
   const items = detected.files.map((f, i) =>
@@ -1097,6 +1237,9 @@ $("btnValidate").onclick = async () => {
     }
 
     const { results } = await api("validate", {
+      // La carpeta hace falta para encontrar el fichero de credenciales del que
+      // recuperar una contrasena que no se ha vuelto a teclear.
+      projectDir: detected.root,
       configFile: chosenFile ? chosenFile.path : null,
       environment: $("env").value,
       names, manual,
@@ -1215,6 +1358,14 @@ function fillProductDb() {
     .join("");
   if (previo && $("productDb").querySelector('option[value="' + previo + '"]')) {
     $("productDb").value = previo;
+  } else if (productPreset) {
+    // La que ya tenia elegida el MCP de producto. Se busca por alias y, sin el
+    // (proyecto con Web.config), por el nombre de la cadena: son las dos formas en
+    // las que su lanzador puede tenerla escrita.
+    const i = conns.findIndex((c) =>
+      productPreset.db ? c.alias === productPreset.db : c.name === productPreset.connectionName
+    );
+    if (i !== -1) $("productDb").value = String(i);
   }
   $("productPick").hidden = conns.length < 2;
 }
@@ -1471,6 +1622,9 @@ $("btnWrite").onclick = async () => {
     $("btnWrite").disabled = false;
   }
 };
+
+// Proyecto ya configurado: se arranca la deteccion sin esperar a que nadie pulse.
+if (${autoDetect ? "true" : "false"}) $("btnDetect").click();
 </script>
 </body>
 </html>`;
