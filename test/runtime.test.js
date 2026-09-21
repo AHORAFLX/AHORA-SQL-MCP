@@ -11,6 +11,9 @@ const {
   installedVersion,
   installRuntime,
 } = require("../installer/runtime");
+// Ademas del desestructurado, el modulo entero: lo usan las pruebas de que un
+// instalador viejo no puede degradar la instalacion.
+const runtime = require("../installer/runtime");
 const {
   resolveServerEntry,
   writeClientConfig,
@@ -268,4 +271,91 @@ test("pruneLegacyServer no crea ficheros ni escribe si no hay nada que retirar",
   const before = fs.statSync(file).mtimeMs;
   assert.equal(pruneLegacyServer(CLIENTS.claude, root), null);
   assert.equal(fs.statSync(file).mtimeMs, before, "no se reescribe sin motivo");
+});
+
+// ── Un instalador viejo no puede degradar la instalacion ─────────────────────
+//
+// Caso real, y costo una tarde de "he actualizado y me sigue saliendo la vieja":
+// cada instalador se instala A SI MISMO (PKG_SPEC lleva su propia version). Se lanzo
+// el instalador nuevo desde la extension con `npx --package=github:...#v1.15.0`,
+// pero se guardo en un formulario de la v1.12.2 que se habia quedado abierto en otra
+// ventana -su servidor local sigue vivo hasta que se cierra- y ese reinstalo la
+// 1.12.2 encima de la 1.15.0, sin un solo mensaje. El log de npm lo dejo grabado:
+//   npx exec --package github:AHORAFLX/AHORA-SQL-MCP#v1.15.0 -- ahora-setup
+//   npm install --omit dev ... github:AHORAFLX/AHORA-SQL-MCP#v1.12.2
+
+/** Deja en `dir` una instalacion de mentira de la version dada. */
+function fakeInstalled(dir, version) {
+  const pkgDir = path.join(dir, "node_modules", "@ahoraflx", "sql-mcp");
+  fs.mkdirSync(path.join(pkgDir, "bundle"), { recursive: true });
+  fs.writeFileSync(path.join(pkgDir, "package.json"), JSON.stringify({ version }), "utf8");
+  fs.writeFileSync(path.join(pkgDir, "bundle", "start-mssql-mcp.cjs"), "", "utf8");
+  return pkgDir;
+}
+
+test("compareVersions ordena por numero, no por texto", () => {
+  assert.ok(runtime.compareVersions("1.15.0", "1.9.0") > 0, "1.15.0 es posterior a 1.9.0");
+  assert.ok(runtime.compareVersions("1.12.2", "1.15.0") < 0);
+  assert.equal(runtime.compareVersions("1.15.0", "1.15.0"), 0);
+  // Una version ilegible no puede hacerse pasar por mas nueva.
+  assert.ok(runtime.compareVersions("no-es-una-version", "1.0.0") < 0);
+});
+
+test("installRuntime conserva la instalacion si es MAS NUEVA que el instalador", () => {
+  const dir = tempDir("runtime-");
+  fakeInstalled(dir, "1.15.0");
+  let llamado = false;
+
+  const r = runtime.installRuntime({
+    spec: "github:AHORAFLX/AHORA-SQL-MCP#v1.12.2",
+    version: "1.12.2",
+    dir,
+    platform: "win32",
+    exec: () => {
+      llamado = true;
+    },
+  });
+
+  assert.equal(llamado, false, "no puede lanzar npm para instalar una version anterior");
+  assert.equal(r.reused, true);
+  assert.equal(r.keptNewer, "1.15.0", "tiene que decir que version ha conservado");
+  const instalada = JSON.parse(
+    fs.readFileSync(path.join(dir, "node_modules", "@ahoraflx", "sql-mcp", "package.json"), "utf8")
+  );
+  assert.equal(instalada.version, "1.15.0", "la instalacion no se toca");
+});
+
+test("installRuntime si instala cuando el instalador es mas nuevo", () => {
+  const dir = tempDir("runtime-");
+  fakeInstalled(dir, "1.12.2");
+  const specs = [];
+
+  const r = runtime.installRuntime({
+    spec: "github:AHORAFLX/AHORA-SQL-MCP#v1.15.0",
+    version: "1.15.0",
+    dir,
+    platform: "win32",
+    exec: (_cmd, args) => specs.push(args[args.length - 1]),
+  });
+
+  assert.deepEqual(specs, ["github:AHORAFLX/AHORA-SQL-MCP#v1.15.0"]);
+  assert.equal(r.reused, false);
+  assert.equal(r.keptNewer, undefined);
+});
+
+test("con force se puede volver a una version anterior a proposito", () => {
+  const dir = tempDir("runtime-");
+  fakeInstalled(dir, "1.15.0");
+  const specs = [];
+
+  runtime.installRuntime({
+    spec: "github:AHORAFLX/AHORA-SQL-MCP#v1.12.2",
+    version: "1.12.2",
+    dir,
+    platform: "win32",
+    force: true,
+    exec: (_cmd, args) => specs.push(args[args.length - 1]),
+  });
+
+  assert.deepEqual(specs, ["github:AHORAFLX/AHORA-SQL-MCP#v1.12.2"]);
 });

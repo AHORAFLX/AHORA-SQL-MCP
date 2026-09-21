@@ -74895,6 +74895,14 @@ var require_runtime = __commonJS({
         "start-mssql-mcp.cjs"
       );
     }
+    function compareVersions(a, b) {
+      const partes = (v) => String(v || "").split(".").map((n) => Number.parseInt(n, 10) || 0);
+      const [x, y] = [partes(a), partes(b)];
+      for (let i = 0; i < 3; i++) {
+        if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0);
+      }
+      return 0;
+    }
     function installedVersion(dir) {
       try {
         const manifest = path2.join(dir, "node_modules", "@ahoraflx", "sql-mcp", "package.json");
@@ -74912,8 +74920,12 @@ var require_runtime = __commonJS({
       force = false
     } = {}) {
       const entry = entryPath(dir);
-      if (!force && version && installedVersion(dir) === version && fs6.existsSync(entry)) {
-        return { entry, dir, reused: true };
+      const instalada = installedVersion(dir);
+      if (!force && version && instalada && fs6.existsSync(entry)) {
+        if (instalada === version) return { entry, dir, reused: true };
+        if (compareVersions(instalada, version) > 0) {
+          return { entry, dir, reused: true, keptNewer: instalada };
+        }
       }
       fs6.mkdirSync(dir, { recursive: true });
       const manifest = path2.join(dir, "package.json");
@@ -74950,6 +74962,7 @@ var require_runtime = __commonJS({
       return { entry, dir, reused: false };
     }
     module2.exports = {
+      compareVersions,
       npmCommand,
       runtimeDir,
       entryPath,
@@ -75897,6 +75910,7 @@ var require_gui = __commonJS({
     var { probeConnection } = require_probe();
     var { allowMcpTools } = require_permissions();
     var { readExisting, revealStoredPassword, samePath } = require_existing();
+    var { installedVersion, runtimeDir, compareVersions } = require_runtime();
     var PKG_VERSION = require_package2().version;
     var TOKEN_HEADER = "x-ahora-token";
     function detect(projectDir) {
@@ -76084,10 +76098,12 @@ var require_gui = __commonJS({
         sqlDirs
       });
       let installError;
+      let keptNewer;
       const serverEntry = resolveServerEntry(flags, {
         ...install ? { install } : {},
         log: (r) => {
           if (!r.ok) installError = r.error.message.split("\n")[0];
+          else if (r.keptNewer) keptNewer = r.keptNewer;
         }
       });
       const args = serverEntry.args;
@@ -76202,6 +76218,7 @@ var require_gui = __commonJS({
         args,
         command: serverEntry.command,
         installError,
+        keptNewer,
         credentialsFile,
         permissions,
         production: profile.production,
@@ -76286,7 +76303,15 @@ var require_gui = __commonJS({
         yaConfigurado = readExisting(path2.resolve(cwd)).found;
       } catch {
       }
-      const html = renderPage(token, cwd, { autoDetect: yaConfigurado });
+      let instalada = null;
+      try {
+        instalada = installedVersion(runtimeDir());
+      } catch {
+      }
+      const html = renderPage(token, cwd, {
+        autoDetect: yaConfigurado,
+        installedRuntime: instalada
+      });
       return new Promise((resolve, reject) => {
         let finished = false;
         const server = http.createServer(async (req, res) => {
@@ -76373,7 +76398,8 @@ Instalador AHORA-SQL-MCP v${PKG_VERSION}`);
     function escAttr(s) {
       return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
     }
-    function renderPage(token, cwd = process.cwd(), { autoDetect = false } = {}) {
+    function renderPage(token, cwd = process.cwd(), { autoDetect = false, installedRuntime = null } = {}) {
+      const obsoleto = installedRuntime && compareVersions(installedRuntime, PKG_VERSION) > 0 ? installedRuntime : null;
       const profiles = PROFILES.map(
         (p) => `<option value="${p.key}" data-canwrite="${p.canWrite}">${p.label}</option>`
       ).join("");
@@ -76428,8 +76454,15 @@ Instalador AHORA-SQL-MCP v${PKG_VERSION}`);
 </head>
 <body>
 <div class="wrap">
-  <h1>Instalador AHORA-SQL-MCP</h1>
+  <h1>Instalador AHORA-SQL-MCP <span class="hint" style="font-size:.5em">v${escAttr(PKG_VERSION)}</span></h1>
   <p class="sub">Configura el acceso a base de datos del agente en la carpeta de tu proyecto.</p>
+  ${obsoleto ? `<div class="banner warn"><strong>Esta ventana es del instalador v${escAttr(
+        PKG_VERSION
+      )}, y en este equipo ya tienes la v${escAttr(obsoleto)}.</strong>
+      Es un formulario viejo que se quedo abierto: su servidor local sigue vivo hasta que
+      se cierra. Cierra esta pestana y usa la ventana del instalador nuevo. Si guardas
+      aqui, la instalacion se queda como esta (no se degrada), pero estaras eligiendo
+      opciones de una version anterior.</div>` : ""}
 
   <section id="s1">
     <h2>1 \xB7 Proyecto</h2>
@@ -78211,7 +78244,12 @@ var require_setup = __commonJS({
         say("Instalando el servidor (una sola vez, no en cada arranque)\u2026");
         const serverEntry = resolveServerEntry(flags, {
           log: (r) => {
-            if (r.ok) {
+            if (r.ok && r.keptNewer) {
+              say(`\u2713 ${r.dir}`);
+              say(`   Se conserva la v${r.keptNewer} que ya estaba: es mas nueva que este`);
+              say(`   instalador (v${PKG_VERSION}). Lanza el instalador nuevo si querias`);
+              say("   cambiar tambien el servidor.");
+            } else if (r.ok) {
               say(`\u2713 ${r.dir}${r.reused ? "   (ya estaba esta version)" : ""}`);
             } else {
               say(`\u26A0 No se ha podido instalar: ${r.error.message.split("\n")[0]}`);

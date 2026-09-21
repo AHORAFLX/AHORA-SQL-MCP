@@ -76,6 +76,7 @@ const { credentialsPathFor, writeCredentialsFile } = require("./credentials");
 const { probeConnection } = require("./probe");
 const { allowMcpTools } = require("./permissions");
 const { readExisting, revealStoredPassword, samePath } = require("./existing");
+const { installedVersion, runtimeDir, compareVersions } = require("./runtime");
 
 const PKG_VERSION = require("../package.json").version;
 const TOKEN_HEADER = "x-ahora-token";
@@ -351,10 +352,15 @@ function write(payload, { install } = {}) {
   // su comentario en setup.js): sin capturar `installError` aqui, el formulario
   // termina "bien" y deja escrito el .mcp.json lento sin que nadie se entere.
   let installError;
+  // Si este formulario es mas viejo que lo ya instalado, installRuntime se queda con
+  // lo nuevo. Hay que decirlo: si no, quien guarda desde una ventana vieja ve
+  // "escrito correctamente" y se queda sin saber por que la version no cambia.
+  let keptNewer;
   const serverEntry = resolveServerEntry(flags, {
     ...(install ? { install } : {}),
     log: (r) => {
       if (!r.ok) installError = r.error.message.split("\n")[0];
+      else if (r.keptNewer) keptNewer = r.keptNewer;
     },
   });
   const args = serverEntry.args;
@@ -505,6 +511,7 @@ function write(payload, { install } = {}) {
     args,
     command: serverEntry.command,
     installError,
+    keptNewer,
     credentialsFile,
     permissions,
     production: profile.production,
@@ -614,7 +621,19 @@ function startGui({
   } catch {
     // Una carpeta que no existe no impide abrir el formulario: se escribe otra.
   }
-  const html = renderPage(token, cwd, { autoDetect: yaConfigurado });
+  // Que version hay instalada en el equipo. Sirve para delatar a un formulario
+  // viejo que se haya quedado abierto: su servidor local sigue vivo hasta que se
+  // cierra, y guardar ahi degradaba la instalacion sin decir nada.
+  let instalada = null;
+  try {
+    instalada = installedVersion(runtimeDir());
+  } catch {
+    // No saberlo no impide instalar; solo se pierde el aviso.
+  }
+  const html = renderPage(token, cwd, {
+    autoDetect: yaConfigurado,
+    installedRuntime: instalada,
+  });
 
   return new Promise((resolve, reject) => {
     let finished = false;
@@ -716,7 +735,19 @@ function escAttr(s) {
  * tienes que teclear nada, y si no, editas el campo. El exe NO tiene que estar en
  * el proyecto.
  */
-function renderPage(token, cwd = process.cwd(), { autoDetect = false } = {}) {
+function renderPage(
+  token,
+  cwd = process.cwd(),
+  { autoDetect = false, installedRuntime = null } = {}
+) {
+  // Un instalador MAS VIEJO que lo ya instalado solo puede hacer dano: al guardar
+  // reinstala su propia version encima de la nueva. Ya no lo hace —installRuntime se
+  // queda con la mas nueva— pero hay que decirlo, porque lo que esta mirando quien
+  // abrio esto es una pantalla de otra version, con otras opciones.
+  const obsoleto =
+    installedRuntime && compareVersions(installedRuntime, PKG_VERSION) > 0
+      ? installedRuntime
+      : null;
   const profiles = PROFILES.map(
     (p) => `<option value="${p.key}" data-canwrite="${p.canWrite}">${p.label}</option>`
   ).join("");
@@ -772,8 +803,19 @@ function renderPage(token, cwd = process.cwd(), { autoDetect = false } = {}) {
 </head>
 <body>
 <div class="wrap">
-  <h1>Instalador AHORA-SQL-MCP</h1>
+  <h1>Instalador AHORA-SQL-MCP <span class="hint" style="font-size:.5em">v${escAttr(PKG_VERSION)}</span></h1>
   <p class="sub">Configura el acceso a base de datos del agente en la carpeta de tu proyecto.</p>
+  ${
+    obsoleto
+      ? `<div class="banner warn"><strong>Esta ventana es del instalador v${escAttr(
+          PKG_VERSION
+        )}, y en este equipo ya tienes la v${escAttr(obsoleto)}.</strong>
+      Es un formulario viejo que se quedo abierto: su servidor local sigue vivo hasta que
+      se cierra. Cierra esta pestana y usa la ventana del instalador nuevo. Si guardas
+      aqui, la instalacion se queda como esta (no se degrada), pero estaras eligiendo
+      opciones de una version anterior.</div>`
+      : ""
+  }
 
   <section id="s1">
     <h2>1 · Proyecto</h2>

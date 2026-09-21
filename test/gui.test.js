@@ -995,3 +995,36 @@ test("el JS de la precarga tambien es sintacticamente valido", () => {
   assert.doesNotThrow(() => new Function(js));
   assert.ok(js.includes("function applyExisting"));
 });
+
+// ── Que version es esta ventana ──────────────────────────────────────────────
+// Dos formularios del instalador son identicos, y el de una version anterior sigue
+// vivo hasta que se cierra. Guardar en el equivocado es lo que dejo un equipo en la
+// 1.12.2 despues de lanzar la 1.15.0 desde la extension.
+
+test("la pagina dice de que version es el instalador", () => {
+  const version = require("../package.json").version;
+  const html = gui.renderPage("t", "C:/p");
+  assert.ok(
+    html.includes("v" + version),
+    "la cabecera tiene que llevar la version para poder distinguir dos ventanas"
+  );
+});
+
+test("un formulario mas viejo que lo instalado se delata", () => {
+  const html = gui.renderPage("t", "C:/p", { installedRuntime: "99.0.0" });
+  assert.ok(html.includes("ya tienes la v99.0.0"));
+  assert.ok(html.includes("formulario viejo"));
+});
+
+test("con una instalacion anterior (o ninguna) no hay aviso", () => {
+  for (const instalada of ["0.0.1", null]) {
+    const html = gui.renderPage("t", "C:/p", { installedRuntime: instalada });
+    assert.ok(!html.includes("ya tienes la v"), `sobra el aviso con ${instalada}`);
+  }
+});
+
+test("el aviso de version no rompe el JS de la pagina", () => {
+  const html = gui.renderPage("t", "C:/p", { installedRuntime: "99.0.0", autoDetect: true });
+  const js = html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>"));
+  assert.doesNotThrow(() => new Function(js));
+});

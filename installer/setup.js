@@ -1305,7 +1305,14 @@ async function main() {
     say("Instalando el servidor (una sola vez, no en cada arranque)…");
     const serverEntry = resolveServerEntry(flags, {
       log: (r) => {
-        if (r.ok) {
+        if (r.ok && r.keptNewer) {
+          // Este asistente es mas viejo que lo instalado. No se degrada, pero hay que
+          // decirlo o parecera que la actualizacion no ha hecho nada.
+          say(`✓ ${r.dir}`);
+          say(`   Se conserva la v${r.keptNewer} que ya estaba: es mas nueva que este`);
+          say(`   instalador (v${PKG_VERSION}). Lanza el instalador nuevo si querias`);
+          say("   cambiar tambien el servidor.");
+        } else if (r.ok) {
           say(`✓ ${r.dir}${r.reused ? "   (ya estaba esta version)" : ""}`);
         } else {
           say(`⚠ No se ha podido instalar: ${r.error.message.split("\n")[0]}`);

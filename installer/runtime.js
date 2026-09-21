@@ -65,6 +65,25 @@ function entryPath(dir) {
 }
 
 /**
+ * Compara dos versiones `X.Y.Z`. Devuelve <0, 0 o >0, como un comparador.
+ *
+ * Basta con esto: las versiones de este paquete son siempre tres numeros, sin
+ * etiquetas de prerelease. Lo que no se sepa leer cuenta como 0, asi que una version
+ * rara nunca se toma por mas nueva.
+ */
+function compareVersions(a, b) {
+  const partes = (v) =>
+    String(v || "")
+      .split(".")
+      .map((n) => Number.parseInt(n, 10) || 0);
+  const [x, y] = [partes(a), partes(b)];
+  for (let i = 0; i < 3; i++) {
+    if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0);
+  }
+  return 0;
+}
+
+/**
  * ¿Esta ya instalada esta version exacta?
  *
  * Se compara con la version del package.json instalado, no con la carpeta a secas: una
@@ -94,8 +113,32 @@ function installRuntime({
   force = false,
 } = {}) {
   const entry = entryPath(dir);
-  if (!force && version && installedVersion(dir) === version && fs.existsSync(entry)) {
-    return { entry, dir, reused: true };
+  const instalada = installedVersion(dir);
+  if (!force && version && instalada && fs.existsSync(entry)) {
+    if (instalada === version) return { entry, dir, reused: true };
+    /**
+     * NUNCA se degrada la instalacion.
+     *
+     * Cada instalador se instala A SI MISMO: `PKG_SPEC` lleva su propia version. Eso
+     * significa que un instalador viejo —el `.exe` de hace dos meses, el
+     * INSTALAR-AHORA.cmd que alguien guardo, la copia ya instalada, o un formulario
+     * de una version anterior que se quedo abierto en otra pestaña, porque su
+     * servidor local sigue vivo hasta que se cierra— reinstala la version vieja
+     * ENCIMA de una mas nueva, y lo hace sin decir nada.
+     *
+     * Caso real: se lanza el instalador nuevo desde la extension con
+     * `npx --package=github:...#v1.15.0`, se guarda sin darse cuenta en la pestaña
+     * vieja, y el equipo se queda en la 1.12.2. Desde fuera parece que actualizar no
+     * funciona, y no hay ni un mensaje que lo explique.
+     *
+     * Quedarse con la mas nueva es siempre lo correcto: la configuracion apunta a
+     * `entryPath(dir)`, que no depende de la version, y los argumentos que escribe un
+     * instalador viejo los entiende un servidor nuevo. Un downgrade a proposito sigue
+     * siendo posible con `force`.
+     */
+    if (compareVersions(instalada, version) > 0) {
+      return { entry, dir, reused: true, keptNewer: instalada };
+    }
   }
 
   fs.mkdirSync(dir, { recursive: true });
@@ -138,6 +181,7 @@ function installRuntime({
 }
 
 module.exports = {
+  compareVersions,
   npmCommand,
   runtimeDir,
   entryPath,
