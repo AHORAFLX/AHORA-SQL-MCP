@@ -29,6 +29,19 @@ function tempDir(prefix = "existing-") {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
 }
 
+/**
+ * Proyecto de mentira para los tests de credenciales, que se limpia solo.
+ *
+ * Hace falta porque `credentialsPathFor` NO escribe en la carpeta temporal: escribe
+ * en el %APPDATA% de verdad, que es donde viven las credenciales del usuario. Sin
+ * borrarlo, cada ejecucion de los tests deja ahi un fichero suelto.
+ */
+function proyectoConCredenciales(t) {
+  const dir = tempDir("proyecto-");
+  t.after(() => fs.rmSync(credentialsPathFor(dir), { force: true }));
+  return dir;
+}
+
 /** Proyecto con una entrada `ahora-sql` ya escrita, como la deja el instalador. */
 function projectWith(args, { extra = {}, clientKey = "mcpServers", file = ".mcp.json" } = {}) {
   const root = tempDir();
@@ -289,8 +302,8 @@ test("readCredentials con un fichero que no existe no lanza", () => {
  * contrasena que no se reescribe se conserva, y se conserva CIFRADA —no se descifra
  * para volver a cifrarla, que costaria un arranque de PowerShell por conexion—.
  */
-test("writeCredentialsFile reutiliza la contrasena cifrada que ya estaba", () => {
-  const proyecto = tempDir("proyecto-");
+test("writeCredentialsFile reutiliza la contrasena cifrada que ya estaba", (t) => {
+  const proyecto = proyectoConCredenciales(t);
   writeCredentialsFile(proyecto, [
     { server: "PC\\SQL", database: "DEMO_IC", user: "sa", password: "secreta", alias: "config" },
     { server: "PC\\SQL", database: "DEMO", user: "sa", password: "otra", alias: "data" },
@@ -311,8 +324,8 @@ test("writeCredentialsFile reutiliza la contrasena cifrada que ya estaba", () =>
   assert.equal(reveal(doc.connections.data.passwordEnc), "otra");
 });
 
-test("una contrasena nueva sustituye a la guardada", () => {
-  const proyecto = tempDir("proyecto-");
+test("una contrasena nueva sustituye a la guardada", (t) => {
+  const proyecto = proyectoConCredenciales(t);
   const uno = [{ server: "PC\\SQL", database: "DEMO", user: "sa", password: "vieja" }];
   writeCredentialsFile(proyecto, uno);
   writeCredentialsFile(proyecto, [{ ...uno[0], password: "nueva" }]);
@@ -321,16 +334,16 @@ test("una contrasena nueva sustituye a la guardada", () => {
   assert.equal(reveal(doc.passwordEnc), "nueva");
 });
 
-test("sin contrasena guardada ni tecleada se avisa en vez de escribir un fichero inservible", () => {
-  const proyecto = tempDir("proyecto-");
+test("sin contrasena guardada ni tecleada se avisa en vez de escribir un fichero inservible", (t) => {
+  const proyecto = proyectoConCredenciales(t);
   assert.throws(
     () => writeCredentialsFile(proyecto, [{ server: "PC", database: "D", user: "sa", password: "" }]),
     /Falta la contrasena/
   );
 });
 
-test("renombrar el alias de la unica conexion no obliga a reescribir la contrasena", () => {
-  const proyecto = tempDir("proyecto-");
+test("renombrar el alias de la unica conexion no obliga a reescribir la contrasena", (t) => {
+  const proyecto = proyectoConCredenciales(t);
   writeCredentialsFile(proyecto, [
     { server: "PC\\SQL", database: "DEMO", user: "sa", password: "secreta" },
   ]);
