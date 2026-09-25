@@ -117,6 +117,13 @@ function checkNode() {
     process.exit(1);
   }
   say(`✓ Node ${nodeVersion} en el equipo`);
+  // No es fatal: si el servidor ya esta instalado en esta version, git no hace falta.
+  // Pero avisar aqui evita rellenar todo el asistente para enterarse al final.
+  if (!toolVersion("git")) {
+    say("⚠ No hay Git en este equipo (no esta en el PATH). npm lo necesita para");
+    say("  descargar el servidor de GitHub: sin el, la instalacion fallara. Instala");
+    say("  Git for Windows (winget install --id Git.Git -e) y abre un terminal nuevo.");
+  }
 }
 
 /**
@@ -1314,6 +1321,13 @@ async function main() {
           say("   cambiar tambien el servidor.");
         } else if (r.ok) {
           say(`✓ ${r.dir}${r.reused ? "   (ya estaba esta version)" : ""}`);
+        } else if (r.error.code === "ENOGIT") {
+          // Sin git la reserva npx tampoco arranca: resuelve el mismo spec `github:`.
+          say("⚠ No se ha podido instalar: falta Git en este equipo, y npm lo necesita");
+          say("   para descargar el servidor de GitHub.");
+          say("   Se escribe la forma con npx, pero TAMPOCO arrancara sin Git.");
+          say("   Instala Git for Windows (winget install --id Git.Git -e), cierra y");
+          say("   vuelve a abrir VS Code o el terminal, y vuelve a lanzar el instalador.");
         } else {
           say(`⚠ No se ha podido instalar: ${r.error.message.split("\n")[0]}`);
           say("   Se escribe la forma con npx, que funciona pero resuelve el paquete en");

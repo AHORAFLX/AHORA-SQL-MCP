@@ -74868,6 +74868,29 @@ var require_permissions = __commonJS({
   }
 });
 
+// installer/tools.js
+var require_tools = __commonJS({
+  "installer/tools.js"(exports2, module2) {
+    var { execFileSync: execFileSync2 } = require("child_process");
+    function toolVersion(command) {
+      const intentos = process.platform === "win32" ? [false, true] : [false];
+      for (const conShell of intentos) {
+        try {
+          const salida = execFileSync2(command, ["--version"], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "ignore"],
+            shell: conShell
+          });
+          if (salida && salida.trim()) return salida.trim();
+        } catch {
+        }
+      }
+      return null;
+    }
+    module2.exports = { toolVersion };
+  }
+});
+
 // installer/runtime.js
 var require_runtime = __commonJS({
   "installer/runtime.js"(exports2, module2) {
@@ -74875,6 +74898,7 @@ var require_runtime = __commonJS({
     var fs6 = require("fs");
     var path2 = require("path");
     var { execFileSync: execFileSync2 } = require("child_process");
+    var { toolVersion } = require_tools();
     function npmCommand(platform2 = process.platform) {
       return platform2 === "win32" ? "npm.cmd" : "npm";
     }
@@ -74911,13 +74935,24 @@ var require_runtime = __commonJS({
         return null;
       }
     }
+    function specNeedsGit(spec) {
+      return /^(github:|gitlab:|bitbucket:|git\+|git:)/i.test(String(spec || ""));
+    }
+    function gitMissingError() {
+      const err = new Error(
+        "No hay Git instalado en este equipo (no esta en el PATH) y npm lo necesita para descargar el servidor de GitHub. Instala Git for Windows (winget install --id Git.Git -e, o https://git-scm.com/download/win), cierra y vuelve a abrir VS Code o el terminal para que coja el PATH nuevo, y vuelve a lanzar el instalador."
+      );
+      err.code = "ENOGIT";
+      return err;
+    }
     function installRuntime({
       spec,
       version,
       dir = runtimeDir(),
       exec = execFileSync2,
       platform: platform2 = process.platform,
-      force = false
+      force = false,
+      gitVersion = () => toolVersion("git")
     } = {}) {
       const entry = entryPath(dir);
       const instalada = installedVersion(dir);
@@ -74927,6 +74962,7 @@ var require_runtime = __commonJS({
           return { entry, dir, reused: true, keptNewer: instalada };
         }
       }
+      if (specNeedsGit(spec) && !gitVersion()) throw gitMissingError();
       fs6.mkdirSync(dir, { recursive: true });
       const manifest = path2.join(dir, "package.json");
       if (!fs6.existsSync(manifest)) {
@@ -74963,6 +74999,7 @@ var require_runtime = __commonJS({
     }
     module2.exports = {
       compareVersions,
+      specNeedsGit,
       npmCommand,
       runtimeDir,
       entryPath,
@@ -75203,29 +75240,6 @@ var require_existing = __commonJS({
       readCredentials,
       readPermissions
     };
-  }
-});
-
-// installer/tools.js
-var require_tools = __commonJS({
-  "installer/tools.js"(exports2, module2) {
-    var { execFileSync: execFileSync2 } = require("child_process");
-    function toolVersion(command) {
-      const intentos = process.platform === "win32" ? [false, true] : [false];
-      for (const conShell of intentos) {
-        try {
-          const salida = execFileSync2(command, ["--version"], {
-            encoding: "utf8",
-            stdio: ["ignore", "pipe", "ignore"],
-            shell: conShell
-          });
-          if (salida && salida.trim()) return salida.trim();
-        } catch {
-        }
-      }
-      return null;
-    }
-    module2.exports = { toolVersion };
   }
 });
 
@@ -76098,12 +76112,15 @@ var require_gui = __commonJS({
         sqlDirs
       });
       let installError;
+      let gitMissing = false;
       let keptNewer;
       const serverEntry = resolveServerEntry(flags, {
         ...install ? { install } : {},
         log: (r) => {
-          if (!r.ok) installError = r.error.message.split("\n")[0];
-          else if (r.keptNewer) keptNewer = r.keptNewer;
+          if (!r.ok) {
+            installError = r.error.message.split("\n")[0];
+            gitMissing = r.error.code === "ENOGIT";
+          } else if (r.keptNewer) keptNewer = r.keptNewer;
         }
       });
       const args = serverEntry.args;
@@ -76218,6 +76235,7 @@ var require_gui = __commonJS({
         args,
         command: serverEntry.command,
         installError,
+        gitMissing,
         keptNewer,
         credentialsFile,
         permissions,
@@ -77218,7 +77236,14 @@ $("btnWrite").onclick = async () => {
           "ese nombre chocaba con la extension nativa de SQL Server de VS Code.</span>" : "") +
         (w.others.length ? ' <span class="hint">\xB7 conservados: ' + esc(w.others.join(", ")) + "</span>" : "") +
         "</li>").join("") + "</ul>";
-    if (res.command === "npx") {
+    if (res.command === "npx" && res.gitMissing) {
+      html += '<div class="banner warn"><strong>Falta Git en este equipo.</strong> npm lo ' +
+        "necesita para descargar el servidor de GitHub, asi que no se ha podido instalar. Se " +
+        "ha escrito una configuracion de reserva con <code>npx</code>, pero <strong>tampoco " +
+        "arrancara</strong> sin Git. Instala Git for Windows (<code>winget install --id " +
+        "Git.Git -e</code> o https://git-scm.com/download/win), cierra y vuelve a abrir VS " +
+        "Code o el terminal, y vuelve a lanzar el instalador.</div>";
+    } else if (res.command === "npx") {
       html += '<div class="banner warn">No se ha podido instalar el servidor en tu maquina' +
         (res.installError ? " (" + esc(res.installError) + ")" : "") +
         ". Se ha escrito una configuracion de reserva con <code>npx</code>: funciona, pero " +
@@ -77419,6 +77444,11 @@ var require_setup = __commonJS({
         process.exit(1);
       }
       say(`\u2713 Node ${nodeVersion} en el equipo`);
+      if (!toolVersion("git")) {
+        say("\u26A0 No hay Git en este equipo (no esta en el PATH). npm lo necesita para");
+        say("  descargar el servidor de GitHub: sin el, la instalacion fallara. Instala");
+        say("  Git for Windows (winget install --id Git.Git -e) y abre un terminal nuevo.");
+      }
     }
     var SKIP_DIRS = /* @__PURE__ */ new Set([
       "node_modules",
@@ -78251,6 +78281,12 @@ var require_setup = __commonJS({
               say("   cambiar tambien el servidor.");
             } else if (r.ok) {
               say(`\u2713 ${r.dir}${r.reused ? "   (ya estaba esta version)" : ""}`);
+            } else if (r.error.code === "ENOGIT") {
+              say("\u26A0 No se ha podido instalar: falta Git en este equipo, y npm lo necesita");
+              say("   para descargar el servidor de GitHub.");
+              say("   Se escribe la forma con npx, pero TAMPOCO arrancara sin Git.");
+              say("   Instala Git for Windows (winget install --id Git.Git -e), cierra y");
+              say("   vuelve a abrir VS Code o el terminal, y vuelve a lanzar el instalador.");
             } else {
               say(`\u26A0 No se ha podido instalar: ${r.error.message.split("\n")[0]}`);
               say("   Se escribe la forma con npx, que funciona pero resuelve el paquete en");

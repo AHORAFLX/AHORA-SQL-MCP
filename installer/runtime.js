@@ -24,6 +24,7 @@ const os = require("os");
 const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
+const { toolVersion } = require("./tools");
 
 /** `npm` no es un ejecutable en Windows, es un .cmd. */
 function npmCommand(platform = process.platform) {
@@ -99,6 +100,32 @@ function installedVersion(dir) {
 }
 
 /**
+ * Specs que npm resuelve CON git: `github:`, `git+https:`, `git://`… Un tarball o un
+ * paquete del registro no lo necesitan.
+ */
+function specNeedsGit(spec) {
+  return /^(github:|gitlab:|bitbucket:|git\+|git:)/i.test(String(spec || ""));
+}
+
+/**
+ * Sin git, `npm install github:...` no puede resolver la referencia: npm lanza
+ * `git ls-remote` y falla con un `spawn git ENOENT` que el formulario reducia a
+ * "Command failed: npm.cmd install ...", sin la causa. Caso real: un companero sin Git
+ * for Windows, que ademas se quedaba con la reserva npx, que tambien necesita git y
+ * por tanto tampoco arrancaba. Se comprueba antes de lanzar npm para decirlo claro.
+ */
+function gitMissingError() {
+  const err = new Error(
+    "No hay Git instalado en este equipo (no esta en el PATH) y npm lo necesita para " +
+      "descargar el servidor de GitHub. Instala Git for Windows (winget install --id " +
+      "Git.Git -e, o https://git-scm.com/download/win), cierra y vuelve a abrir VS Code " +
+      "o el terminal para que coja el PATH nuevo, y vuelve a lanzar el instalador."
+  );
+  err.code = "ENOGIT";
+  return err;
+}
+
+/**
  * Instala el servidor en la carpeta estable y devuelve la ruta de su script.
  *
  * `--omit=dev` importa: sin el, npm se trae eslint, prettier y nodemon, que no hacen
@@ -111,6 +138,7 @@ function installRuntime({
   exec = execFileSync,
   platform = process.platform,
   force = false,
+  gitVersion = () => toolVersion("git"),
 } = {}) {
   const entry = entryPath(dir);
   const instalada = installedVersion(dir);
@@ -140,6 +168,9 @@ function installRuntime({
       return { entry, dir, reused: true, keptNewer: instalada };
     }
   }
+
+  // Despues de la comprobacion de reutilizacion: si ya esta instalada, git no hace falta.
+  if (specNeedsGit(spec) && !gitVersion()) throw gitMissingError();
 
   fs.mkdirSync(dir, { recursive: true });
   // npm necesita un package.json en el prefix: sin el sube buscando uno y puede acabar
@@ -182,6 +213,7 @@ function installRuntime({
 
 module.exports = {
   compareVersions,
+  specNeedsGit,
   npmCommand,
   runtimeDir,
   entryPath,

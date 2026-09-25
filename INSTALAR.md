@@ -14,7 +14,8 @@ Instala las dos. Con skills pero sin MCP, el agente genera T-SQL contra nombres 
 ## 0. Requisitos
 
 - [Node.js](https://nodejs.org/) 18 o superior.
-- Acceso git a los repos privados de AHORA (el mismo con el que ya clonas repos del equipo).
+- [Git](https://git-scm.com/download/win) instalado y en el PATH (`winget install --id Git.Git -e`).
+  No clonas nada, pero npm lo usa para descargar el paquete de GitHub: sin él la instalación falla.
 - Un cliente con soporte MCP: Claude Code, VS Code con Copilot, Cursor…
 
 No hace falta clonar ningún repositorio.
@@ -352,6 +353,8 @@ recibe regla: una para eso autorizaría cualquier cosa.
 | Síntoma | Causa habitual |
 |---|---|
 | No aparece ninguna herramienta de SQL | No has abierto una sesión nueva, o la has abierto sobre otra carpeta |
+| `Command failed: npm.cmd install ... github:AHORAFLX/AHORA-SQL-MCP#v…` o "Falta Git en este equipo" | No tienes Git instalado. npm lo necesita para descargar el paquete de GitHub, y la configuración de reserva con `npx` **tampoco** arranca sin él. Instala Git for Windows (`winget install --id Git.Git -e`), abre VS Code o el terminal de nuevo y vuelve a lanzar el instalador |
+| El error dice una versión más vieja que la última | Has lanzado un instalador antiguo (un `.exe` o un `INSTALAR-AHORA.cmd` guardado, o una pestaña del formulario que seguía abierta): cada instalador instala su propia versión. Cierra las pestañas del instalador y usa el de la última versión |
 | `⏸ Pending approval` al mirar con `claude mcp list` | Falta aprobar el servidor: abre una sesión sobre la carpeta y acepta. Si lo rechazaste, `claude mcp reset-project-choices` |
 | Elegí "VS Code" pero uso la extensión de Claude Code | Son agentes distintos. La extensión **es** Claude Code y lee `.mcp.json`; la opción de VS Code es para GitHub Copilot |
 | En VS Code salen herramientas de SQL duplicadas o el agente usa las que no son | Tienes un `.mcp.json` viejo con el servidor llamado `mssql`, que choca con la extensión nativa `ms-mssql.mssql`. Vuelve a lanzar el instalador: renombra el servidor a `ahora-sql` y retira la entrada anterior |

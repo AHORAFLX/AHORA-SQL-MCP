@@ -352,6 +352,9 @@ function write(payload, { install } = {}) {
   // su comentario en setup.js): sin capturar `installError` aqui, el formulario
   // termina "bien" y deja escrito el .mcp.json lento sin que nadie se entere.
   let installError;
+  // Sin git la reserva npx TAMPOCO arranca (resuelve el mismo spec `github:`), asi que
+  // el aviso no puede decir "funciona, pero es lenta": tiene que decir que falta Git.
+  let gitMissing = false;
   // Si este formulario es mas viejo que lo ya instalado, installRuntime se queda con
   // lo nuevo. Hay que decirlo: si no, quien guarda desde una ventana vieja ve
   // "escrito correctamente" y se queda sin saber por que la version no cambia.
@@ -359,8 +362,10 @@ function write(payload, { install } = {}) {
   const serverEntry = resolveServerEntry(flags, {
     ...(install ? { install } : {}),
     log: (r) => {
-      if (!r.ok) installError = r.error.message.split("\n")[0];
-      else if (r.keptNewer) keptNewer = r.keptNewer;
+      if (!r.ok) {
+        installError = r.error.message.split("\n")[0];
+        gitMissing = r.error.code === "ENOGIT";
+      } else if (r.keptNewer) keptNewer = r.keptNewer;
     },
   });
   const args = serverEntry.args;
@@ -511,6 +516,7 @@ function write(payload, { install } = {}) {
     args,
     command: serverEntry.command,
     installError,
+    gitMissing,
     keptNewer,
     credentialsFile,
     permissions,
@@ -1571,7 +1577,14 @@ $("btnWrite").onclick = async () => {
           "ese nombre chocaba con la extension nativa de SQL Server de VS Code.</span>" : "") +
         (w.others.length ? ' <span class="hint">· conservados: ' + esc(w.others.join(", ")) + "</span>" : "") +
         "</li>").join("") + "</ul>";
-    if (res.command === "npx") {
+    if (res.command === "npx" && res.gitMissing) {
+      html += '<div class="banner warn"><strong>Falta Git en este equipo.</strong> npm lo ' +
+        "necesita para descargar el servidor de GitHub, asi que no se ha podido instalar. Se " +
+        "ha escrito una configuracion de reserva con <code>npx</code>, pero <strong>tampoco " +
+        "arrancara</strong> sin Git. Instala Git for Windows (<code>winget install --id " +
+        "Git.Git -e</code> o https://git-scm.com/download/win), cierra y vuelve a abrir VS " +
+        "Code o el terminal, y vuelve a lanzar el instalador.</div>";
+    } else if (res.command === "npx") {
       html += '<div class="banner warn">No se ha podido instalar el servidor en tu maquina' +
         (res.installError ? " (" + esc(res.installError) + ")" : "") +
         ". Se ha escrito una configuracion de reserva con <code>npx</code>: funciona, pero " +

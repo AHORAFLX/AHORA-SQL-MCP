@@ -170,6 +170,49 @@ test("installRuntime falla si npm termina bien pero no deja el script", () => {
   );
 });
 
+// ── sin git ──
+// Caso real: un companero sin Git for Windows. npm fallaba con `spawn git ENOENT`, el
+// formulario lo reducia a "Command failed: npm.cmd install ..." y se quedaba la
+// reserva npx, que tampoco arranca sin git.
+
+test("installRuntime avisa de que falta git ANTES de lanzar npm", () => {
+  const dir = tempDir("rt-nogit-");
+  assert.throws(
+    () =>
+      installRuntime({
+        spec: PKG_SPEC,
+        version: "9.9.9",
+        dir,
+        gitVersion: () => null,
+        exec: () => assert.fail("sin git no deberia invocar npm"),
+      }),
+    (err) => err.code === "ENOGIT" && /Git/.test(err.message) && !err.message.includes("\n")
+  );
+});
+
+test("installRuntime no pide git si ya esta instalada esa version", () => {
+  const dir = tempDir("rt-nogit-ok-");
+  fakeNpmInstall(dir, "1.8.1");
+  const { reused } = installRuntime({
+    spec: PKG_SPEC,
+    version: "1.8.1",
+    dir,
+    gitVersion: () => assert.fail("no hace falta git para reutilizar"),
+    exec: () => assert.fail("no deberia invocar npm"),
+  });
+  assert.equal(reused, true);
+});
+
+test("specNeedsGit distingue los specs de git de un tarball o del registro", () => {
+  assert.equal(runtime.specNeedsGit(PKG_SPEC), true);
+  assert.equal(runtime.specNeedsGit("git+https://github.com/a/b.git"), true);
+  assert.equal(
+    runtime.specNeedsGit("https://codeload.github.com/a/b/tar.gz/refs/tags/v1.0.0"),
+    false
+  );
+  assert.equal(runtime.specNeedsGit("@ahoraflx/sql-mcp@1.0.0"), false);
+});
+
 // ── que forma se escribe en la configuracion ──
 
 const FLAGS = buildFlags({

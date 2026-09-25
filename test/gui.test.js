@@ -365,8 +365,41 @@ test("write informa en la respuesta si la instalacion ha fallado y se ha caido a
       assert.equal(r.status, 200);
       assert.equal(r.json.command, "npx");
       assert.equal(r.json.installError, "git no encontrado en PATH");
+      assert.equal(r.json.gitMissing, false, "solo ENOGIT cuenta como falta de git");
     },
     { install: failingInstall }
+  );
+});
+
+test("write marca gitMissing si la instalacion falla por falta de git", async () => {
+  // Sin git la reserva npx tampoco arranca, asi que el formulario no puede decir
+  // "funciona, pero es lenta": necesita saber que la causa es git.
+  const root = coreProject();
+  const noGit = () => {
+    const err = new Error("No hay Git instalado en este equipo");
+    err.code = "ENOGIT";
+    throw err;
+  };
+  await withGui(
+    async ({ call, origin }) => {
+      const det = (await call("/api/detect", { body: { projectDir: root }, origin })).json;
+      const core = det.files.find((f) => f.type === "core");
+      const r = await call("/api/write", {
+        origin,
+        body: {
+          projectDir: root,
+          configFile: core.path,
+          environment: det.defaultEnvironment,
+          connections: [{ name: "DataConnectionString", alias: "data" }],
+          profileKey: "local",
+          clients: ["claude"],
+        },
+      });
+      assert.equal(r.status, 200);
+      assert.equal(r.json.command, "npx");
+      assert.equal(r.json.gitMissing, true);
+    },
+    { install: noGit }
   );
 });
 

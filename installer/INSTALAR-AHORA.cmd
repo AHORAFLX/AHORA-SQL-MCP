@@ -10,7 +10,7 @@ REM  siempre instala la version buena sin tener que redistribuir nada.
 REM
 REM  Requisitos en la maquina destino:
 REM    - Node.js 18 o superior            (https://nodejs.org/)
-REM    - Credenciales de git de AHORA     (las mismas que para clonar repos)
+REM    - Git for Windows en el PATH       (npm lo usa para bajar el paquete de GitHub)
 REM ---------------------------------------------------------------------------
 setlocal
 
@@ -23,6 +23,21 @@ where node >nul 2>nul
 if errorlevel 1 (
   echo  [X] No se encuentra Node.js en el PATH.
   echo      Instala Node LTS desde https://nodejs.org/ y vuelve a ejecutar esto.
+  echo.
+  pause
+  exit /b 1
+)
+
+REM Sin git, npx no puede resolver `github:...` y falla con un "Command failed" que no
+REM dice la causa. Caso real: un companero sin Git for Windows.
+where git >nul 2>nul
+if errorlevel 1 (
+  echo  [X] No se encuentra Git en el PATH.
+  echo      npm lo necesita para descargar el instalador de GitHub, aunque no
+  echo      clones nada. Instala Git for Windows:
+  echo        winget install --id Git.Git -e
+  echo      o desde https://git-scm.com/download/win, abre una ventana nueva y
+  echo      vuelve a ejecutar esto.
   echo.
   pause
   exit /b 1
