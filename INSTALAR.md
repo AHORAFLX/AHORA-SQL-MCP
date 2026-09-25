@@ -28,7 +28,7 @@ El paso 1 (skills) se hace con un comando y no tiene más. El paso 2 (el MCP) es
 enjundia, y hay un instalador que lo hace por ti. Ábrelo **desde la carpeta de tu proyecto**:
 
 ```bash
-npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.15.1 ahora-setup
+npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.15.2 ahora-setup
 ```
 
 Se abre un formulario en el navegador: detecta tu `Web.config` o `appsettings.json`, **se conecta de
@@ -116,7 +116,7 @@ npx skills add AHORAFLX/AHORA-SCO-SKILLS/skills/General
 Instala el servidor una vez:
 
 ```bash
-npm install --omit=dev github:AHORAFLX/AHORA-SQL-MCP#v1.15.1 --prefix "%LOCALAPPDATA%\AHORA-SQL-MCP"
+npm install --omit=dev github:AHORAFLX/AHORA-SQL-MCP#v1.15.2 --prefix "%LOCALAPPDATA%\AHORA-SQL-MCP"
 ```
 
 Después crea un fichero `.mcp.json` en la **raíz del proyecto** y pega el bloque que te
