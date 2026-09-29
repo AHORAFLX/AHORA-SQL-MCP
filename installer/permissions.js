@@ -49,6 +49,13 @@ function writeRules(serverName = SERVER_NAME) {
  * `ahora_connect` y `ahora_disconnect` entran en lectura aunque cambien el estado de
  * la sesion: no tocan datos, y sin ellas el agente no puede ni reconectar cuando el
  * servidor pierde la conexion.
+ *
+ * `ahora_abrir_pantalla` y `ahora_capturar_pantalla` (ahora-mcp 0.73.0/0.74.0) tampoco
+ * tocan datos: abren una pantalla en el AhoraERP.exe de este equipo y la devuelven como
+ * imagen, lo que las skills de tickets usan para VER lo que describe el ticket. Sus
+ * nombres no encajan en ningun comodin de arriba, y sin regla propia la sesion `-p` que
+ * lanza la extension DevOps Ahora las denegaba ("Claude requested permissions to use
+ * mcp__ahora-erp__ahora_abrir_pantalla") sin que nadie pudiera contestar.
  */
 function productReadRules(serverName = PRODUCT_SERVER_NAME) {
   return [
@@ -62,6 +69,8 @@ function productReadRules(serverName = PRODUCT_SERVER_NAME) {
     `mcp__${serverName}__ahora_test_connection`,
     `mcp__${serverName}__ahora_connect`,
     `mcp__${serverName}__ahora_disconnect`,
+    `mcp__${serverName}__ahora_abrir_pantalla`,
+    `mcp__${serverName}__ahora_capturar_pantalla`,
   ];
 }
 
@@ -89,6 +98,9 @@ function productWriteRules(serverName = PRODUCT_SERVER_NAME) {
     `mcp__${serverName}__ahora_confirmar_*`,
     `mcp__${serverName}__ahora_cancelar_*`,
     `mcp__${serverName}__ahora_ejecutar_dml`,
+    // Pulsa botones y escribe en campos del ERP abierto (0.74.0). Se niega sola a Guardar,
+    // Eliminar, Anular... salvo permitirEscritura=true, pero por coordenadas no hay red.
+    `mcp__${serverName}__ahora_actuar_pantalla`,
   ];
 }
 

@@ -59,6 +59,19 @@ test("con includeWrites se anaden tambien las de escritura", () => {
   assert.ok(allow.includes("mcp__ahora-sql__execute_sql_file"));
 });
 
+test("las tools de pantalla del MCP de producto (0.73.0/0.74.0) entran sin pedir permiso", () => {
+  // Sus nombres no encajan en ningun comodin (leer_*, listar_*, buscar_*, obtener_*):
+  // sin regla propia, la sesion `-p` de la extension DevOps Ahora las denegaba.
+  const root = tempDir();
+  const { target } = allowMcpTools(root, { product: true });
+  const allow = read(target).permissions.allow;
+  assert.ok(allow.includes("mcp__ahora-erp__ahora_abrir_pantalla"), "abrir una pantalla no toca datos");
+  assert.ok(allow.includes("mcp__ahora-erp__ahora_capturar_pantalla"), "capturarla tampoco");
+  assert.ok(!allow.includes("mcp__ahora-erp__ahora_actuar_pantalla"), "pulsar y escribir en el ERP es escritura");
+  const { target: conEscritura } = allowMcpTools(tempDir(), { product: true, productWrites: true });
+  assert.ok(read(conEscritura).permissions.allow.includes("mcp__ahora-erp__ahora_actuar_pantalla"));
+});
+
 test("las reglas del nombre anterior se retiran, y solo las nuestras", () => {
   // Quedarian autorizando un servidor que ya no existe. Pero un `mcp__mssql__*`
   // cualquiera puede ser de otra herramienta del equipo, y ese no se toca.

@@ -74743,7 +74743,9 @@ var require_permissions = __commonJS({
         `mcp__${serverName}__ahora_diagnosticar_usuario`,
         `mcp__${serverName}__ahora_test_connection`,
         `mcp__${serverName}__ahora_connect`,
-        `mcp__${serverName}__ahora_disconnect`
+        `mcp__${serverName}__ahora_disconnect`,
+        `mcp__${serverName}__ahora_abrir_pantalla`,
+        `mcp__${serverName}__ahora_capturar_pantalla`
       ];
     }
     function productWriteRules(serverName = PRODUCT_SERVER_NAME) {
@@ -74762,7 +74764,10 @@ var require_permissions = __commonJS({
         `mcp__${serverName}__ahora_escribir_*`,
         `mcp__${serverName}__ahora_confirmar_*`,
         `mcp__${serverName}__ahora_cancelar_*`,
-        `mcp__${serverName}__ahora_ejecutar_dml`
+        `mcp__${serverName}__ahora_ejecutar_dml`,
+        // Pulsa botones y escribe en campos del ERP abierto (0.74.0). Se niega sola a Guardar,
+        // Eliminar, Anular... salvo permitirEscritura=true, pero por coordenadas no hay red.
+        `mcp__${serverName}__ahora_actuar_pantalla`
       ];
     }
     function playwrightReadRules(serverName = PLAYWRIGHT_SERVER_NAME) {
