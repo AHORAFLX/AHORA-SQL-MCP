@@ -57,6 +57,7 @@ const {
   dotnetSdkVersion,
   installProductMcp,
   installProductFromFolder,
+  productFailureAdvice,
 } = require("./product-mcp");
 const {
   PLAYWRIGHT_PACKAGE,
@@ -1390,9 +1391,9 @@ async function main() {
         // perderlo por un fallo del segundo servidor seria peor que quedarse sin el
         // segundo. Se dice claro que ha fallado y por que.
         say(`⚠ No se ha podido instalar el MCP de producto: ${err.message.split("\n")[0]}`);
-        say("   El MCP de SQL queda configurado igualmente. Para el de producto, vuelve");
-        say("   a lanzar el instalador con el SDK de .NET 10 disponible, o indica una");
-        say("   carpeta con el ya publicado.");
+        say("   El MCP de SQL queda configurado igualmente.");
+        const consejo = productFailureAdvice(err);
+        if (consejo) say(`   ${consejo}`);
         product.install = false;
       }
     }

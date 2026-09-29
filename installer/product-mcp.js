@@ -95,8 +95,10 @@ function productDll(dir) {
 }
 
 /** Marca de que version quedo instalada, para no volver a publicar la misma. */
+const STAMP_FILE = "ahora-mcp-instalado.json";
+
 function stampPath(dir) {
-  return path.join(productAppDir(dir), "ahora-mcp-instalado.json");
+  return path.join(productAppDir(dir), STAMP_FILE);
 }
 
 function installedProductVersion(dir) {
@@ -348,21 +350,186 @@ function dotnetSdkVersion(version = toolVersion("dotnet")) {
   return Number.isFinite(major) && major >= MIN_DOTNET_MAJOR ? version : null;
 }
 
+/** Error de una sola linea con `code`, para que la GUI y la consola elijan el consejo. */
+function productError(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
+}
+
 function checkDotnetSdk(version = toolVersion("dotnet")) {
   if (!version) {
-    throw new Error(
+    throw productError(
+      "ENODOTNET",
       "No hay SDK de .NET en este equipo (no esta en el PATH). El MCP de producto se " +
         `publica desde NuGet, y para eso hace falta el SDK de .NET ${MIN_DOTNET_MAJOR} ` +
         "o superior: https://dotnet.microsoft.com/download"
     );
   }
   if (!dotnetSdkVersion(version)) {
-    throw new Error(
+    throw productError(
+      "ENODOTNET",
       `El SDK de .NET ${version} es demasiado antiguo. El paquete ${PRODUCT_PACKAGE} es ` +
         `net${MIN_DOTNET_MAJOR}.0-windows y no se puede restaurar con un SDK anterior.`
     );
   }
   return version;
+}
+
+/**
+ * Los .dll de la instalacion que algun proceso tiene cargados.
+ *
+ * Caso real, y el motivo del "a veces" del fallo: sale una version nueva en el feed
+ * mientras hay sesiones de Claude Code con `ahora-erp` arrancado. Cada una es un
+ * `dotnet exec app/ahora-mcp.dll` que mantiene sus ensamblados abiertos, y Windows no
+ * deja sobrescribirlos: `dotnet publish` reintenta la copia (MSB3026), se rinde
+ * (MSB3027) y al usuario le llegaba un "Command failed: dotnet publish ..." que no
+ * decia nada, con un consejo sobre el SDK que ya tenia instalado.
+ *
+ * Abrir para escritura (`r+`) es la misma operacion que va a fallar despues, sin
+ * escribir nada: comprobado que un ensamblado cargado da EBUSY, y uno que el proceso
+ * aun no ha cargado sale libre. Por eso se miran todos y no solo `ahora-mcp.dll`.
+ */
+function filesInUse(appDir, { open = fs.openSync, close = fs.closeSync } = {}) {
+  let names;
+  try {
+    names = fs.readdirSync(appDir).filter((n) => n.toLowerCase().endsWith(".dll"));
+  } catch {
+    return [];
+  }
+  const busy = [];
+  for (const name of names) {
+    try {
+      close(open(path.join(appDir, name), "r+"));
+    } catch (err) {
+      if (err.code === "EBUSY" || err.code === "EPERM") busy.push(name);
+    }
+  }
+  return busy;
+}
+
+function inUseError(busy = []) {
+  const which = busy.length
+    ? ` (${busy.slice(0, 2).join(", ")}${busy.length > 2 ? ", …" : ""} abiertos por otro proceso)`
+    : "";
+  return productError(
+    "EPRODUCTINUSE",
+    `${PRODUCT_PACKAGE} esta en uso${which}, asi que no se puede sustituir por la version nueva. ` +
+      "Cierra las sesiones de Claude Code y las ventanas de VS Code que tengan el MCP " +
+      "ahora-erp arrancado y vuelve a lanzar el instalador. La version instalada no se ha tocado."
+  );
+}
+
+function ensureNotInUse(appDir, options) {
+  const busy = filesInUse(appDir, options);
+  if (busy.length > 0) throw inUseError(busy);
+}
+
+/**
+ * Sustituye `app/` por la carpeta preparada, de golpe.
+ *
+ * Antes se publicaba (o copiaba) directamente sobre `app/`, y un fallo a mitad dejaba
+ * los ficheros de dos versiones mezclados —comprobado: el `ahora-mcp.deps.json` de la
+ * 0.75.0 junto al `ahora-mcp.dll` de la 0.74.0—, que es un fallo de carga de
+ * ensamblado al arrancar que no apunta a nada. Con dos renombrados, o queda la version
+ * anterior entera o la nueva entera.
+ *
+ * `ensureNotInUse` ya se ha comprobado antes, pero entre esa comprobacion y esto pueden
+ * haber pasado minutos de publicacion: si el renombrado choca con un proceso que ha
+ * arrancado en medio, se dice lo mismo en lugar de un EPERM.
+ */
+function swapIntoPlace(staging, app, { rename = fs.renameSync } = {}) {
+  const old = `${app}.old`;
+  fs.rmSync(old, { recursive: true, force: true });
+  const hadPrevious = fs.existsSync(app);
+  if (hadPrevious) {
+    try {
+      rename(app, old);
+    } catch (err) {
+      fs.rmSync(staging, { recursive: true, force: true });
+      if (err.code === "EBUSY" || err.code === "EPERM") throw inUseError(filesInUse(app));
+      throw err;
+    }
+  }
+  try {
+    rename(staging, app);
+  } catch (err) {
+    if (hadPrevious) rename(old, app);
+    throw err;
+  }
+  // Sin importancia si no se puede: se vuelve a intentar al principio de la siguiente.
+  fs.rmSync(old, { recursive: true, force: true });
+}
+
+/**
+ * Que hacer despues de un fallo, segun cual haya sido.
+ *
+ * Antes era siempre "vuelve a lanzarlo con el SDK de .NET 10 disponible", tambien a
+ * quien ya tenia el SDK y lo que tenia era el MCP abierto en otra sesion: le mandaba a
+ * buscar el problema justo donde no estaba.
+ */
+function productFailureAdvice(err) {
+  switch (err && err.code) {
+    case "EPRODUCTINUSE":
+      return "";
+    case "ENODOTNET":
+      return (
+        `Instala el SDK de .NET ${MIN_DOTNET_MAJOR} y vuelve a lanzar el instalador, o ` +
+        "indica una carpeta con el MCP de producto ya publicado."
+      );
+    default:
+      return (
+        "Vuelve a lanzar el instalador cuando este resuelto, o indica una carpeta con el " +
+        "MCP de producto ya publicado."
+      );
+  }
+}
+
+/**
+ * La causa de un `dotnet publish` fallido, en una linea.
+ *
+ * `execFileSync` mete la salida en `err.stdout`/`err.stderr`, y su `message` empieza por
+ * "Command failed: <comando>" —que es lo unico que acababa en pantalla, porque quien lo
+ * muestra se queda con la primera linea—. MSBuild escribe los errores por stdout como
+ * `ruta(l,c): error CODIGO: texto [proyecto]`; se sacan esos, sin la ruta ni el
+ * proyecto, que no le dicen nada a quien instala.
+ */
+function publishFailure(err) {
+  if (err && (err.code === "ETIMEDOUT" || err.signal === "SIGTERM")) {
+    return productError(
+      "EPUBLISH",
+      "dotnet publish no ha terminado en 15 minutos. Suele ser que no llega a " +
+        "api.nuget.org o a nuget.ahorabh.com: indica una carpeta con el MCP de producto ya publicado."
+    );
+  }
+  const output = `${(err && err.stdout) || ""}\n${(err && err.stderr) || ""}`;
+  const errors = [];
+  for (const line of output.split(/\r?\n/)) {
+    const m = line.match(/\berror ([A-Z]+\d+): (.*?)(?:\s+\[[^\]]*\])?\s*$/);
+    if (m && !errors.some((e) => e.code === m[1] && e.text === m[2])) {
+      errors.push({ code: m[1], text: m[2] });
+    }
+  }
+  if (errors.some((e) => /^MSB30(21|26|27)$/.test(e.code))) {
+    return inUseError([PRODUCT_DLL]);
+  }
+  if (errors.length === 0) {
+    const first = String((err && err.message) || err).split("\n")[0];
+    return productError("EPUBLISH", `dotnet publish ha fallado sin un error de MSBuild reconocible (${first}).`);
+  }
+  const summary = errors
+    .slice(0, 3)
+    .map((e) => `${e.code}: ${e.text}`)
+    .join(" · ");
+  const network = errors.some((e) => /^NU1(301|101|102)$/.test(e.code));
+  return productError(
+    "EPUBLISH",
+    `dotnet publish ha fallado: ${summary}` +
+      (network
+        ? ". No se alcanza un feed de NuGet: si en esta red no llega api.nuget.org, indica " +
+          "una carpeta con el MCP de producto ya publicado."
+        : "")
+  );
 }
 
 /**
@@ -425,6 +592,7 @@ function installProductMcp({
   exec = execFileSync,
   force = false,
   sdkVersion,
+  inUse,
 } = {}) {
   if (!version) throw new Error("Falta la version del paquete a instalar.");
 
@@ -434,6 +602,9 @@ function installProductMcp({
   }
 
   checkDotnetSdk(sdkVersion === undefined ? toolVersion("dotnet") : sdkVersion);
+  // Antes de publicar, no despues: la publicacion tarda minutos y, con la instalacion
+  // en uso, todo ese tiempo acaba en un fallo que no se puede sustituir.
+  ensureNotInUse(productAppDir(dir), inUse);
 
   const build = path.join(dir, "build");
   fs.mkdirSync(build, { recursive: true });
@@ -443,42 +614,50 @@ function installProductMcp({
 
   // La salida va FUERA de la carpeta del proyecto: dejarla dentro mezcla el
   // resultado con obj/ y bin/, y un `-o .` sobre el propio proyecto es un fallo del
-  // SDK, no un aviso.
-  exec(
-    "dotnet",
-    [
-      "publish",
-      "ahora-mcp-host.csproj",
-      "-c",
-      "Release",
-      "-o",
-      productAppDir(dir),
-      "--nologo",
-      "-v",
-      "minimal",
-    ],
-    {
-      // Por `cwd` y no por ruta absoluta en el argumento: asi el nuget.config que
-      // acabamos de escribir es el que manda, que es lo que anade el feed de AHORA.
-      cwd: build,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 900000,
-    }
-  );
+  // SDK, no un aviso. Y va a una carpeta aparte, no a `app/`: ver swapIntoPlace.
+  const staging = stagingDir(dir);
+  fs.rmSync(staging, { recursive: true, force: true });
+  try {
+    exec(
+      "dotnet",
+      ["publish", "ahora-mcp-host.csproj", "-c", "Release", "-o", staging, "--nologo", "-v", "minimal"],
+      {
+        // Por `cwd` y no por ruta absoluta en el argumento: asi el nuget.config que
+        // acabamos de escribir es el que manda, que es lo que anade el feed de AHORA.
+        cwd: build,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 900000,
+      }
+    );
+  } catch (err) {
+    fs.rmSync(staging, { recursive: true, force: true });
+    throw publishFailure(err);
+  }
 
-  if (!fs.existsSync(dll)) {
+  if (!fs.existsSync(path.join(staging, PRODUCT_DLL))) {
+    fs.rmSync(staging, { recursive: true, force: true });
     throw new Error(
-      `La publicacion termino sin errores pero no aparece ${dll}. ` +
+      `La publicacion termino sin errores pero no aparece ${PRODUCT_DLL}. ` +
         `Revisa que el paquete del feed se llame ${PRODUCT_PACKAGE}.`
     );
   }
+  writeStamp(staging, { version, origen: PRODUCT_FEED });
+  swapIntoPlace(staging, productAppDir(dir));
+  return { dll, dir, version, reused: false };
+}
+
+/** Donde se prepara la version nueva antes de sustituir `app/` por ella. */
+function stagingDir(dir) {
+  return `${productAppDir(dir)}.new`;
+}
+
+function writeStamp(app, { version, origen }) {
   fs.writeFileSync(
-    stampPath(dir),
-    `${JSON.stringify({ version, origen: PRODUCT_FEED, fecha: new Date().toISOString() }, null, 2)}\n`,
+    path.join(app, STAMP_FILE),
+    `${JSON.stringify({ version, origen, fecha: new Date().toISOString() }, null, 2)}\n`,
     "utf8"
   );
-  return { dll, dir, version, reused: false };
 }
 
 /**
@@ -488,7 +667,7 @@ function installProductMcp({
  * que reparte el equipo de producto (la del .zip, la que lleva ahora-mcp.dll con sus
  * dependencias al lado) y queda exactamente igual de utilizable que la publicada.
  */
-function installProductFromFolder({ source, dir = productRuntimeDir() } = {}) {
+function installProductFromFolder({ source, dir = productRuntimeDir(), inUse } = {}) {
   if (!source) throw new Error("Falta la carpeta de origen del MCP de producto.");
   const from = path.resolve(source);
   if (!fs.existsSync(from) || !fs.statSync(from).isDirectory()) {
@@ -503,19 +682,20 @@ function installProductFromFolder({ source, dir = productRuntimeDir() } = {}) {
   }
 
   const app = productAppDir(dir);
-  // Se borra antes de copiar: mezclar dos publicaciones distintas deja dependencias
-  // de la anterior que el deps.json de la nueva no menciona, y eso falla al arrancar
-  // con un error de carga de ensamblado que no apunta a nada.
-  fs.rmSync(app, { recursive: true, force: true });
-  fs.mkdirSync(app, { recursive: true });
-  fs.cpSync(from, app, { recursive: true });
+  ensureNotInUse(app, inUse);
+  // Se copia a una carpeta limpia y se sustituye `app/` entera: mezclar dos
+  // publicaciones distintas deja dependencias de la anterior que el deps.json de la
+  // nueva no menciona, y eso falla al arrancar con un error de carga de ensamblado que
+  // no apunta a nada. Antes se borraba `app/` y luego se copiaba, y con un .dll en uso
+  // el borrado se quedaba a medias: ni la version vieja entera ni la nueva.
+  const staging = stagingDir(dir);
+  fs.rmSync(staging, { recursive: true, force: true });
+  fs.mkdirSync(staging, { recursive: true });
+  fs.cpSync(from, staging, { recursive: true });
 
-  const version = readAssemblyVersion(path.join(app, PRODUCT_DLL));
-  fs.writeFileSync(
-    stampPath(dir),
-    `${JSON.stringify({ version, origen: from, fecha: new Date().toISOString() }, null, 2)}\n`,
-    "utf8"
-  );
+  const version = readAssemblyVersion(path.join(staging, PRODUCT_DLL));
+  writeStamp(staging, { version, origen: from });
+  swapIntoPlace(staging, app);
   return { dll: productDll(dir), dir, version, reused: false, source: from };
 }
 
@@ -590,6 +770,10 @@ module.exports = {
   explainNetworkError,
   dotnetSdkVersion,
   checkDotnetSdk,
+  filesInUse,
+  swapIntoPlace,
+  publishFailure,
+  productFailureAdvice,
   projectFiles,
   installProductMcp,
   installProductFromFolder,

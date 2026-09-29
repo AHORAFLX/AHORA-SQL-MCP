@@ -75285,8 +75285,9 @@ var require_product_mcp = __commonJS({
     function productDll(dir) {
       return path2.join(productAppDir(dir), PRODUCT_DLL);
     }
+    var STAMP_FILE = "ahora-mcp-instalado.json";
     function stampPath(dir) {
-      return path2.join(productAppDir(dir), "ahora-mcp-instalado.json");
+      return path2.join(productAppDir(dir), STAMP_FILE);
     }
     function installedProductVersion(dir) {
       try {
@@ -75434,18 +75435,114 @@ var require_product_mcp = __commonJS({
       const major = Number(String(version).split(".")[0]);
       return Number.isFinite(major) && major >= MIN_DOTNET_MAJOR ? version : null;
     }
+    function productError(code, message) {
+      const err = new Error(message);
+      err.code = code;
+      return err;
+    }
     function checkDotnetSdk(version = toolVersion("dotnet")) {
       if (!version) {
-        throw new Error(
+        throw productError(
+          "ENODOTNET",
           `No hay SDK de .NET en este equipo (no esta en el PATH). El MCP de producto se publica desde NuGet, y para eso hace falta el SDK de .NET ${MIN_DOTNET_MAJOR} o superior: https://dotnet.microsoft.com/download`
         );
       }
       if (!dotnetSdkVersion(version)) {
-        throw new Error(
+        throw productError(
+          "ENODOTNET",
           `El SDK de .NET ${version} es demasiado antiguo. El paquete ${PRODUCT_PACKAGE} es net${MIN_DOTNET_MAJOR}.0-windows y no se puede restaurar con un SDK anterior.`
         );
       }
       return version;
+    }
+    function filesInUse(appDir, { open: open2 = fs6.openSync, close = fs6.closeSync } = {}) {
+      let names;
+      try {
+        names = fs6.readdirSync(appDir).filter((n) => n.toLowerCase().endsWith(".dll"));
+      } catch {
+        return [];
+      }
+      const busy = [];
+      for (const name of names) {
+        try {
+          close(open2(path2.join(appDir, name), "r+"));
+        } catch (err) {
+          if (err.code === "EBUSY" || err.code === "EPERM") busy.push(name);
+        }
+      }
+      return busy;
+    }
+    function inUseError(busy = []) {
+      const which = busy.length ? ` (${busy.slice(0, 2).join(", ")}${busy.length > 2 ? ", \u2026" : ""} abiertos por otro proceso)` : "";
+      return productError(
+        "EPRODUCTINUSE",
+        `${PRODUCT_PACKAGE} esta en uso${which}, asi que no se puede sustituir por la version nueva. Cierra las sesiones de Claude Code y las ventanas de VS Code que tengan el MCP ahora-erp arrancado y vuelve a lanzar el instalador. La version instalada no se ha tocado.`
+      );
+    }
+    function ensureNotInUse(appDir, options) {
+      const busy = filesInUse(appDir, options);
+      if (busy.length > 0) throw inUseError(busy);
+    }
+    function swapIntoPlace(staging, app, { rename = fs6.renameSync } = {}) {
+      const old = `${app}.old`;
+      fs6.rmSync(old, { recursive: true, force: true });
+      const hadPrevious = fs6.existsSync(app);
+      if (hadPrevious) {
+        try {
+          rename(app, old);
+        } catch (err) {
+          fs6.rmSync(staging, { recursive: true, force: true });
+          if (err.code === "EBUSY" || err.code === "EPERM") throw inUseError(filesInUse(app));
+          throw err;
+        }
+      }
+      try {
+        rename(staging, app);
+      } catch (err) {
+        if (hadPrevious) rename(old, app);
+        throw err;
+      }
+      fs6.rmSync(old, { recursive: true, force: true });
+    }
+    function productFailureAdvice(err) {
+      switch (err && err.code) {
+        case "EPRODUCTINUSE":
+          return "";
+        case "ENODOTNET":
+          return `Instala el SDK de .NET ${MIN_DOTNET_MAJOR} y vuelve a lanzar el instalador, o indica una carpeta con el MCP de producto ya publicado.`;
+        default:
+          return "Vuelve a lanzar el instalador cuando este resuelto, o indica una carpeta con el MCP de producto ya publicado.";
+      }
+    }
+    function publishFailure(err) {
+      if (err && (err.code === "ETIMEDOUT" || err.signal === "SIGTERM")) {
+        return productError(
+          "EPUBLISH",
+          "dotnet publish no ha terminado en 15 minutos. Suele ser que no llega a api.nuget.org o a nuget.ahorabh.com: indica una carpeta con el MCP de producto ya publicado."
+        );
+      }
+      const output = `${err && err.stdout || ""}
+${err && err.stderr || ""}`;
+      const errors = [];
+      for (const line of output.split(/\r?\n/)) {
+        const m = line.match(/\berror ([A-Z]+\d+): (.*?)(?:\s+\[[^\]]*\])?\s*$/);
+        if (m && !errors.some((e) => e.code === m[1] && e.text === m[2])) {
+          errors.push({ code: m[1], text: m[2] });
+        }
+      }
+      if (errors.some((e) => /^MSB30(21|26|27)$/.test(e.code))) {
+        return inUseError([PRODUCT_DLL]);
+      }
+      if (errors.length === 0) {
+        const first = String(err && err.message || err).split("\n")[0];
+        return productError("EPUBLISH", `dotnet publish ha fallado sin un error de MSBuild reconocible (${first}).`);
+      }
+      const summary = errors.slice(0, 3).map((e) => `${e.code}: ${e.text}`).join(" \xB7 ");
+      const network = errors.some((e) => /^NU1(301|101|102)$/.test(e.code));
+      return productError(
+        "EPUBLISH",
+        `dotnet publish ha fallado: ${summary}` + (network ? ". No se alcanza un feed de NuGet: si en esta red no llega api.nuget.org, indica una carpeta con el MCP de producto ya publicado." : "")
+      );
     }
     function projectFiles(version) {
       return {
@@ -75489,7 +75586,8 @@ internal static class Host
       dir = productRuntimeDir(),
       exec = execFileSync2,
       force = false,
-      sdkVersion
+      sdkVersion,
+      inUse
     } = {}) {
       if (!version) throw new Error("Falta la version del paquete a instalar.");
       const dll = productDll(dir);
@@ -75497,47 +75595,53 @@ internal static class Host
         return { dll, dir, version, reused: true };
       }
       checkDotnetSdk(sdkVersion === void 0 ? toolVersion("dotnet") : sdkVersion);
+      ensureNotInUse(productAppDir(dir), inUse);
       const build = path2.join(dir, "build");
       fs6.mkdirSync(build, { recursive: true });
       for (const [name, content] of Object.entries(projectFiles(version))) {
         fs6.writeFileSync(path2.join(build, name), content, "utf8");
       }
-      exec(
-        "dotnet",
-        [
-          "publish",
-          "ahora-mcp-host.csproj",
-          "-c",
-          "Release",
-          "-o",
-          productAppDir(dir),
-          "--nologo",
-          "-v",
-          "minimal"
-        ],
-        {
-          // Por `cwd` y no por ruta absoluta en el argumento: asi el nuget.config que
-          // acabamos de escribir es el que manda, que es lo que anade el feed de AHORA.
-          cwd: build,
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-          timeout: 9e5
-        }
-      );
-      if (!fs6.existsSync(dll)) {
+      const staging = stagingDir(dir);
+      fs6.rmSync(staging, { recursive: true, force: true });
+      try {
+        exec(
+          "dotnet",
+          ["publish", "ahora-mcp-host.csproj", "-c", "Release", "-o", staging, "--nologo", "-v", "minimal"],
+          {
+            // Por `cwd` y no por ruta absoluta en el argumento: asi el nuget.config que
+            // acabamos de escribir es el que manda, que es lo que anade el feed de AHORA.
+            cwd: build,
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+            timeout: 9e5
+          }
+        );
+      } catch (err) {
+        fs6.rmSync(staging, { recursive: true, force: true });
+        throw publishFailure(err);
+      }
+      if (!fs6.existsSync(path2.join(staging, PRODUCT_DLL))) {
+        fs6.rmSync(staging, { recursive: true, force: true });
         throw new Error(
-          `La publicacion termino sin errores pero no aparece ${dll}. Revisa que el paquete del feed se llame ${PRODUCT_PACKAGE}.`
+          `La publicacion termino sin errores pero no aparece ${PRODUCT_DLL}. Revisa que el paquete del feed se llame ${PRODUCT_PACKAGE}.`
         );
       }
+      writeStamp(staging, { version, origen: PRODUCT_FEED });
+      swapIntoPlace(staging, productAppDir(dir));
+      return { dll, dir, version, reused: false };
+    }
+    function stagingDir(dir) {
+      return `${productAppDir(dir)}.new`;
+    }
+    function writeStamp(app, { version, origen }) {
       fs6.writeFileSync(
-        stampPath(dir),
-        `${JSON.stringify({ version, origen: PRODUCT_FEED, fecha: (/* @__PURE__ */ new Date()).toISOString() }, null, 2)}
+        path2.join(app, STAMP_FILE),
+        `${JSON.stringify({ version, origen, fecha: (/* @__PURE__ */ new Date()).toISOString() }, null, 2)}
 `,
         "utf8"
       );
-      return { dll, dir, version, reused: false };
     }
-    function installProductFromFolder({ source, dir = productRuntimeDir() } = {}) {
+    function installProductFromFolder({ source, dir = productRuntimeDir(), inUse } = {}) {
       if (!source) throw new Error("Falta la carpeta de origen del MCP de producto.");
       const from = path2.resolve(source);
       if (!fs6.existsSync(from) || !fs6.statSync(from).isDirectory()) {
@@ -75550,16 +75654,14 @@ internal static class Host
         );
       }
       const app = productAppDir(dir);
-      fs6.rmSync(app, { recursive: true, force: true });
-      fs6.mkdirSync(app, { recursive: true });
-      fs6.cpSync(from, app, { recursive: true });
-      const version = readAssemblyVersion(path2.join(app, PRODUCT_DLL));
-      fs6.writeFileSync(
-        stampPath(dir),
-        `${JSON.stringify({ version, origen: from, fecha: (/* @__PURE__ */ new Date()).toISOString() }, null, 2)}
-`,
-        "utf8"
-      );
+      ensureNotInUse(app, inUse);
+      const staging = stagingDir(dir);
+      fs6.rmSync(staging, { recursive: true, force: true });
+      fs6.mkdirSync(staging, { recursive: true });
+      fs6.cpSync(from, staging, { recursive: true });
+      const version = readAssemblyVersion(path2.join(staging, PRODUCT_DLL));
+      writeStamp(staging, { version, origen: from });
+      swapIntoPlace(staging, app);
       return { dll: productDll(dir), dir, version, reused: false, source: from };
     }
     function readAssemblyVersion(dll, exec = execFileSync2) {
@@ -75612,6 +75714,10 @@ internal static class Host
       explainNetworkError,
       dotnetSdkVersion,
       checkDotnetSdk,
+      filesInUse,
+      swapIntoPlace,
+      publishFailure,
+      productFailureAdvice,
       projectFiles,
       installProductMcp,
       installProductFromFolder,
@@ -75917,7 +76023,8 @@ var require_gui = __commonJS({
       productDll,
       installedProductVersion,
       latestProductVersion,
-      dotnetSdkVersion
+      dotnetSdkVersion,
+      productFailureAdvice
     } = require_product_mcp();
     var {
       PLAYWRIGHT_PACKAGE,
@@ -76139,6 +76246,7 @@ var require_gui = __commonJS({
       if (written.length === 0) throw new Error("No se ha indicado ningun cliente MCP.");
       let productWritten = null;
       let productError;
+      let productAdvice;
       let productInstall = null;
       const wantsProduct = Boolean(payload.product) && !profile.production;
       if (wantsProduct) {
@@ -76176,6 +76284,7 @@ var require_gui = __commonJS({
           }
         } catch (err) {
           productError = err.message.split("\n")[0];
+          productAdvice = productFailureAdvice(err);
           productInstall = null;
           productWritten = null;
         }
@@ -76257,6 +76366,7 @@ var require_gui = __commonJS({
           connection: payload.productConnection.name
         } : null,
         productError,
+        productAdvice,
         playwright: playwrightWritten ? {
           serverName: PLAYWRIGHT_SERVER_NAME,
           written: playwrightWritten,
@@ -77273,9 +77383,8 @@ $("btnWrite").onclick = async () => {
     }
     if (res.productError) {
       html += '<div class="banner warn">No se ha podido instalar el MCP de producto (' +
-        esc(res.productError) + "). El de SQL ha quedado configurado igualmente. " +
-        "Vuelve a lanzar el instalador con el SDK de .NET 10 disponible, o indica una " +
-        "carpeta con el MCP de producto ya publicado.</div>";
+        esc(res.productError) + "). El de SQL ha quedado configurado igualmente." +
+        (res.productAdvice ? " " + esc(res.productAdvice) : "") + "</div>";
     }
     if (res.playwright) {
       const kept = res.playwright.written.filter((w) => w.kept);
@@ -77403,7 +77512,8 @@ var require_setup = __commonJS({
       versionToInstall,
       dotnetSdkVersion,
       installProductMcp,
-      installProductFromFolder
+      installProductFromFolder,
+      productFailureAdvice
     } = require_product_mcp();
     var {
       PLAYWRIGHT_PACKAGE,
@@ -78342,9 +78452,9 @@ var require_setup = __commonJS({
             );
           } catch (err) {
             say(`\u26A0 No se ha podido instalar el MCP de producto: ${err.message.split("\n")[0]}`);
-            say("   El MCP de SQL queda configurado igualmente. Para el de producto, vuelve");
-            say("   a lanzar el instalador con el SDK de .NET 10 disponible, o indica una");
-            say("   carpeta con el ya publicado.");
+            say("   El MCP de SQL queda configurado igualmente.");
+            const consejo = productFailureAdvice(err);
+            if (consejo) say(`   ${consejo}`);
             product.install = false;
           }
         }

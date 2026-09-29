@@ -25,6 +25,13 @@ const {
   validateIssuer,
   isMissingIssuerError,
   explainNetworkError,
+  checkDotnetSdk,
+  filesInUse,
+  swapIntoPlace,
+  publishFailure,
+  productFailureAdvice,
+  installProductMcp,
+  installProductFromFolder,
   PRODUCT_PACKAGE,
   PRODUCT_FEED,
 } = require("../installer/product-mcp");
@@ -136,6 +143,191 @@ test("dotnetSdkVersion rechaza un SDK anterior al 10", () => {
   assert.equal(dotnetSdkVersion("8.0.404"), null);
   assert.equal(dotnetSdkVersion("10.0.204"), "10.0.204");
   assert.equal(dotnetSdkVersion(null), null);
+});
+
+// ── Publicar sin pisar una instalacion en uso ────────────────────────────────
+//
+// Caso real: sale una version nueva mientras hay sesiones de Claude Code con
+// `ahora-erp` arrancado. Sus `dotnet exec` tienen los .dll abiertos, `dotnet publish`
+// no puede sobrescribirlos y el usuario veia un "Command failed" con un consejo sobre
+// el SDK que ya tenia. Y el publish fallido dejaba `app/` con dos versiones mezcladas.
+
+/** Instalacion previa en `dir/app`, con un fichero que la nueva no trae. */
+function previousInstall(dir, version = "0.74.0") {
+  const app = path.join(dir, "app");
+  fs.mkdirSync(app, { recursive: true });
+  fs.writeFileSync(path.join(app, "ahora-mcp.dll"), `dll ${version}`);
+  fs.writeFileSync(path.join(app, "Solo.De.La.Vieja.dll"), "x");
+  fs.writeFileSync(
+    path.join(app, "ahora-mcp-instalado.json"),
+    JSON.stringify({ version })
+  );
+  return app;
+}
+
+/** Un `exec` que hace de `dotnet publish`: deja el .dll en la carpeta de `-o`. */
+function fakePublish(calls = []) {
+  return (cmd, args) => {
+    calls.push({ cmd, args });
+    const out = args[args.indexOf("-o") + 1];
+    fs.mkdirSync(out, { recursive: true });
+    fs.writeFileSync(path.join(out, "ahora-mcp.dll"), "dll nueva");
+    return "";
+  };
+}
+
+/** Simula que un proceso tiene cargado `busyName`, como hace Windows con un ensamblado. */
+function lockedOpen(busyName) {
+  return (file, flags) => {
+    if (path.basename(file) === busyName) {
+      throw Object.assign(new Error(`EBUSY: resource busy or locked, open '${file}'`), {
+        code: "EBUSY",
+      });
+    }
+    return fs.openSync(file, flags);
+  };
+}
+
+test("filesInUse solo marca los .dll que dan EBUSY al abrirlos para escritura", () => {
+  const dir = tempDir("prod-");
+  const app = previousInstall(dir);
+  assert.deepEqual(filesInUse(app, { open: lockedOpen("ahora-mcp.dll") }), ["ahora-mcp.dll"]);
+  assert.deepEqual(filesInUse(app), []);
+  // Sin instalacion previa no hay nada que pueda estar en uso.
+  assert.deepEqual(filesInUse(path.join(dir, "no-existe")), []);
+});
+
+test("con el MCP de producto en uso no se lanza dotnet publish", () => {
+  const dir = tempDir("prod-");
+  const app = previousInstall(dir);
+  const calls = [];
+  assert.throws(
+    () =>
+      installProductMcp({
+        version: "0.75.0",
+        dir,
+        exec: fakePublish(calls),
+        sdkVersion: "10.0.204",
+        inUse: { open: lockedOpen("ahora-mcp.dll") },
+      }),
+    (err) => {
+      assert.equal(err.code, "EPRODUCTINUSE");
+      assert.match(err.message, /ahora-mcp\.dll/);
+      assert.match(err.message, /Cierra las sesiones de Claude Code/);
+      assert.doesNotMatch(err.message, /\n/, "quien lo muestra se queda con la primera linea");
+      return true;
+    }
+  );
+  assert.equal(calls.length, 0, "no se gastan minutos de publicacion que van a fallar");
+  assert.equal(installedProductVersion(dir), "0.74.0");
+  assert.equal(fs.readFileSync(path.join(app, "ahora-mcp.dll"), "utf8"), "dll 0.74.0");
+});
+
+test("la version nueva sustituye a la anterior entera, sin mezclar ficheros", () => {
+  const dir = tempDir("prod-");
+  const app = previousInstall(dir);
+  const calls = [];
+  const res = installProductMcp({
+    version: "0.75.0",
+    dir,
+    exec: fakePublish(calls),
+    sdkVersion: "10.0.204",
+  });
+  assert.equal(res.reused, false);
+  // Se publica a una carpeta aparte, nunca encima de la que se esta usando.
+  const out = calls[0].args[calls[0].args.indexOf("-o") + 1];
+  assert.notEqual(path.resolve(out), path.resolve(app));
+  assert.equal(installedProductVersion(dir), "0.75.0");
+  assert.equal(fs.readFileSync(path.join(app, "ahora-mcp.dll"), "utf8"), "dll nueva");
+  assert.equal(fs.existsSync(path.join(app, "Solo.De.La.Vieja.dll")), false);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ["app", "build"], "ni .new ni .old de sobra");
+});
+
+test("un publish fallido deja la instalacion anterior intacta y dice por que", () => {
+  const dir = tempDir("prod-");
+  const app = previousInstall(dir);
+  const exec = (cmd, args) => {
+    const out = args[args.indexOf("-o") + 1];
+    fs.mkdirSync(out, { recursive: true });
+    fs.writeFileSync(path.join(out, "ahora-mcp.deps.json"), "de la nueva");
+    throw Object.assign(new Error(`Command failed: dotnet ${args.join(" ")}\nerror NU1301`), {
+      status: 1,
+      stdout:
+        "  Determining projects to restore...\n" +
+        "C:\\x\\build\\ahora-mcp-host.csproj : error NU1301: Unable to load the service " +
+        "index for source https://api.nuget.org/v3/index.json. [C:\\x\\build\\ahora-mcp-host.csproj]\n",
+      stderr: "",
+    });
+  };
+  assert.throws(
+    () => installProductMcp({ version: "0.75.0", dir, exec, sdkVersion: "10.0.204" }),
+    (err) => {
+      assert.equal(err.code, "EPUBLISH");
+      assert.match(err.message, /NU1301: Unable to load the service index/);
+      assert.doesNotMatch(err.message, /Command failed|\[C:/);
+      assert.match(err.message, /carpeta con el MCP de producto ya publicado/);
+      return true;
+    }
+  );
+  assert.equal(installedProductVersion(dir), "0.74.0");
+  assert.equal(fs.existsSync(path.join(app, "ahora-mcp.deps.json")), false, "nada de la nueva");
+  assert.equal(fs.existsSync(path.join(dir, "app.new")), false);
+});
+
+test("un MSB3027 de publish se explica como instalacion en uso", () => {
+  const err = publishFailure(
+    Object.assign(new Error("Command failed: dotnet publish"), {
+      stdout:
+        "C:\\Program Files\\dotnet\\sdk\\10.0.204\\Microsoft.Common.CurrentVersion.targets" +
+        "(4995,5): error MSB3027: Could not copy \"ahora-mcp.dll\" to \"C:\\app\\ahora-mcp.dll\"." +
+        " Exceeded retry count of 10. Failed. [C:\\x\\ahora-mcp-host.csproj]\n",
+    })
+  );
+  assert.equal(err.code, "EPRODUCTINUSE");
+  assert.equal(productFailureAdvice(err), "", "el propio mensaje ya dice que hacer");
+});
+
+test("sin errores de MSBuild reconocibles se conserva la primera linea original", () => {
+  const err = publishFailure(new Error("Command failed: dotnet publish x\nalgo raro"));
+  assert.equal(err.code, "EPUBLISH");
+  assert.match(err.message, /Command failed: dotnet publish x\)/);
+});
+
+test("si un proceso arranca durante la publicacion, el cambio de carpeta no deja nada a medias", () => {
+  const dir = tempDir("prod-");
+  const app = previousInstall(dir);
+  const staging = path.join(dir, "app.new");
+  fs.mkdirSync(staging);
+  fs.writeFileSync(path.join(staging, "ahora-mcp.dll"), "dll nueva");
+  const rename = (from, to) => {
+    if (from === app) throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+    return fs.renameSync(from, to);
+  };
+  assert.throws(() => swapIntoPlace(staging, app, { rename }), { code: "EPRODUCTINUSE" });
+  assert.equal(fs.readFileSync(path.join(app, "ahora-mcp.dll"), "utf8"), "dll 0.74.0");
+  assert.equal(fs.existsSync(staging), false);
+});
+
+test("copiar desde carpeta tampoco pisa una instalacion en uso", () => {
+  const dir = tempDir("prod-");
+  const app = previousInstall(dir);
+  const source = tempDir("prod-src-");
+  fs.writeFileSync(path.join(source, "ahora-mcp.dll"), "dll de la carpeta");
+  assert.throws(
+    () =>
+      installProductFromFolder({ source, dir, inUse: { open: lockedOpen("ahora-mcp.dll") } }),
+    { code: "EPRODUCTINUSE" }
+  );
+  // Antes se borraba `app/` primero: con un .dll en uso, el borrado se quedaba a medias.
+  assert.equal(fs.existsSync(path.join(app, "Solo.De.La.Vieja.dll")), true);
+  assert.equal(installedProductVersion(dir), "0.74.0");
+});
+
+test("el consejo tras un fallo depende de cual haya sido", () => {
+  assert.match(productFailureAdvice({ code: "ENODOTNET" }), /Instala el SDK de \.NET 10/);
+  assert.doesNotMatch(productFailureAdvice({ code: "EPUBLISH" }), /SDK/);
+  assert.equal(productFailureAdvice({ code: "EPRODUCTINUSE" }), "");
+  assert.throws(() => checkDotnetSdk(null), { code: "ENODOTNET" });
 });
 
 // ── Lanzador: la cadena de conexion ──────────────────────────────────────────

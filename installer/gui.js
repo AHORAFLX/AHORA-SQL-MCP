@@ -65,6 +65,7 @@ const {
   installedProductVersion,
   latestProductVersion,
   dotnetSdkVersion,
+  productFailureAdvice,
 } = require("./product-mcp");
 const {
   PLAYWRIGHT_PACKAGE,
@@ -386,6 +387,7 @@ function write(payload, { install } = {}) {
   // `mcp__ahora-erp__ahora_*`), y ninguno sustituye al otro.
   let productWritten = null;
   let productError;
+  let productAdvice;
   let productInstall = null;
   // En produccion no se ofrece, por el mismo motivo que la escritura: `ahora-mcp` no
   // tiene modo de solo lectura, asi que no hay forma de dejarlo configurado para que
@@ -432,6 +434,7 @@ function write(payload, { install } = {}) {
       // No tumba la escritura: el MCP de SQL ya esta configurado, y perderlo por un
       // fallo del segundo servidor seria peor que quedarse sin el segundo.
       productError = err.message.split("\n")[0];
+      productAdvice = productFailureAdvice(err);
       productInstall = null;
       productWritten = null;
     }
@@ -537,6 +540,7 @@ function write(payload, { install } = {}) {
         }
       : null,
     productError,
+    productAdvice,
     playwright: playwrightWritten
       ? {
           serverName: PLAYWRIGHT_SERVER_NAME,
@@ -1609,9 +1613,8 @@ $("btnWrite").onclick = async () => {
     }
     if (res.productError) {
       html += '<div class="banner warn">No se ha podido instalar el MCP de producto (' +
-        esc(res.productError) + "). El de SQL ha quedado configurado igualmente. " +
-        "Vuelve a lanzar el instalador con el SDK de .NET 10 disponible, o indica una " +
-        "carpeta con el MCP de producto ya publicado.</div>";
+        esc(res.productError) + "). El de SQL ha quedado configurado igualmente." +
+        (res.productAdvice ? " " + esc(res.productAdvice) : "") + "</div>";
     }
     if (res.playwright) {
       const kept = res.playwright.written.filter((w) => w.kept);
