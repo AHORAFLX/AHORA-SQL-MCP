@@ -908,7 +908,15 @@ test("runWrite: a server-side rollback (XACT_ABORT) is not rolled back twice", a
   });
   await assert.rejects(
     () => runWrite(mssql.pool, "DELETE FROM A", { mssql, writesEnabled: true }),
-    /nothing was applied/
+    (err) => {
+      // Desde el cliente no se distingue un XACT_ABORT (lote muerto, nada aplicado) de un
+      // ROLLBACK de trigger que un TRY/CATCH se ha tragado (lote vivo, en autocommit):
+      // el mensaje tiene que contar las dos posibilidades, no elegir la comoda.
+      assert.match(err.message, /The server itself closed the transaction/);
+      assert.match(err.message, /If XACT_ABORT ended the batch there, nothing was applied/);
+      assert.match(err.message, /IS persisted/);
+      return true;
+    }
   );
   assert.equal(
     mssql.events.filter((e) => e[0] === "rollback").length,
@@ -922,5 +930,214 @@ test("runWrite refuses a query with nothing executable in it", async () => {
   await assert.rejects(
     () => runWrite(mssql.pool, "   \n\t\n  ", { mssql, writesEnabled: true }),
     /No executable SQL found/
+  );
+});
+
+// ---------------------------------------------------------------------------
+// ROLLBACK desde dentro del lote: la garantia de solo lectura que no se sostiene
+// ---------------------------------------------------------------------------
+
+/** Un poolAwareMssql cuya ultima Transaction queda a mano para simular al servidor. */
+function withCapturedTransaction(mssql) {
+  const captured = { transaction: null };
+  const OriginalTransaction = mssql.Transaction;
+  mssql.Transaction = function Transaction(...args) {
+    OriginalTransaction.apply(this, args);
+    captured.transaction = this;
+  };
+  return captured;
+}
+
+/**
+ * Lo que hace Transaction#_abort de mssql cuando tedious ve el ENVCHANGE de un ROLLBACK
+ * que no ha mandado el cliente: suelta la conexion al pool, se olvida de ella y avisa.
+ * Todo ello a mitad del request, antes del `done`.
+ */
+function serverRollsBack(transaction) {
+  transaction._acquiredConnection = null;
+  transaction._aborted = true;
+  transaction.emit("rollback", true);
+}
+
+test("streamRead: un ROLLBACK hecho por el servidor a mitad del lote se detecta, y el aviso lleva las filas", async () => {
+  // El caso real (AHORA_ERP, produccion): un trigger hace ROLLBACK TRAN dentro de un SP
+  // llamado desde el lote, el CATCH del SP se lo traga y el lote sigue en autocommit. Antes
+  // la tool esperaba 5 s a un request que mssql ya habia olvidado, su ROLLBACK fallaba con
+  // EABORT, el sondeo decia "ya devuelta al pool" y el resultset salia como si nada.
+  const connection = fakeConnection({ inTransaction: false });
+  const mssql = poolAwareMssql({ connection });
+  const captured = withCapturedTransaction(mssql);
+  const listeners = {};
+  mssql.Request = function Request() {
+    this.stream = false;
+    this.cancel = () => mssql.events.push(["cancel"]);
+    this.on = (event, fn) => {
+      listeners[event] = fn;
+    };
+    this._setCurrentRequest = () => this;
+    this.query = () => {
+      captured.transaction._activeRequest = this;
+      process.nextTick(() => {
+        listeners.row?.({ log: "factura 1 actualizada" });
+        serverRollsBack(captured.transaction);
+        listeners.row?.({
+          log: "factura 2: el trigger hizo ROLLBACK y el CATCH siguio",
+        });
+        listeners.done?.({});
+      });
+    };
+  };
+
+  const started = Date.now();
+  await assert.rejects(
+    () =>
+      streamRead(mssql.pool, "EXEC dbo.PRepara", { offset: 0, limit: 10, mssql }),
+    (err) => {
+      assert.equal(err.code, "ETXNESCAPED");
+      assert.match(err.message, /closed from INSIDE the batch/);
+      assert.match(err.message, /already COMMITTED/);
+      assert.match(err.message, /SET XACT_ABORT ON/);
+      assert.doesNotMatch(
+        err.message,
+        /The batch itself ended with/,
+        "el SQL no fallo"
+      );
+      assert.deepEqual(
+        err.result.rows.map((r) => r.log),
+        [
+          "factura 1 actualizada",
+          "factura 2: el trigger hizo ROLLBACK y el CATCH siguio",
+        ],
+        "las filas viajan con el aviso: suelen ser el log del propio lote"
+      );
+      assert.equal(err.result.totalSeen, 2);
+      return true;
+    }
+  );
+  assert.ok(
+    Date.now() - started < 1000,
+    "no se espera a un request que mssql ya no va a soltar"
+  );
+  assert.equal(
+    mssql.events.filter((e) => e[0] === "rollback").length,
+    0,
+    "no se pide un ROLLBACK que solo puede fallar con EABORT"
+  );
+  assert.equal(connection.closed, false, "la conexion ya esta en el pool: no es nuestra");
+  assert.deepEqual(mssql.released, []);
+});
+
+test("runRead: si ademas el lote acaba con el error 266, el aviso lo incluye en vez de sustituirlo", async () => {
+  const mssql = poolAwareMssql({ connection: fakeConnection() });
+  const captured = withCapturedTransaction(mssql);
+  await assert.rejects(
+    () =>
+      runRead(
+        mssql.pool,
+        async () => {
+          serverRollsBack(captured.transaction);
+          throw new Error(
+            "Transaction count after EXECUTE indicates a mismatching number of BEGIN and COMMIT statements. Previous count = 1, current count = 0."
+          );
+        },
+        { mssql }
+      ),
+    (err) => {
+      assert.equal(err.code, "ETXNESCAPED");
+      assert.match(err.message, /already COMMITTED/);
+      assert.match(
+        err.message,
+        /The batch itself ended with: Transaction count after EXECUTE/
+      );
+      assert.match(err.cause.message, /Previous count = 1/);
+      return true;
+    }
+  );
+  assert.equal(mssql.events.filter((e) => e[0] === "rollback").length, 0);
+});
+
+test("runRead: el evento `rollback` del ROLLBACK propio no se confunde con uno del servidor", async () => {
+  // mssql emite `rollback` (con false) tambien al completar NUESTRO rollback. Se lee la
+  // marca antes de pedirlo, asi que una lectura normal sigue siendo una lectura normal.
+  const mssql = poolAwareMssql({ connection: fakeConnection() });
+  const OriginalTransaction = mssql.Transaction;
+  mssql.Transaction = function Transaction(...args) {
+    OriginalTransaction.apply(this, args);
+    const rollback = this.rollback;
+    this.rollback = async () => {
+      await rollback();
+      this.emit("rollback", false);
+    };
+  };
+  const result = await runRead(
+    mssql.pool,
+    async (r) => r.query("SELECT 1"),
+    { mssql }
+  );
+  assert.deepEqual(result.recordset, [{ x: 1 }]);
+  assert.equal(mssql.events.filter((e) => e[0] === "rollback").length, 1);
+});
+
+test("runWrite: si el servidor cierra la transaccion y el lote sigue, el aviso dice desde que sentencia puede haber escrituras confirmadas", async () => {
+  const mssql = poolAwareMssql({
+    connection: fakeConnection(),
+    batchFailsAt: 1,
+    serverRollsBackOnFailure: true,
+  });
+  await assert.rejects(
+    () =>
+      runWrite(
+        mssql.pool,
+        "DELETE FROM A\nGO\nEXEC dbo.PRepara\nGO\nDELETE FROM C",
+        { mssql, writesEnabled: true }
+      ),
+    (err) => {
+      assert.equal(err.code, "EWRITEFAILED");
+      assert.match(err.message, /^Statement 2 of 3 failed\./);
+      assert.match(
+        err.message,
+        /The server itself closed the transaction while statement #1 \(lines \d+-\d+: EXEC dbo\.PRepara\) was running/
+      );
+      assert.match(err.message, /IS persisted/);
+      assert.match(err.message, /Verify the data before retrying/);
+      assert.doesNotMatch(
+        err.message,
+        /which was rolled back: nothing was applied/,
+        "ya no se promete lo que no se puede saber"
+      );
+      return true;
+    }
+  );
+  assert.equal(mssql.events.filter((e) => e[0] === "rollback").length, 0);
+});
+
+test("runWrite: si todo el lote pasa pero la transaccion ya no existe al hacer COMMIT, se dice tal cual", async () => {
+  const mssql = poolAwareMssql({
+    connection: fakeConnection(),
+    commitError: Object.assign(new Error("Transaction has been aborted."), {
+      code: "EABORT",
+    }),
+  });
+  const OriginalRequest = mssql.Request;
+  mssql.Request = function Request(target) {
+    OriginalRequest.call(this, target);
+    const batch = this.batch;
+    this.batch = async (sql) => {
+      // El trigger hace ROLLBACK, el CATCH del SP se lo traga, y el SP termina "bien".
+      target.emit("rollback", true);
+      return batch(sql);
+    };
+  };
+  await assert.rejects(
+    () => runWrite(mssql.pool, "EXEC dbo.PRepara", { mssql, writesEnabled: true }),
+    (err) => {
+      assert.match(
+        err.message,
+        /^The statement ran, but the transaction was gone before the COMMIT\./
+      );
+      assert.match(err.message, /while statement #0 \(lines 1-1: EXEC dbo\.PRepara\)/);
+      assert.match(err.message, /IS persisted/);
+      return true;
+    }
   );
 });

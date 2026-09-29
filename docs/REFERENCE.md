@@ -448,6 +448,22 @@ src/
   adversarial query: an explicit `COMMIT TRANSACTION` inside the user's SQL ends the outer
   transaction, and following statements run in autocommit mode. Use a least-privilege SQL login if
   you need real isolation against intentional misuse.
+  The same escape happens without anyone intending it when a procedure or a trigger reached by
+  the query runs `ROLLBACK TRANSACTION` on its own — in AHORA_ERP that is the standard trigger
+  (`PRINT + ROLLBACK TRAN + RETURN`) and the standard CATCH (`IF @@TRANCOUNT > 0 ROLLBACK`). The
+  wrapper is gone, and once a TRY/CATCH swallows the resulting error the batch carries on in
+  autocommit: everything before the internal ROLLBACK is undone, everything after it persists.
+  The client cannot prevent this, so `runRead`/`streamRead` detect it instead — tedious sees the
+  server's ROLLBACK ENVCHANGE, mssql emits `rollback` on the transaction mid-request — and fail
+  with `ETXNESCAPED`, an error that says writes after that point may be committed and carries the
+  rows the batch had returned (`execute_read_query` returns them as an `isError` result with the
+  warning). No client-side ROLLBACK is attempted on that path: mssql has already released the
+  connection, and the acquire-time reset covers whatever the batch left behind. SQL that calls
+  procedures or can fire triggers should protect itself: `SET XACT_ABORT ON`, TRY/CATCH, check
+  `@@TRANCOUNT` after every `EXEC` and `RETURN` when it is 0, and never write from a CATCH.
+  `execute_write_query` and `execute_sql_file` cannot claim "nothing was applied" on a
+  server-side rollback either, so their message states both possibilities (XACT_ABORT ended the
+  batch, or it carried on in autocommit) and names the statement that was running.
 - **Write opt-in, per database** — `execute_write_query` is gated by `MSSQL_ENABLE_WRITES=true`
   (all databases) or `MSSQL_<DBKEY>_ENABLE_WRITES=true` (just that `dbKey`, overriding the global
   flag in either direction). The gate is checked against the `dbKey` the call actually names, before

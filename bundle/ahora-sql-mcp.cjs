@@ -102504,11 +102504,37 @@ var require_safety = __commonJS({
       if (cause) err.cause = cause;
       return err;
     }
+    function watchServerRollback(transaction) {
+      const state = { rolledBack: false };
+      if (typeof transaction?.on === "function") {
+        transaction.on("rollback", () => {
+          state.rolledBack = true;
+        });
+      }
+      return state;
+    }
+    function escapedTransactionError(cause, result) {
+      const parts = [
+        "The rollback-only transaction around this call was closed from INSIDE the batch: the server reported a ROLLBACK that this tool did not issue. A trigger or stored procedure ran ROLLBACK TRANSACTION (a trigger's `ROLLBACK TRAN`, a CATCH block's `IF @@TRANCOUNT > 0 ROLLBACK`), or the query itself did.",
+        "Everything that ran BEFORE that point was undone. Everything that ran AFTER it ran in autocommit mode, and any write it made is already COMMITTED: the rollback guarantee of this tool did NOT hold for this call. Check the database before doing anything else.",
+        "To run SQL that calls procedures or fires triggers without this risk, make the batch stop the moment the transaction disappears: SET XACT_ABORT ON, wrap it in TRY/CATCH, check @@TRANCOUNT after every EXEC and RETURN when it is 0, and never write from a CATCH block."
+      ];
+      if (cause) parts.push(`The batch itself ended with: ${cause.message}`);
+      const err = new Error(parts.join(" "));
+      err.code = "ETXNESCAPED";
+      if (cause) err.cause = cause;
+      if (result !== void 0) err.result = result;
+      return err;
+    }
     async function runRead(pool, fn, { mssql = loadDriver(), signal, timeoutMs, ...cleanupOptions } = {}) {
       if (signal?.aborted) throw new Error("Request aborted");
       const transaction = new mssql.Transaction(pool);
+      const serverRollback = watchServerRollback(transaction);
       await transaction.begin(mssql.ISOLATION_LEVEL.READ_COMMITTED);
-      const request = applyRequestTimeout(new mssql.Request(transaction), timeoutMs);
+      const request = applyRequestTimeout(
+        new mssql.Request(transaction),
+        timeoutMs
+      );
       const abort = attachAbort(request, signal);
       let result;
       let failure = null;
@@ -102518,6 +102544,9 @@ var require_safety = __commonJS({
         failure = err;
       } finally {
         abort.detach();
+      }
+      if (serverRollback.rolledBack) {
+        throw escapedTransactionError(failure, result);
       }
       const cleanup = await rollbackAndCheck(pool, transaction, {
         ...cleanupOptions,
@@ -102539,8 +102568,12 @@ var require_safety = __commonJS({
     } = {}) {
       if (signal?.aborted) throw new Error("Request aborted");
       const transaction = new mssql.Transaction(pool);
+      const serverRollback = watchServerRollback(transaction);
       await transaction.begin(mssql.ISOLATION_LEVEL.READ_COMMITTED);
-      const request = applyRequestTimeout(new mssql.Request(transaction), timeoutMs);
+      const request = applyRequestTimeout(
+        new mssql.Request(transaction),
+        timeoutMs
+      );
       request.stream = true;
       const abort = attachAbort(request, signal);
       let cutoff = false;
@@ -102597,6 +102630,9 @@ var require_safety = __commonJS({
       } finally {
         abort.detach();
       }
+      if (serverRollback.rolledBack) {
+        throw escapedTransactionError(failure, result);
+      }
       const cleanup = await rollbackAndCheck(pool, transaction, {
         ...cleanupOptions,
         aborted: abort.aborted || cutoff,
@@ -102626,10 +102662,22 @@ var require_safety = __commonJS({
     }
     function writeFailureError(cause, { applied, total, transactional, cleanup }) {
       const position = applied.length + 1;
-      const parts = [
-        total > 1 ? `Statement ${position} of ${total} failed.` : "The statement failed."
-      ];
-      if (transactional && cleanup?.ok) {
+      const parts = [];
+      if (cleanup?.serverRolledBack && applied.length >= total) {
+        parts.push(
+          total > 1 ? `All ${total} statements ran, but the transaction was gone before the COMMIT.` : "The statement ran, but the transaction was gone before the COMMIT."
+        );
+      } else {
+        parts.push(
+          total > 1 ? `Statement ${position} of ${total} failed.` : "The statement failed."
+        );
+      }
+      if (transactional && cleanup?.serverRolledBack) {
+        const where = cleanup.serverRolledBackDuring ? ` while statement #${cleanup.serverRolledBackDuring.index} (lines ${cleanup.serverRolledBackDuring.startLine}-${cleanup.serverRolledBackDuring.endLine}: ${cleanup.serverRolledBackDuring.preview}) was running` : "";
+        parts.push(
+          `The server itself closed the transaction${where}: a ROLLBACK issued by XACT_ABORT, by a trigger or by a procedure's CATCH block. Everything before that ROLLBACK was undone. If XACT_ABORT ended the batch there, nothing was applied; if a trigger or procedure rolled back and the batch carried on (TRY/CATCH), whatever ran after that point was autocommitted and IS persisted. Verify the data before retrying.`
+        );
+      } else if (transactional && cleanup?.ok) {
         parts.push(
           total > 1 ? `All ${total} statements ran in ONE transaction, which was rolled back: nothing was applied.` : "It ran in a transaction, which was rolled back: nothing was applied."
         );
@@ -102658,7 +102706,7 @@ var require_safety = __commonJS({
       err.applied = applied;
       return err;
     }
-    async function executeStatements(target, statements, { mssql, timeoutMs, signal }) {
+    async function executeStatements(target, statements, { mssql, timeoutMs, signal, progress = {} }) {
       const applied = [];
       for (const statement of statements) {
         if (signal?.aborted) {
@@ -102666,6 +102714,7 @@ var require_safety = __commonJS({
           err.applied = applied;
           throw err;
         }
+        progress.current = statement;
         const request = applyRequestTimeout(new mssql.Request(target), timeoutMs);
         const abort = attachAbort(request, signal);
         try {
@@ -102718,8 +102767,11 @@ var require_safety = __commonJS({
       }
       const transaction = new mssql.Transaction(pool);
       let serverRolledBack = false;
+      let serverRolledBackDuring = null;
+      const progress = {};
       transaction.on("rollback", () => {
         serverRolledBack = true;
+        serverRolledBackDuring = progress.current ? describeStatement(progress.current) : null;
       });
       await transaction.begin(mssql.ISOLATION_LEVEL.READ_COMMITTED);
       let applied;
@@ -102727,11 +102779,12 @@ var require_safety = __commonJS({
         applied = await executeStatements(transaction, statements, {
           mssql,
           timeoutMs,
-          signal
+          signal,
+          progress
         });
         await transaction.commit();
       } catch (err) {
-        const cleanup = serverRolledBack ? { ok: true, serverRolledBack: true } : await rollbackAndCheck(pool, transaction, {
+        const cleanup = serverRolledBack ? { ok: true, serverRolledBack: true, serverRolledBackDuring } : await rollbackAndCheck(pool, transaction, {
           ...cleanupOptions,
           aborted: Boolean(err.aborted),
           mssql
@@ -102760,6 +102813,8 @@ var require_safety = __commonJS({
       probeTrancount,
       rollbackAndCheck,
       abandonedTransactionError,
+      watchServerRollback,
+      escapedTransactionError,
       runRead,
       runWrite,
       streamRead,
@@ -102808,7 +102863,9 @@ var require_validation2 = __commonJS({
       limit: z.number().int().positive().max(MAX_LIMIT).default(DEFAULT_LIMIT).describe(`Max rows to return (1..${MAX_LIMIT}).`),
       offset: z.number().int().nonnegative().default(0).describe("Row offset for pagination.")
     };
-    var queryString = z.string().min(1).max(MAX_QUERY_LEN);
+    var queryString = z.string().min(1).max(MAX_QUERY_LEN, {
+      message: `query is longer than ${MAX_QUERY_LEN} characters. Put it in a .sql file and run it with execute_sql_file, which has no such limit.`
+    });
     var sqlFilePath = z.string().min(1).max(500).refine((s) => s.indexOf(String.fromCharCode(0)) === -1, {
       message: "path must not contain NUL characters"
     });
@@ -102853,16 +102910,38 @@ var require_execute_read_query = __commonJS({
       timeoutMsShape,
       queryString,
       MIN_TIMEOUT_MS,
-      MAX_TIMEOUT_MS
+      MAX_TIMEOUT_MS,
+      MAX_QUERY_LEN
     } = require_validation2();
     var inputShape = {
       query: queryString.describe(
-        "Read-only SQL query. Wrapped in a rollback-only transaction, so any incidental writes are discarded. Results are streamed and the underlying request is cancelled once `offset + limit` rows have been seen - so even a naive `SELECT *` against a huge table will not load the full recordset into memory."
+        `Read-only SQL query. Wrapped in a rollback-only transaction, so any incidental writes are discarded. Results are streamed and the underlying request is cancelled once \`offset + limit\` rows have been seen - so even a naive \`SELECT *\` against a huge table will not load the full recordset into memory. At most ${MAX_QUERY_LEN} characters: a longer script belongs in a .sql file run with execute_sql_file.`
       ),
       ...dbKeyShape,
       ...paginationShape,
       ...timeoutMsShape
     };
+    function escapedTransactionResult(err, { db, dbKey }) {
+      const result = err.result || { rows: [], totalSeen: 0, truncated: false };
+      const structured = {
+        db,
+        dbKey,
+        rowCount: result.rows.length,
+        totalRowsSeen: result.totalSeen,
+        truncated: result.truncated,
+        recordset: result.rows
+      };
+      return {
+        content: [
+          { type: "text", text: err.message },
+          {
+            type: "text",
+            text: "Rows the batch returned before this was detected: " + JSON.stringify(structured, null, 2)
+          }
+        ],
+        isError: true
+      };
+    }
     var outputShape = {
       db: z.string(),
       dbKey: z.string(),
@@ -102874,12 +102953,24 @@ var require_execute_read_query = __commonJS({
     async function handler({ query, dbKey, limit, offset, timeoutMs }, extra) {
       const { dbKey: actualKey, config } = getConfig(dbKey);
       const pool = await getPool(actualKey, config);
-      const { rows, totalSeen, truncated } = await streamRead(pool, query, {
-        offset,
-        limit,
-        timeoutMs,
-        signal: extra?.signal
-      });
+      let read;
+      try {
+        read = await streamRead(pool, query, {
+          offset,
+          limit,
+          timeoutMs,
+          signal: extra?.signal
+        });
+      } catch (err) {
+        if (err.code === "ETXNESCAPED") {
+          return escapedTransactionResult(err, {
+            db: config.database,
+            dbKey: actualKey
+          });
+        }
+        throw err;
+      }
+      const { rows, totalSeen, truncated } = read;
       const structured = {
         db: config.database,
         dbKey: actualKey,
@@ -102897,7 +102988,7 @@ var require_execute_read_query = __commonJS({
       name: "execute_read_query",
       config: {
         title: "Execute Read Query",
-        description: `Run a SELECT-style SQL query against a configured database. The query executes inside a transaction that is ALWAYS rolled back, so accidental DML/DDL is non-durable (this is a guardrail, not a sandbox: an explicit \`COMMIT TRANSACTION\` in the query string ends the wrapper and following writes will persist - rely on a least-privilege SQL login for real isolation). Results are streamed; the server cancels the underlying request once \`offset + limit\` rows have been seen, so \`truncated:true\` means more rows exist. \`timeoutMs\` (${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS}) overrides the 30 s default for a query that is legitimately slow. If the rollback cannot be completed the connection is closed and dropped from the pool instead of leaking its open transaction into an unrelated call, and the error says so - retry, and the next call gets a clean connection.`,
+        description: `Run a SELECT-style SQL query against a configured database. The query executes inside a transaction that is ALWAYS rolled back, so accidental DML/DDL is non-durable (this is a guardrail, not a sandbox: an explicit \`COMMIT TRANSACTION\` in the query string ends the wrapper and following writes will persist - rely on a least-privilege SQL login for real isolation). The same happens when a stored procedure or a trigger fired by the query runs \`ROLLBACK TRANSACTION\` on its own (the usual trigger \`ROLLBACK TRAN\`, or \`IF @@TRANCOUNT > 0 ROLLBACK\` in a CATCH block): the wrapper is gone, and any statement the batch runs after that point is autocommitted. The tool detects it and fails with an explicit warning (code ETXNESCAPED) that still carries the rows returned so far - never treat that as "nothing happened". If your SQL calls procedures or can fire triggers, make it stop when the transaction disappears: SET XACT_ABORT ON, TRY/CATCH, check @@TRANCOUNT after every EXEC and RETURN when it is 0, and do not write from a CATCH block. Results are streamed; the server cancels the underlying request once \`offset + limit\` rows have been seen, so \`truncated:true\` means more rows exist. \`timeoutMs\` (${MIN_TIMEOUT_MS}..${MAX_TIMEOUT_MS}) overrides the 30 s default for a query that is legitimately slow. If the rollback cannot be completed the connection is closed and dropped from the pool instead of leaking its open transaction into an unrelated call, and the error says so - retry, and the next call gets a clean connection.`,
         inputSchema: inputShape,
         outputSchema: outputShape,
         annotations: {
@@ -103246,7 +103337,11 @@ var require_execute_sql_file = __commonJS({
       wrapped.cause = err;
       return wrapped;
     }
-    function rolledBackError(err) {
+    function rolledBackError(err, { serverRolledBack = false } = {}) {
+      if (serverRolledBack) {
+        err.message += " The whole script runs in a single transaction, and the server itself closed it (a ROLLBACK issued by XACT_ABORT, by a trigger or by a procedure's CATCH block). Everything before that ROLLBACK was undone. If XACT_ABORT ended the batch there, nothing was applied; if a trigger or procedure rolled back and the batch carried on (TRY/CATCH), whatever ran after that point was autocommitted and IS persisted. Verify the data before retrying.";
+        return err;
+      }
       err.message += " The whole script runs in a single transaction, which was rolled back - nothing was applied.";
       return err;
     }
@@ -103364,7 +103459,9 @@ var require_execute_sql_file = __commonJS({
       if (failure) {
         const cleanup = serverRolledBack ? { ok: true, serverRolledBack: true } : await rollbackAndCheck(pool, transaction, { aborted, mssql: sqlLib });
         if (!cleanup.ok) throw abandonedTransactionError(cleanup, failure);
-        throw rolledBackError(failure);
+        throw rolledBackError(failure, {
+          serverRolledBack: cleanup.serverRolledBack
+        });
       }
       const executed = results.filter((r) => !r.skipped).length;
       return respond({

@@ -176,7 +176,22 @@ function toFileError(err, batch, file, run) {
  * sentence is only added on the path where the rollback (ours or the server's) has
  * actually completed; the other path raises `abandonedTransactionError` instead.
  */
-function rolledBackError(err) {
+function rolledBackError(err, { serverRolledBack = false } = {}) {
+  if (serverRolledBack) {
+    // The server closed the script's transaction on its own, and from here it is not
+    // possible to tell whether the batch died with it (XACT_ABORT, the sane case for a
+    // deployment script) or carried on in autocommit (a trigger's ROLLBACK swallowed by a
+    // TRY/CATCH in a procedure the script called). "Nothing was applied" is only true in
+    // the first case, so the verdict has to say both.
+    err.message +=
+      " The whole script runs in a single transaction, and the server itself closed it " +
+      "(a ROLLBACK issued by XACT_ABORT, by a trigger or by a procedure's CATCH block). " +
+      "Everything before that ROLLBACK was undone. If XACT_ABORT ended the batch there, " +
+      "nothing was applied; if a trigger or procedure rolled back and the batch carried " +
+      "on (TRY/CATCH), whatever ran after that point was autocommitted and IS persisted. " +
+      "Verify the data before retrying.";
+    return err;
+  }
   err.message +=
     " The whole script runs in a single transaction, which was rolled back - nothing was applied.";
   return err;
@@ -342,7 +357,9 @@ async function handler(
       ? { ok: true, serverRolledBack: true }
       : await rollbackAndCheck(pool, transaction, { aborted, mssql: sqlLib });
     if (!cleanup.ok) throw abandonedTransactionError(cleanup, failure);
-    throw rolledBackError(failure);
+    throw rolledBackError(failure, {
+      serverRolledBack: cleanup.serverRolledBack,
+    });
   }
 
   const executed = results.filter((r) => !r.skipped).length;

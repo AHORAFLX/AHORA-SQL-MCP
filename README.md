@@ -691,6 +691,19 @@ un `COMMIT TRANSACTION` explícito dentro de la consulta cierra esa transacción
 después se ejecuta en autocommit y persiste. No hay lista negra de palabras clave, y es
 deliberado: son triviales de evitar y dan una falsa sensación de seguridad.
 
+Lo mismo ocurre —y en AHORA_ERP es el caso habitual, no el raro— cuando un procedimiento o un
+trigger al que llega la consulta hace su propio `ROLLBACK TRAN`: el patrón
+`PRINT + ROLLBACK TRAN + RETURN` de los triggers, o el `IF @@TRANCOUNT > 0 ROLLBACK` de los `CATCH`.
+La transacción de la herramienta desaparece y, si un `TRY/CATCH` del procedimiento se traga el
+error, el lote sigue ejecutándose en autocommit: lo anterior al `ROLLBACK` interno se revierte,
+pero **cada sentencia posterior se confirma**. Desde el cliente no se puede impedir. Lo que hace
+la herramienta es detectarlo (tedious ve el `ROLLBACK` que manda el servidor) y **fallar con un
+aviso explícito, código `ETXNESCAPED`, que dice que las escrituras posteriores a ese punto pueden
+estar confirmadas** y adjunta las filas que el lote había devuelto hasta entonces, que suelen ser
+su propio log. Un lote que llame a procedimientos o pueda disparar triggers debería protegerse
+solo: `SET XACT_ABORT ON`, `TRY/CATCH`, comprobar `@@TRANCOUNT` después de cada `EXEC` y salir
+con `RETURN` si vale 0, y no escribir nunca desde el `CATCH`.
+
 **La única frontera real son los permisos del login de SQL Server.** Para que "producción no se
 escribe" sea una política y no una expectativa, hace falta un login dedicado con `db_datareader`
 en los servidores de producción. Mientras eso no exista, la garantía depende de que cada

@@ -32,7 +32,8 @@
  * Coverage:
  *   - list_databases, describe_database, list_tables, list_views, list_stored_procedures
  *   - describe_table, describe_procedure, list_indexes, list_foreign_keys (with pagination)
- *   - execute_read_query: returns rows, streaming cutoff (truncated=true), rollback isolation
+ *   - execute_read_query: returns rows, streaming cutoff (truncated=true), rollback isolation,
+ *     ROLLBACK from inside the batch (trigger + TRY/CATCH) reported as ETXNESCAPED
  *   - execute_write_query: rejected when writes off, persists when writes on
  *   - execute_sql_file: dry run, GO splitting, cross-batch session state (the pinned-connection
  *     claim), error-to-file-line mapping, all-or-nothing rollback, path and USE rejection
@@ -137,6 +138,17 @@ async function bootstrap() {
     CREATE PROCEDURE dbo.GetUserOrders @userId INT AS
     BEGIN
       SELECT Id, UserId, Amount FROM dbo.Orders WHERE UserId = @userId;
+    END
+  `);
+  // A table whose trigger rejects Id = 1 the AHORA_ERP way (PRINT + ROLLBACK TRAN +
+  // RETURN). The rollback-only wrapper of execute_read_query cannot survive that; the
+  // test checks the tool says so instead of handing back a clean resultset.
+  await pool.request().batch(`CREATE TABLE dbo.Rejected (Id INT);`);
+  await pool.request().batch(`
+    CREATE TRIGGER dbo.Rejected_ITrig ON dbo.Rejected FOR INSERT AS
+    BEGIN
+      IF EXISTS (SELECT 1 FROM inserted WHERE Id = 1)
+      BEGIN PRINT 'rechazado'; ROLLBACK TRAN; RETURN; END
     END
   `);
   await pool.close();
@@ -342,6 +354,39 @@ async function runTests() {
   check(
     "rollback-only contract: INSERT inside execute_read_query does NOT persist",
     r.structuredContent.recordset[0].c === 0
+  );
+
+  // The escape the contract cannot cover: a trigger inside the batch runs ROLLBACK TRAN,
+  // the TRY/CATCH swallows the resulting error 3609, and the batch goes on in autocommit.
+  // The tool cannot prevent the second INSERT from persisting; it has to detect it, fail
+  // with ETXNESCAPED, and still hand over the rows the batch returned.
+  r = await findTool("execute_read_query").handler({
+    query: `
+      BEGIN TRY INSERT dbo.Rejected VALUES (1); END TRY
+      BEGIN CATCH IF @@TRANCOUNT > 0 ROLLBACK TRAN; END CATCH;
+      INSERT dbo.Rejected VALUES (2);
+      SELECT Id FROM dbo.Rejected;`,
+    limit: 10,
+    offset: 0,
+  });
+  check(
+    "a ROLLBACK from inside the batch is reported as ETXNESCAPED, not as a clean result",
+    r.isError === true &&
+      /closed from INSIDE the batch/.test(r.content[0].text),
+    r.isError ? r.content[0].text : JSON.stringify(r.structuredContent)
+  );
+  check(
+    "...and the rows the batch returned travel with the warning",
+    r.isError === true && /"Id": 2/.test(r.content[1]?.text || "")
+  );
+  r = await findTool("execute_read_query").handler({
+    query: "SELECT COUNT(*) AS c FROM dbo.Rejected",
+    limit: 10,
+    offset: 0,
+  });
+  check(
+    "(documented) the INSERT after the internal ROLLBACK DID persist - the reason the warning exists",
+    r.structuredContent.recordset[0].c === 1
   );
 
   // ── execute_write_query ──

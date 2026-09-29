@@ -319,6 +319,73 @@ function abandonedTransactionError(cleanup, cause) {
 }
 
 /**
+ * Notice when the SERVER closes the transaction this tool opened.
+ *
+ * tedious follows the outermost transaction through the ENVCHANGE tokens the server sends
+ * for every BEGIN / COMMIT / ROLLBACK, whoever issued them. On a ROLLBACK it did not send
+ * itself, mssql marks the transaction aborted, hands its connection back to the pool on
+ * the spot and emits `rollback` with `true` - all of it in the middle of the request,
+ * before `done`. That event is the only client-side trace of a ROLLBACK TRANSACTION run
+ * from inside the batch: by a trigger (the usual `PRINT + ROLLBACK TRAN + RETURN`), by
+ * the CATCH of a procedure (`IF @@TRANCOUNT > 0 ROLLBACK`), or by the query itself.
+ *
+ * It matters because the batch does not necessarily stop there. A ROLLBACK inside a
+ * trigger raises error 3609 and aborts the batch on its own - but the moment a TRY/CATCH
+ * in the calling procedure swallows it, which is how every AHORA_ERP procedure is written,
+ * execution carries on with @@TRANCOUNT at 0 and every statement from then on is
+ * autocommitted. That is how a "read-only" call left 72 rows in a production table (see
+ * `escapedTransactionError`): the writes before the internal ROLLBACK were undone, the
+ * ones after it were not, and the caller was told "Command failed with no output".
+ *
+ * The flag is only meaningful BEFORE this tool's own ROLLBACK, which emits the same event
+ * (with `false`); every caller reads it before starting its cleanup.
+ */
+function watchServerRollback(transaction) {
+  const state = { rolledBack: false };
+  if (typeof transaction?.on === "function") {
+    transaction.on("rollback", () => {
+      state.rolledBack = true;
+    });
+  }
+  return state;
+}
+
+/**
+ * The error a read raises when its transaction was closed from inside the batch.
+ *
+ * Not `abandonedTransactionError`: there the danger is a transaction left OPEN on a
+ * pooled connection. Here it is the opposite, and worse. The transaction is gone, so
+ * whatever the batch ran after the internal ROLLBACK is COMMITTED - under a tool whose
+ * whole promise is that nothing persists. Nothing on this side can undo that. What this
+ * tool can still do is say so, loudly and specifically, instead of the generic error 266
+ * ("Transaction count after EXECUTE indicates a mismatching number of BEGIN and COMMIT")
+ * or a bare "Command failed with no output" that read as "nothing happened" - and hand
+ * over the rows the batch did return, which are usually the batch's own diagnostic log.
+ */
+function escapedTransactionError(cause, result) {
+  const parts = [
+    "The rollback-only transaction around this call was closed from INSIDE the batch: " +
+      "the server reported a ROLLBACK that this tool did not issue. A trigger or stored " +
+      "procedure ran ROLLBACK TRANSACTION (a trigger's `ROLLBACK TRAN`, a CATCH block's " +
+      "`IF @@TRANCOUNT > 0 ROLLBACK`), or the query itself did.",
+    "Everything that ran BEFORE that point was undone. Everything that ran AFTER it ran " +
+      "in autocommit mode, and any write it made is already COMMITTED: the rollback " +
+      "guarantee of this tool did NOT hold for this call. Check the database before " +
+      "doing anything else.",
+    "To run SQL that calls procedures or fires triggers without this risk, make the " +
+      "batch stop the moment the transaction disappears: SET XACT_ABORT ON, wrap it in " +
+      "TRY/CATCH, check @@TRANCOUNT after every EXEC and RETURN when it is 0, and never " +
+      "write from a CATCH block.",
+  ];
+  if (cause) parts.push(`The batch itself ended with: ${cause.message}`);
+  const err = new Error(parts.join(" "));
+  err.code = "ETXNESCAPED";
+  if (cause) err.cause = cause;
+  if (result !== undefined) err.result = result;
+  return err;
+}
+
+/**
  * Run a read inside a transaction that is ALWAYS rolled back, even on success.
  *
  * This is a guardrail against accidental writes (a SELECT INTO, an INSERT smuggled
@@ -330,6 +397,10 @@ function abandonedTransactionError(cleanup, cause) {
  * The rollback is no longer best-effort-and-forget: if it cannot be done, the connection
  * is destroyed and the caller is told, because a read transaction left open on a pooled
  * connection is inherited by whoever gets that connection next.
+ *
+ * And if the batch itself closed the transaction (a trigger's or a procedure's ROLLBACK,
+ * see `watchServerRollback`), the call fails with `ETXNESCAPED` even when the SQL
+ * succeeded: the guarantee did not hold, and a clean-looking resultset would hide that.
  */
 async function runRead(
   pool,
@@ -338,9 +409,13 @@ async function runRead(
 ) {
   if (signal?.aborted) throw new Error("Request aborted");
   const transaction = new mssql.Transaction(pool);
+  const serverRollback = watchServerRollback(transaction);
   await transaction.begin(mssql.ISOLATION_LEVEL.READ_COMMITTED);
 
-  const request = applyRequestTimeout(new mssql.Request(transaction), timeoutMs);
+  const request = applyRequestTimeout(
+    new mssql.Request(transaction),
+    timeoutMs
+  );
   const abort = attachAbort(request, signal);
 
   let result;
@@ -351,6 +426,17 @@ async function runRead(
     failure = err;
   } finally {
     abort.detach();
+  }
+
+  // No cleanup on this path, on purpose. When the event fired, mssql had already handed
+  // the connection back to the pool and forgotten it: our ROLLBACK could only fail with
+  // EABORT, and `waitForRequestToSettle` would burn its whole grace period first, because
+  // mssql only clears `_activeRequest` while the connection is still the transaction's.
+  // The connection sits in the pool at @@TRANCOUNT 0 - or, if the batch opened a new
+  // transaction after its ROLLBACK, the acquire-time reset deals with it like with any
+  // other leftover.
+  if (serverRollback.rolledBack) {
+    throw escapedTransactionError(failure, result);
   }
 
   const cleanup = await rollbackAndCheck(pool, transaction, {
@@ -402,9 +488,13 @@ async function streamRead(
 ) {
   if (signal?.aborted) throw new Error("Request aborted");
   const transaction = new mssql.Transaction(pool);
+  const serverRollback = watchServerRollback(transaction);
   await transaction.begin(mssql.ISOLATION_LEVEL.READ_COMMITTED);
 
-  const request = applyRequestTimeout(new mssql.Request(transaction), timeoutMs);
+  const request = applyRequestTimeout(
+    new mssql.Request(transaction),
+    timeoutMs
+  );
   request.stream = true;
   const abort = attachAbort(request, signal);
   let cutoff = false;
@@ -477,6 +567,14 @@ async function streamRead(
     abort.detach();
   }
 
+  // Same reasoning as in runRead: the server closed the transaction from inside the
+  // batch, mssql has already released the connection, and there is nothing left to roll
+  // back - only something to report. The rows are attached so the caller can still show
+  // the batch's own output next to the warning.
+  if (serverRollback.rolledBack) {
+    throw escapedTransactionError(failure, result);
+  }
+
   const cleanup = await rollbackAndCheck(pool, transaction, {
     ...cleanupOptions,
     aborted: abort.aborted || cutoff,
@@ -524,13 +622,39 @@ function listStatements(applied) {
  */
 function writeFailureError(cause, { applied, total, transactional, cleanup }) {
   const position = applied.length + 1;
-  const parts = [
-    total > 1
-      ? `Statement ${position} of ${total} failed.`
-      : "The statement failed.",
-  ];
+  const parts = [];
+  if (cleanup?.serverRolledBack && applied.length >= total) {
+    // Every statement went through; what failed was our COMMIT, because the transaction
+    // had already been closed from inside the batch.
+    parts.push(
+      total > 1
+        ? `All ${total} statements ran, but the transaction was gone before the COMMIT.`
+        : "The statement ran, but the transaction was gone before the COMMIT."
+    );
+  } else {
+    parts.push(
+      total > 1
+        ? `Statement ${position} of ${total} failed.`
+        : "The statement failed."
+    );
+  }
 
-  if (transactional && cleanup?.ok) {
+  if (transactional && cleanup?.serverRolledBack) {
+    // The server closed the transaction itself, and the client cannot tell why. With
+    // XACT_ABORT the batch died there and nothing persisted; with a trigger's ROLLBACK
+    // swallowed by a TRY/CATCH the batch carried on in autocommit, and everything after
+    // that point IS persisted. The old text picked the first story unconditionally.
+    const where = cleanup.serverRolledBackDuring
+      ? ` while statement #${cleanup.serverRolledBackDuring.index} (lines ${cleanup.serverRolledBackDuring.startLine}-${cleanup.serverRolledBackDuring.endLine}: ${cleanup.serverRolledBackDuring.preview}) was running`
+      : "";
+    parts.push(
+      `The server itself closed the transaction${where}: a ROLLBACK issued by XACT_ABORT, ` +
+        "by a trigger or by a procedure's CATCH block. Everything before that ROLLBACK was " +
+        "undone. If XACT_ABORT ended the batch there, nothing was applied; if a trigger or " +
+        "procedure rolled back and the batch carried on (TRY/CATCH), whatever ran after " +
+        "that point was autocommitted and IS persisted. Verify the data before retrying."
+    );
+  } else if (transactional && cleanup?.ok) {
     parts.push(
       total > 1
         ? `All ${total} statements ran in ONE transaction, which was rolled back: nothing was applied.`
@@ -570,7 +694,11 @@ function writeFailureError(cause, { applied, total, transactional, cleanup }) {
 }
 
 /** Run every statement of a write, in order, reporting how far it got. */
-async function executeStatements(target, statements, { mssql, timeoutMs, signal }) {
+async function executeStatements(
+  target,
+  statements,
+  { mssql, timeoutMs, signal, progress = {} }
+) {
   const applied = [];
   for (const statement of statements) {
     if (signal?.aborted) {
@@ -578,6 +706,9 @@ async function executeStatements(target, statements, { mssql, timeoutMs, signal 
       err.applied = applied;
       throw err;
     }
+    // Which statement is on the wire right now - read by the server-rollback listener in
+    // runWrite, which fires mid-batch and needs to say WHERE the transaction went away.
+    progress.current = statement;
     const request = applyRequestTimeout(new mssql.Request(target), timeoutMs);
     const abort = attachAbort(request, signal);
     try {
@@ -659,11 +790,18 @@ async function runWrite(
   }
 
   const transaction = new mssql.Transaction(pool);
-  // El servidor puede deshacer la transaccion por su cuenta (XACT_ABORT); si lo hace,
-  // pedirle otro ROLLBACK es un error mas encima del que importa.
+  // El servidor puede deshacer la transaccion por su cuenta (XACT_ABORT, o el ROLLBACK de
+  // un trigger o de un CATCH); si lo hace, pedirle otro ROLLBACK es un error mas encima
+  // del que importa. Se anota ademas QUE sentencia estaba en vuelo, porque el aviso al
+  // usuario tiene que decir a partir de donde pudo haber escrituras en autocommit.
   let serverRolledBack = false;
+  let serverRolledBackDuring = null;
+  const progress = {};
   transaction.on("rollback", () => {
     serverRolledBack = true;
+    serverRolledBackDuring = progress.current
+      ? describeStatement(progress.current)
+      : null;
   });
   await transaction.begin(mssql.ISOLATION_LEVEL.READ_COMMITTED);
 
@@ -673,11 +811,12 @@ async function runWrite(
       mssql,
       timeoutMs,
       signal,
+      progress,
     });
     await transaction.commit();
   } catch (err) {
     const cleanup = serverRolledBack
-      ? { ok: true, serverRolledBack: true }
+      ? { ok: true, serverRolledBack: true, serverRolledBackDuring }
       : await rollbackAndCheck(pool, transaction, {
           ...cleanupOptions,
           aborted: Boolean(err.aborted),
@@ -710,6 +849,8 @@ module.exports = {
   probeTrancount,
   rollbackAndCheck,
   abandonedTransactionError,
+  watchServerRollback,
+  escapedTransactionError,
   runRead,
   runWrite,
   streamRead,

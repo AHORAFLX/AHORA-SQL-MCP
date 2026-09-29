@@ -98,7 +98,14 @@ const paginationShape = {
     .describe("Row offset for pagination."),
 };
 
-const queryString = z.string().min(1).max(MAX_QUERY_LEN);
+const queryString = z
+  .string()
+  .min(1)
+  .max(MAX_QUERY_LEN, {
+    message:
+      `query is longer than ${MAX_QUERY_LEN} characters. Put it in a .sql file and run it ` +
+      "with execute_sql_file, which has no such limit.",
+  });
 
 const sqlFilePath = z
   .string()
