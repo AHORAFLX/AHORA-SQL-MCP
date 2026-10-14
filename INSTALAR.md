@@ -28,7 +28,7 @@ El paso 1 (skills) se hace con un comando y no tiene más. El paso 2 (el MCP) es
 enjundia, y hay un instalador que lo hace por ti. Ábrelo **desde la carpeta de tu proyecto**:
 
 ```bash
-npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.15.4 ahora-setup
+npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v1.16.0 ahora-setup
 ```
 
 Se abre un formulario en el navegador: detecta tu `Web.config` o `appsettings.json`, **se conecta de
@@ -81,6 +81,30 @@ interesa conservar.
 
 - `--cli` → asistente de terminal en vez de formulario (necesario por RDP sin navegador).
 - `--no-open` → no lanza el navegador, solo imprime la URL.
+- `--answers <fichero|->` → **sin preguntas**: las respuestas van en un JSON (con `-`, por stdin,
+  que es como lo usa la extensión DevOps Ahora; la contraseña nunca va en la línea de comandos).
+  Valida igual que el formulario y, si alguna conexión no responde, **no escribe nada** salvo con
+  `"allowUnreachable": true`. Imprime una línea `AHORA_SETUP_RESULT {json}` y sale con 0 (escrito),
+  2 (rechazado sin escribir) o 1 (error). `profileKey` (`local`, `pruebas`, `produccion`) es
+  obligatorio a propósito: el entorno no tiene valor por defecto. Ejemplo:
+
+  ```json
+  {
+    "profileKey": "pruebas",
+    "allowWrites": true,
+    "manualConnections": [
+      { "alias": "config", "server": "SRV\\SQL2022", "database": "CLIENTE_IC", "user": "sa", "password": "…" },
+      { "alias": "data", "server": "SRV\\SQL2022", "database": "CLIENTE", "user": "sa", "password": "…" }
+    ],
+    "clients": ["claude"],
+    "product": false,
+    "playwright": false
+  }
+  ```
+
+  También acepta `configFile` + `connections: [{ "name", "alias" }]` (+ `environment`) en lugar de
+  `manualConnections`, y las mismas casillas que el formulario (`allowRules`, `allowWriteRules`,
+  `allowProductWriteRules`, `allowPlaywrightActionRules`, `sqlDirs`, `productConnection`).
 
 Quien te esté formando puede darte en su lugar un `INSTALAR-AHORA.cmd` (doble clic) o un
 `ahora-setup.exe`; hacen exactamente esto mismo.
@@ -116,7 +140,7 @@ npx skills add AHORAFLX/AHORA-SCO-SKILLS/skills/General
 Instala el servidor una vez:
 
 ```bash
-npm install --omit=dev github:AHORAFLX/AHORA-SQL-MCP#v1.15.4 --prefix "%LOCALAPPDATA%\AHORA-SQL-MCP"
+npm install --omit=dev github:AHORAFLX/AHORA-SQL-MCP#v1.16.0 --prefix "%LOCALAPPDATA%\AHORA-SQL-MCP"
 ```
 
 Después crea un fichero `.mcp.json` en la **raíz del proyecto** y pega el bloque que te

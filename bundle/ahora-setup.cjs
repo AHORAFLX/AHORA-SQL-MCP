@@ -75912,7 +75912,7 @@ var require_package2 = __commonJS({
   "package.json"(exports2, module2) {
     module2.exports = {
       name: "@ahoraflx/sql-mcp",
-      version: "1.15.4",
+      version: "1.16.0",
       description: "Servidor MCP de SQL Server para los proyectos Flexygo y AHORA_ERP.",
       keywords: [
         "mssql",
@@ -77473,6 +77473,251 @@ if (${autoDetect ? "true" : "false"}) $("btnDetect").click();
   }
 });
 
+// installer/unattended.js
+var require_unattended = __commonJS({
+  "installer/unattended.js"(exports2, module2) {
+    var fs6 = require("fs");
+    var path2 = require("path");
+    var RESULT_PREFIX = "AHORA_SETUP_RESULT ";
+    var EXIT_OK = 0;
+    var EXIT_ERROR = 1;
+    var EXIT_REJECTED = 2;
+    var AnswersError = class extends Error {
+    };
+    function readAllStdin(stream = process.stdin) {
+      return new Promise((resolve, reject) => {
+        const chunks = [];
+        stream.on(
+          "data",
+          (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c))
+        );
+        stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+        stream.on("error", reject);
+      });
+    }
+    function stripBom(text) {
+      return text.charCodeAt(0) === 65279 ? text.slice(1) : text;
+    }
+    async function readAnswers(source, { stdin = process.stdin } = {}) {
+      if (!source)
+        throw new AnswersError(
+          "Falta el origen de las respuestas: --answers <fichero> o --answers -"
+        );
+      const raw = source === "-" ? await readAllStdin(stdin) : fs6.readFileSync(source, "utf8");
+      try {
+        return JSON.parse(stripBom(raw));
+      } catch (err) {
+        throw new AnswersError(`Las respuestas no son JSON valido: ${err.message}`);
+      }
+    }
+    function normalizeAnswers(input, { cwd = process.cwd(), profiles } = {}) {
+      if (!input || typeof input !== "object" || Array.isArray(input)) {
+        throw new AnswersError("Las respuestas tienen que ser un objeto JSON.");
+      }
+      const projectDir = path2.resolve(input.projectDir || cwd);
+      if (!fs6.existsSync(projectDir))
+        throw new AnswersError(`No existe la carpeta del proyecto: ${projectDir}`);
+      if (!input.profileKey) {
+        throw new AnswersError(
+          `Falta profileKey (${profiles.map((p) => p.key).join(", ")}): el entorno no tiene valor por defecto a proposito.`
+        );
+      }
+      const profile = profiles.find((p) => p.key === input.profileKey);
+      if (!profile) {
+        throw new AnswersError(
+          `profileKey '${input.profileKey}' no existe. Validos: ${profiles.map((p) => p.key).join(", ")}.`
+        );
+      }
+      if (input.allowWrites && !profile.canWrite) {
+        throw new AnswersError(
+          "La escritura no se puede activar en PRODUCCION: el servidor se negaria a arrancar."
+        );
+      }
+      const manualConnections = Array.isArray(input.manualConnections) ? input.manualConnections : [];
+      const connections = Array.isArray(input.connections) ? input.connections : [];
+      if (!input.configFile && manualConnections.length === 0) {
+        throw new AnswersError(
+          "Falta configFile o manualConnections: no hay de donde sacar la conexion."
+        );
+      }
+      if (input.configFile && connections.length === 0) {
+        throw new AnswersError(
+          "Con configFile hay que indicar connections: [{ name, alias }]."
+        );
+      }
+      for (const m of manualConnections) {
+        if (!m || !m.server || !m.database || !m.user) {
+          throw new AnswersError(
+            "Cada conexion manual necesita server, database y user."
+          );
+        }
+      }
+      const clients = Array.isArray(input.clients) && input.clients.length > 0 ? input.clients : ["claude"];
+      let productConnection = input.productConnection;
+      if (input.product && !productConnection) {
+        productConnection = connections.length > 0 ? { name: connections[0].name, alias: connections[0].alias } : {
+          name: manualConnections[0].database,
+          alias: manualConnections[0].alias
+        };
+      }
+      return {
+        projectDir,
+        configFile: input.configFile ? path2.resolve(projectDir, input.configFile) : void 0,
+        environment: input.environment,
+        connections,
+        manualConnections,
+        profileKey: profile.key,
+        allowWrites: Boolean(input.allowWrites),
+        sqlDirs: Array.isArray(input.sqlDirs) ? input.sqlDirs : [],
+        clients,
+        product: Boolean(input.product),
+        productConnection,
+        productVersion: input.productVersion,
+        productFolder: input.productFolder,
+        playwright: Boolean(input.playwright),
+        // Las reglas de lectura si por defecto (igual que el formulario); las de escritura no.
+        allowRules: input.allowRules !== false,
+        allowWriteRules: Boolean(input.allowWriteRules),
+        allowProductWriteRules: Boolean(input.allowProductWriteRules),
+        allowPlaywrightActionRules: Boolean(input.allowPlaywrightActionRules),
+        allowUnreachable: Boolean(input.allowUnreachable)
+      };
+    }
+    function validationProblems(results) {
+      const problems = [];
+      for (const r of results) {
+        if (r.manual) {
+          if (!r.ok)
+            problems.push(`${r.name}: ${r.error}${r.hint ? ` (${r.hint})` : ""}`);
+        } else if (!r.ok) {
+          problems.push(`${r.name}: ${r.error}`);
+        } else if (!r.connected) {
+          problems.push(
+            `${r.name}: no conecta: ${r.connectError}${r.hint ? ` (${r.hint})` : ""}`
+          );
+        }
+      }
+      return problems;
+    }
+    function unresolvable(results) {
+      return results.filter((r) => !r.manual && !r.ok).map((r) => `${r.name}: ${r.error}`);
+    }
+    async function runUnattended({
+      source,
+      stdin,
+      cwd,
+      gui = require_gui(),
+      profiles = require_setup().PROFILES,
+      latestProductVersion,
+      installedProductVersion,
+      install
+    } = {}) {
+      let payload;
+      try {
+        payload = normalizeAnswers(await readAnswers(source, { stdin }), {
+          cwd,
+          profiles
+        });
+      } catch (err) {
+        if (err instanceof AnswersError)
+          return {
+            code: EXIT_REJECTED,
+            result: { ok: false, phase: "answers", error: err.message }
+          };
+        throw err;
+      }
+      const validation = await gui.validate({
+        projectDir: payload.projectDir,
+        configFile: payload.configFile,
+        environment: payload.environment,
+        names: payload.connections,
+        manual: payload.manualConnections
+      });
+      const hard = unresolvable(validation);
+      const problems = validationProblems(validation);
+      if (hard.length > 0 || problems.length > 0 && !payload.allowUnreachable) {
+        return {
+          code: EXIT_REJECTED,
+          result: {
+            ok: false,
+            phase: "validate",
+            error: `No se ha escrito nada. ${(hard.length > 0 ? hard : problems).join(" \xB7 ")}`,
+            validation: redactValidation(validation)
+          }
+        };
+      }
+      if (payload.product && !payload.productFolder && !payload.productVersion) {
+        const pm = require_product_mcp();
+        const latestFn = latestProductVersion || pm.latestProductVersion;
+        const installedFn = installedProductVersion || (() => pm.installedProductVersion(pm.productRuntimeDir()));
+        let latest = null;
+        try {
+          latest = await latestFn();
+        } catch {
+          latest = null;
+        }
+        payload.productVersion = pm.versionToInstall({ latest, installed: installedFn() }).version || void 0;
+      }
+      try {
+        const written = gui.write(payload, install ? { install } : {});
+        return {
+          code: EXIT_OK,
+          result: {
+            ok: true,
+            phase: "write",
+            validation: redactValidation(validation),
+            ...written
+          }
+        };
+      } catch (err) {
+        return {
+          code: EXIT_REJECTED,
+          result: { ok: false, phase: "write", error: err.message }
+        };
+      }
+    }
+    function redactValidation(results) {
+      return results.map((r) => ({
+        name: r.name,
+        alias: r.alias,
+        ok: r.ok,
+        connected: r.manual ? r.ok : r.connected,
+        target: r.target,
+        database: r.database,
+        error: r.error || r.connectError,
+        hint: r.hint
+      }));
+    }
+    function runUnattendedCli(argv, { out = process.stdout } = {}) {
+      const idx = argv.indexOf("--answers");
+      const source = idx >= 0 ? argv[idx + 1] : void 0;
+      return runUnattended({ source }).then(({ code, result }) => {
+        out.write(`${RESULT_PREFIX}${JSON.stringify(result)}
+`);
+        process.exitCode = code;
+      }).catch((err) => {
+        out.write(
+          `${RESULT_PREFIX}${JSON.stringify({ ok: false, phase: "error", error: err.message })}
+`
+        );
+        process.exitCode = EXIT_ERROR;
+      });
+    }
+    module2.exports = {
+      RESULT_PREFIX,
+      EXIT_OK,
+      EXIT_ERROR,
+      EXIT_REJECTED,
+      AnswersError,
+      readAnswers,
+      normalizeAnswers,
+      validationProblems,
+      runUnattended,
+      runUnattendedCli
+    };
+  }
+});
+
 // installer/setup.js
 var require_setup = __commonJS({
   "installer/setup.js"(exports2, module2) {
@@ -78620,6 +78865,9 @@ var require_setup = __commonJS({
       }
     }
     function run(argv = process.argv.slice(2)) {
+      if (argv.includes("--answers")) {
+        return require_unattended().runUnattendedCli(argv);
+      }
       if (!argv.includes("--cli") && !argv.includes("--consola")) {
         const { startGui } = require_gui();
         return startGui({ open: !argv.includes("--no-open") }).catch((err) => {

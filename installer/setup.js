@@ -1603,9 +1603,15 @@ async function main() {
 
 /**
  * Arranque. Por defecto abre el formulario en el navegador; --cli fuerza el
- * asistente de terminal, que es lo unico que funciona por RDP sin navegador.
+ * asistente de terminal, que es lo unico que funciona por RDP sin navegador; y
+ * --answers <fichero|-> configura sin preguntar nada (installer/unattended.js).
  */
 function run(argv = process.argv.slice(2)) {
+  // Modo desatendido: las respuestas llegan en JSON y no se pregunta nada. Va antes que
+  // la GUI porque es una llamada de otra herramienta, no de una persona.
+  if (argv.includes("--answers")) {
+    return require("./unattended").runUnattendedCli(argv);
+  }
   if (!argv.includes("--cli") && !argv.includes("--consola")) {
     // Requerido aqui y no arriba: gui.js importa de este modulo, y hacerlo en la
     // cabecera crearia un ciclo con los exports a medio definir.

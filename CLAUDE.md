@@ -109,6 +109,17 @@ or a folder opted into with `--allow-sql-dir` (`MSSQL_SQL_DIRS`). `USE` is rejec
 timeout defaults to 90 s (not the 30 s pool-wide `requestTimeout`), because a deployment script is
 one transaction over many batches.
 
+### Unattended installer (`installer/unattended.js`)
+
+`ahora-setup --answers <file|->` configures a project with no prompts, from a JSON whose shape is
+exactly what the browser form posts to `/api/write`; it calls `gui.validate` then `gui.write`, so
+there is no third copy of the logic. Used by the DevOps Ahora VS Code extension (answers on stdin
+— a password never goes on a command line). Rules: nothing is written if any connection fails to
+resolve, or fails to connect unless `allowUnreachable`; `profileKey` has **no default** (a
+production database must not become "local" by omission) and writes on `produccion` are rejected,
+not silently dropped; the result is one stdout line prefixed `AHORA_SETUP_RESULT ` (npx and the
+runtime install can print before it); exit 0 written / 2 rejected with nothing written / 1 error.
+
 `src/secrets.js` encrypts the credentials file at rest: DPAPI (CurrentUser, via PowerShell) on
 Windows, AES-256-GCM with a `0600` key file elsewhere. Decryption happens in the server on first
 connect, in one batch (each DPAPI call costs a PowerShell start, ~0.5 s).
