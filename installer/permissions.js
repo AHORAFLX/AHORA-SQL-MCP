@@ -160,24 +160,18 @@ function playwrightActionRules(serverName = PLAYWRIGHT_SERVER_NAME) {
 }
 
 /**
- * Raiz del repositorio git que contiene `dir`, o `dir` si no esta en uno.
+ * `settings.local.json` de la carpeta del proyecto: la MISMA en la que se escribe el
+ * `.mcp.json`, aunque este dentro de un repositorio mas grande.
  *
- * Importa: Claude Code carga `.claude/settings.local.json` desde la RAIZ del
- * repositorio, aunque la sesion arranque en un subdirectorio. Escribirlo en el
- * subdirectorio dejaria un fichero que nadie lee.
+ * Importa: Claude Code carga `.claude/settings.local.json` de la carpeta en la que
+ * arranca la sesion, no de la raiz del repositorio git (verificado con 2.1.311: una
+ * regla en la raiz del repo no autoriza nada a una sesion que arranca en
+ * `clientes/FERRAMOL`, la misma regla en `clientes/FERRAMOL/.claude` si). Hasta 1.16.0
+ * se subia hasta el `.git`, y con varias carpetas de cliente versionadas en un repo las
+ * reglas acababan en la raiz, donde nadie las lee.
  */
-function gitRootOf(dir) {
-  let current = path.resolve(dir);
-  while (true) {
-    if (fs.existsSync(path.join(current, ".git"))) return current;
-    const parent = path.dirname(current);
-    if (parent === current) return path.resolve(dir);
-    current = parent;
-  }
-}
-
 function permissionsPath(projectDir) {
-  return path.join(gitRootOf(projectDir), ".claude", "settings.local.json");
+  return path.join(path.resolve(projectDir), ".claude", "settings.local.json");
 }
 
 /**
@@ -251,7 +245,6 @@ function allowMcpTools(
 module.exports = {
   allowMcpTools,
   permissionsPath,
-  gitRootOf,
   readRules,
   writeRules,
   productReadRules,

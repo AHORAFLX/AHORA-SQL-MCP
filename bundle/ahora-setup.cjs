@@ -74800,17 +74800,8 @@ var require_permissions = __commonJS({
         `mcp__${serverName}__browser_handle_dialog`
       ];
     }
-    function gitRootOf(dir) {
-      let current = path2.resolve(dir);
-      while (true) {
-        if (fs6.existsSync(path2.join(current, ".git"))) return current;
-        const parent = path2.dirname(current);
-        if (parent === current) return path2.resolve(dir);
-        current = parent;
-      }
-    }
     function permissionsPath(projectDir) {
-      return path2.join(gitRootOf(projectDir), ".claude", "settings.local.json");
+      return path2.join(path2.resolve(projectDir), ".claude", "settings.local.json");
     }
     function allowMcpTools(projectDir, {
       includeWrites = false,
@@ -74858,7 +74849,6 @@ var require_permissions = __commonJS({
     module2.exports = {
       allowMcpTools,
       permissionsPath,
-      gitRootOf,
       readRules,
       writeRules,
       productReadRules,

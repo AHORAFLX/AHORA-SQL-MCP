@@ -7,10 +7,10 @@ const path = require("node:path");
 const {
   allowMcpTools,
   permissionsPath,
-  gitRootOf,
   readRules,
   writeRules,
 } = require("../installer/permissions");
+const { readPermissions } = require("../installer/existing");
 
 function tempDir() {
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "perms-")));
@@ -149,22 +149,22 @@ test("un settings.local.json ilegible se respalda antes de reescribirlo", () => 
   assert.ok(read(target).permissions.allow.length > 0);
 });
 
-test("el fichero se escribe en la RAIZ del repositorio, no en el subdirectorio", () => {
-  // Claude Code carga .claude/settings.local.json desde la raiz del repo aunque la
-  // sesion arranque mas abajo: escribirlo en el subdirectorio no lo leeria nadie.
+test("dentro de un repositorio, el fichero va en la carpeta del proyecto, no en la raiz", () => {
+  // Carpetas de cliente versionadas en un repo (trove/clientes/FERRAMOL): Claude Code
+  // carga .claude/settings.local.json de la carpeta donde arranca, no de la raiz del
+  // repo, asi que las reglas tienen que ir junto al .mcp.json.
   const repo = tempDir();
   fs.mkdirSync(path.join(repo, ".git"));
-  const sub = path.join(repo, "src", "modulo");
-  fs.mkdirSync(sub, { recursive: true });
+  const cliente = path.join(repo, "clientes", "FERRAMOL");
+  fs.mkdirSync(cliente, { recursive: true });
 
-  assert.equal(gitRootOf(sub), repo);
-  const { target } = allowMcpTools(sub);
-  assert.equal(target, path.join(repo, ".claude", "settings.local.json"));
-  assert.ok(!fs.existsSync(path.join(sub, ".claude", "settings.local.json")));
+  const { target } = allowMcpTools(cliente);
+  assert.equal(target, path.join(cliente, ".claude", "settings.local.json"));
+  assert.ok(!fs.existsSync(path.join(repo, ".claude", "settings.local.json")), "la raiz no se toca");
+  assert.ok(readPermissions(cliente).read, "y se relee de la misma carpeta");
 });
 
 test("fuera de un repositorio git, el fichero va en la propia carpeta", () => {
   const root = tempDir();
-  assert.equal(gitRootOf(root), root);
   assert.equal(permissionsPath(root), path.join(root, ".claude", "settings.local.json"));
 });
