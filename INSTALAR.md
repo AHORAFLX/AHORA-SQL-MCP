@@ -105,6 +105,18 @@ interesa conservar.
   También acepta `configFile` + `connections: [{ "name", "alias" }]` (+ `environment`) en lugar de
   `manualConnections`, y las mismas casillas que el formulario (`allowRules`, `allowWriteRules`,
   `allowProductWriteRules`, `allowPlaywrightActionRules`, `sqlDirs`, `productConnection`).
+- `--update [--scan <carpeta>]... [--dry-run]` → **actualizar sin tocar la configuración de
+  ningún proyecto**. Los `.mcp.json` apuntan a la instalación de `%LOCALAPPDATA%\AHORA-SQL-MCP`, una
+  ruta que no lleva versión, así que basta con actualizar una vez para que todos los proyectos
+  usen la nueva. Este modo hace eso, actualiza el MCP de producto si ya lo tenías, y repara el
+  arranque de los proyectos que se hayan quedado con uno antiguo (`bin/*.js` o `npx …#vX.Y.Z`)
+  sin cambiar sus conexiones ni sus opciones. Busca los proyectos en los que ha escrito el
+  instalador, en los que conoce Claude Code y en las carpetas de `--scan`. Es lo que lanza el
+  botón "Actualizar" de la extensión DevOps Ahora. Desde terminal:
+
+  ```bash
+  npx --yes --package=github:AHORAFLX/AHORA-SQL-MCP#v<versión> ahora-setup --update --scan C:/gitcode
+  ```
 
 Quien te esté formando puede darte en su lugar un `INSTALAR-AHORA.cmd` (doble clic) o un
 `ahora-setup.exe`; hacen exactamente esto mismo.

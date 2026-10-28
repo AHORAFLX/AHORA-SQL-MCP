@@ -46,6 +46,7 @@ const {
 } = require("./server-name");
 const { installRuntime } = require("./runtime");
 const { readExisting, revealStoredPassword, samePath } = require("./existing");
+const { registerProject } = require("./update");
 const { toolVersion } = require("./tools");
 const {
   PRODUCT_PACKAGE,
@@ -521,6 +522,8 @@ function writeClientConfig(client, root, { command, args }) {
   servers[SERVER_NAME] = { command, args };
 
   fs.writeFileSync(target, `${JSON.stringify(doc, null, 2)}\n`, "utf8");
+  // Para que `ahora-setup --update` encuentre este proyecto sin volver a preguntarlo.
+  registerProject(root);
   return {
     target,
     replaced,
@@ -1604,13 +1607,19 @@ async function main() {
 /**
  * Arranque. Por defecto abre el formulario en el navegador; --cli fuerza el
  * asistente de terminal, que es lo unico que funciona por RDP sin navegador; y
- * --answers <fichero|-> configura sin preguntar nada (installer/unattended.js).
+ * --answers <fichero|-> configura sin preguntar nada (installer/unattended.js); y
+ * --update actualiza el servidor y el lanzador de todos los proyectos (installer/update.js).
  */
 function run(argv = process.argv.slice(2)) {
   // Modo desatendido: las respuestas llegan en JSON y no se pregunta nada. Va antes que
   // la GUI porque es una llamada de otra herramienta, no de una persona.
   if (argv.includes("--answers")) {
     return require("./unattended").runUnattendedCli(argv);
+  }
+  // Actualizar sin formulario: el servidor una vez y el lanzador de todos los proyectos
+  // configurados (installer/update.js). Tampoco pregunta nada.
+  if (argv.includes("--update")) {
+    return require("./update").runUpdateCli(argv, { spec: PKG_SPEC, version: PKG_VERSION });
   }
   if (!argv.includes("--cli") && !argv.includes("--consola")) {
     // Requerido aqui y no arriba: gui.js importa de este modulo, y hacerlo en la

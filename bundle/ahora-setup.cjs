@@ -75716,6 +75716,374 @@ internal static class Host
   }
 });
 
+// installer/update.js
+var require_update = __commonJS({
+  "installer/update.js"(exports2, module2) {
+    var fs6 = require("fs");
+    var os2 = require("os");
+    var path2 = require("path");
+    var {
+      runtimeDir,
+      entryPath,
+      installedVersion,
+      installRuntime
+    } = require_runtime();
+    var {
+      SERVER_NAME,
+      LEGACY_SERVER_NAME,
+      PRODUCT_SERVER_NAME,
+      isOurServerEntry,
+      isOurProductEntry
+    } = require_server_name();
+    var RESULT_PREFIX = "AHORA_SETUP_RESULT ";
+    var EXIT_OK = 0;
+    var EXIT_ERROR = 1;
+    var CLIENT_FILES = [
+      { key: "mcpServers", file: (root) => path2.join(root, ".mcp.json") },
+      { key: "servers", file: (root) => path2.join(root, ".vscode", "mcp.json") }
+    ];
+    var NO_RECORRER = /* @__PURE__ */ new Set([
+      "node_modules",
+      ".git",
+      "bin",
+      "obj",
+      "dist",
+      "packages"
+    ]);
+    function norm(p) {
+      return path2.resolve(String(p)).replace(/\\/g, "/").toLowerCase();
+    }
+    function stripBom(text) {
+      return text.charCodeAt(0) === 65279 ? text.slice(1) : text;
+    }
+    function registryPath(dir = runtimeDir()) {
+      return path2.join(dir, "projects.json");
+    }
+    function readRegistry(dir = runtimeDir()) {
+      try {
+        const json = JSON.parse(
+          stripBom(fs6.readFileSync(registryPath(dir), "utf8"))
+        );
+        return Array.isArray(json.projects) ? json.projects.map(String) : [];
+      } catch {
+        return [];
+      }
+    }
+    function registerProject(root, dir = runtimeDir(), { tmp = os2.tmpdir() } = {}) {
+      try {
+        if (`${norm(root)}/`.startsWith(`${norm(tmp)}/`)) return;
+        const actuales = readRegistry(dir);
+        if (actuales.some((p) => norm(p) === norm(root))) return;
+        fs6.mkdirSync(dir, { recursive: true });
+        const projects = [...actuales, path2.resolve(root)];
+        fs6.writeFileSync(
+          registryPath(dir),
+          `${JSON.stringify({ projects }, null, 2)}
+`,
+          "utf8"
+        );
+      } catch {
+      }
+    }
+    function claudeProjects(home = os2.homedir()) {
+      try {
+        const json = JSON.parse(
+          stripBom(fs6.readFileSync(path2.join(home, ".claude.json"), "utf8"))
+        );
+        return Object.keys(json && json.projects || {});
+      } catch {
+        return [];
+      }
+    }
+    function scanForProjects(root, depth = 4) {
+      const out = [];
+      const visitar = (dir, nivel) => {
+        if (CLIENT_FILES.some((c) => fs6.existsSync(c.file(dir)))) out.push(dir);
+        if (nivel >= depth) return;
+        let hijos;
+        try {
+          hijos = fs6.readdirSync(dir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const h of hijos) {
+          if (!h.isDirectory() || NO_RECORRER.has(h.name.toLowerCase())) continue;
+          if (h.name.startsWith(".") && h.name !== ".vscode") continue;
+          visitar(path2.join(dir, h.name), nivel + 1);
+        }
+      };
+      visitar(path2.resolve(root), 0);
+      return out;
+    }
+    function collectProjects({
+      scan = [],
+      runtime = runtimeDir(),
+      home = os2.homedir()
+    } = {}) {
+      const vistos = /* @__PURE__ */ new Map();
+      const add = (p) => {
+        if (!p) return;
+        const k = norm(p);
+        if (vistos.has(k)) return;
+        try {
+          if (!fs6.statSync(p).isDirectory()) return;
+        } catch {
+          return;
+        }
+        vistos.set(k, path2.resolve(p));
+      };
+      readRegistry(runtime).forEach(add);
+      claudeProjects(home).forEach(add);
+      for (const root of scan) scanForProjects(root).forEach(add);
+      return [...vistos.values()];
+    }
+    function splitLauncher(entry, bin, runtime) {
+      const args = Array.isArray(entry.args) ? entry.args.map(String) : [];
+      const command = String(entry.command || "");
+      if (/^npx(\.cmd)?$/i.test(command)) {
+        const idx = args.indexOf(bin);
+        const spec = args.find((a) => a.startsWith("--package="));
+        if (idx === -1 || !spec || !spec.includes("AHORA-SQL-MCP")) return null;
+        return { flags: args.slice(idx + 1), form: "npx" };
+      }
+      if (/^node(\.exe)?$/i.test(command) && args.length > 0) {
+        const script = args[0].replace(/\\/g, "/");
+        if (!script.toLowerCase().startsWith(`${norm(runtime)}/`)) return null;
+        if (!path2.posix.basename(script).startsWith(bin)) return null;
+        return { flags: args.slice(1), form: "node" };
+      }
+      return null;
+    }
+    function productEntryPath(runtime) {
+      return path2.join(path2.dirname(entryPath(runtime)), "start-ahora-mcp.cjs");
+    }
+    function repairClientFile(file, clientKey, { runtime = runtimeDir(), dryRun = false } = {}) {
+      if (!fs6.existsSync(file)) return null;
+      let doc;
+      try {
+        doc = JSON.parse(stripBom(fs6.readFileSync(file, "utf8")));
+      } catch (err) {
+        return { file, error: `JSON no valido: ${err.message}`, changes: [] };
+      }
+      const servers = doc && typeof doc === "object" ? doc[clientKey] : null;
+      if (!servers || typeof servers !== "object") return null;
+      const changes = [];
+      const sqlEntry = entryPath(runtime).replace(/\\/g, "/");
+      const productEntry = productEntryPath(runtime).replace(/\\/g, "/");
+      const reparar = (name, bin, target) => {
+        const entry = servers[name];
+        if (!entry || typeof entry !== "object") return;
+        const split = splitLauncher(entry, bin, runtime);
+        if (!split) return;
+        const next = { ...entry, command: "node", args: [target, ...split.flags] };
+        const igual = entry.command === next.command && JSON.stringify(entry.args) === JSON.stringify(next.args);
+        if (igual) return;
+        servers[name] = next;
+        changes.push({
+          server: name,
+          from: split.form,
+          before: (entry.args || [])[0]
+        });
+      };
+      if (servers[LEGACY_SERVER_NAME] && !servers[SERVER_NAME] && isOurServerEntry(servers[LEGACY_SERVER_NAME])) {
+        servers[SERVER_NAME] = servers[LEGACY_SERVER_NAME];
+        delete servers[LEGACY_SERVER_NAME];
+        changes.push({ server: SERVER_NAME, from: `nombre ${LEGACY_SERVER_NAME}` });
+      }
+      if (isOurServerEntry(servers[SERVER_NAME])) {
+        reparar(SERVER_NAME, "start-mssql-mcp", sqlEntry);
+      }
+      if (isOurProductEntry(servers[PRODUCT_SERVER_NAME])) {
+        reparar(PRODUCT_SERVER_NAME, "start-ahora-mcp", productEntry);
+      }
+      if (changes.length > 0 && !dryRun) {
+        fs6.writeFileSync(file, `${JSON.stringify(doc, null, 2)}
+`, "utf8");
+      }
+      return { file, changes };
+    }
+    function repairProject(root, options = {}) {
+      const files = [];
+      let configured = false;
+      for (const client of CLIENT_FILES) {
+        const file = client.file(root);
+        const r = repairClientFile(file, client.key, options);
+        if (!r) continue;
+        configured = configured || r.error !== void 0 || hasOurEntry(file, client.key);
+        if (r.error || r.changes.length > 0) files.push(r);
+      }
+      return { root, configured, files };
+    }
+    function hasOurEntry(file, clientKey) {
+      try {
+        const doc = JSON.parse(stripBom(fs6.readFileSync(file, "utf8")));
+        const servers = doc && doc[clientKey] || {};
+        return isOurServerEntry(servers[SERVER_NAME]) || isOurProductEntry(servers[PRODUCT_SERVER_NAME]);
+      } catch {
+        return false;
+      }
+    }
+    async function updateProduct({ pm = require_product_mcp() } = {}) {
+      const dir = pm.productRuntimeDir();
+      const installed = pm.installedProductVersion(dir);
+      if (!installed) return { skipped: "no instalado" };
+      let latest;
+      try {
+        latest = await pm.latestProductVersion();
+      } catch (err) {
+        return {
+          installed,
+          error: `no se ha podido consultar la ultima version: ${err.message}`
+        };
+      }
+      if (!latest || pm.compareVersions(latest, installed) <= 0) {
+        return { installed, latest, upToDate: true };
+      }
+      try {
+        pm.installProductMcp({ version: latest, dir });
+        return { installed, latest, updated: true };
+      } catch (err) {
+        return {
+          installed,
+          latest,
+          error: err.message.split("\n")[0],
+          advice: pm.productFailureAdvice(err)
+        };
+      }
+    }
+    async function runUpdate({
+      spec,
+      version,
+      scan = [],
+      dryRun = false,
+      runtime = runtimeDir(),
+      home = os2.homedir(),
+      install = installRuntime,
+      product = updateProduct,
+      log = () => {
+      }
+    } = {}) {
+      const before = installedVersion(runtime);
+      let runtimeResult;
+      if (dryRun) {
+        runtimeResult = { before, skipped: "dry-run" };
+      } else {
+        try {
+          const r = install({ spec, version, dir: runtime });
+          runtimeResult = {
+            before,
+            after: installedVersion(runtime),
+            reused: r.reused,
+            keptNewer: r.keptNewer
+          };
+        } catch (err) {
+          return {
+            code: EXIT_ERROR,
+            result: {
+              ok: false,
+              phase: "runtime",
+              before,
+              error: err.message.split("\n")[0]
+            }
+          };
+        }
+      }
+      log(runtimeResult);
+      const productResult = dryRun ? { skipped: "dry-run" } : await product();
+      const projects = collectProjects({ scan, runtime, home }).map((root) => repairProject(root, { runtime, dryRun })).filter((p) => p.configured);
+      return {
+        code: EXIT_OK,
+        result: {
+          ok: true,
+          phase: "update",
+          dryRun,
+          runtime: runtimeResult,
+          product: productResult,
+          projects: projects.map((p) => ({
+            root: p.root,
+            repaired: p.files.flatMap(
+              (f) => f.changes.map((c) => ({ file: f.file, ...c }))
+            ),
+            errors: p.files.filter((f) => f.error).map((f) => ({ file: f.file, error: f.error }))
+          }))
+        }
+      };
+    }
+    function printSummary(result, out) {
+      const w = (s = "") => out.write(`${s}
+`);
+      const rt = result.runtime || {};
+      if (rt.skipped)
+        w(`Servidor de SQL: v${rt.before || "?"} (sin cambios: ${rt.skipped})`);
+      else if (rt.keptNewer)
+        w(
+          `Servidor de SQL: se mantiene v${rt.keptNewer}, mas nueva que este instalador.`
+        );
+      else if (rt.reused) w(`Servidor de SQL: ya estaba en v${rt.after}.`);
+      else w(`Servidor de SQL: v${rt.before || "(no instalado)"} -> v${rt.after}.`);
+      const p = result.product || {};
+      if (p.updated) w(`MCP de producto: v${p.installed} -> v${p.latest}.`);
+      else if (p.upToDate) w(`MCP de producto: al dia (v${p.installed}).`);
+      else if (p.error)
+        w(`MCP de producto: NO actualizado (${p.error}). ${p.advice || ""}`.trim());
+      const reparados = result.projects.filter((x) => x.repaired.length > 0);
+      w(`Proyectos configurados encontrados: ${result.projects.length}.`);
+      if (reparados.length === 0) {
+        w(
+          "Ninguno necesitaba cambios: todos apuntan a la instalacion, que ya esta actualizada."
+        );
+      }
+      for (const proj of reparados) {
+        w(`  ${result.dryRun ? "(se repararia)" : "reparado"}  ${proj.root}`);
+        for (const r of proj.repaired)
+          w(`      ${r.server}: lanzador ${r.from} -> instalado`);
+      }
+      for (const proj of result.projects.filter((x) => x.errors.length > 0)) {
+        for (const e of proj.errors) w(`  ! ${e.file}: ${e.error}`);
+      }
+      w(
+        "Reinicia las sesiones de Claude abiertas para que carguen la version nueva."
+      );
+    }
+    function runUpdateCli(argv, { spec, version, out = process.stdout } = {}) {
+      const scan = [];
+      argv.forEach((a, i) => {
+        if (a === "--scan" && argv[i + 1]) scan.push(argv[i + 1]);
+      });
+      return runUpdate({ spec, version, scan, dryRun: argv.includes("--dry-run") }).then(({ code, result }) => {
+        if (result.ok) printSummary(result, out);
+        else
+          out.write(`No se ha podido actualizar el servidor: ${result.error}
+`);
+        out.write(`${RESULT_PREFIX}${JSON.stringify(result)}
+`);
+        process.exitCode = code;
+      }).catch((err) => {
+        out.write(
+          `${RESULT_PREFIX}${JSON.stringify({ ok: false, phase: "error", error: err.message })}
+`
+        );
+        process.exitCode = EXIT_ERROR;
+      });
+    }
+    module2.exports = {
+      RESULT_PREFIX,
+      registryPath,
+      readRegistry,
+      registerProject,
+      claudeProjects,
+      scanForProjects,
+      collectProjects,
+      splitLauncher,
+      repairClientFile,
+      repairProject,
+      updateProduct,
+      runUpdate,
+      runUpdateCli
+    };
+  }
+});
+
 // installer/playwright-mcp.js
 var require_playwright_mcp = __commonJS({
   "installer/playwright-mcp.js"(exports2, module2) {
@@ -77737,6 +78105,7 @@ var require_setup = __commonJS({
     } = require_server_name();
     var { installRuntime } = require_runtime();
     var { readExisting, revealStoredPassword, samePath } = require_existing();
+    var { registerProject } = require_update();
     var { toolVersion } = require_tools();
     var {
       PRODUCT_PACKAGE,
@@ -78075,6 +78444,7 @@ var require_setup = __commonJS({
       servers[SERVER_NAME] = { command, args };
       fs6.writeFileSync(target, `${JSON.stringify(doc, null, 2)}
 `, "utf8");
+      registerProject(root);
       return {
         target,
         replaced,
@@ -78857,6 +79227,9 @@ var require_setup = __commonJS({
     function run(argv = process.argv.slice(2)) {
       if (argv.includes("--answers")) {
         return require_unattended().runUnattendedCli(argv);
+      }
+      if (argv.includes("--update")) {
+        return require_update().runUpdateCli(argv, { spec: PKG_SPEC, version: PKG_VERSION });
       }
       if (!argv.includes("--cli") && !argv.includes("--consola")) {
         const { startGui } = require_gui();
